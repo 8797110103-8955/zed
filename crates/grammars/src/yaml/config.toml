@@ -21,5 +21,4 @@ auto_indent_using_last_non_empty_line = false
 #   - first: one
 # ```
 increase_indent_pattern = "(:?^[^#]*:\\s*[|>]?\\s*$)|(:?^\\s*-[^#]*:\\s*(:?#+.*)$)"
-prettier_parser_name = "yaml"
 tab_size = 2

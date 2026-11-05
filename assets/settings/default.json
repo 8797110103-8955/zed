@@ -1653,8 +1653,7 @@
   "format_on_save": "off",
   // How to perform a buffer format. This setting can take multiple values:
   //
-  // 1. Default. Format files using Zed's Prettier integration (if applicable),
-  //    or falling back to formatting via language server:
+  // 1. Default. Format files using the current language server:
   //     "formatter": "auto"
   // 2. Format code using the current language server:
   //     "formatter": "language_server"
@@ -1663,16 +1662,14 @@
   // 4. Format code using an external command:
   //     "formatter": {
   //       "external": {
-  //         "command": "prettier",
-  //         "arguments": ["--stdin-filepath", "{buffer_path}"]
+  //         "command": "rustfmt",
+  //         "arguments": ["--emit", "stdout"]
   //       }
   //     }
-  // 5. Format code using Zed's Prettier integration:
-  //     "formatter": "prettier"
-  // 6. Format code using a code action
+  // 5. Format code using a code action
   //     "formatter": {"code_action": "source.fixAll.eslint"}
-  // 7. An array of any format step specified above to apply in order
-  //     "formatter": [{"code_action": "source.fixAll.eslint"}, "prettier"]
+  // 6. An array of any format step specified above to apply in order
+  //     "formatter": [{"code_action": "source.fixAll.eslint"}, "language_server"]
   "formatter": "auto",
   // How to soft-wrap long lines of text.
   // Possible values:
@@ -2438,39 +2435,41 @@
   },
   // Different settings for specific languages.
   "languages": {
+    // [FORK] Upstream per-language `prettier` settings are kept below as comments for
+    // [FORK] reference only. Prettier integration is removed from this build.
     "Astro": {
       "format_on_save": "on",
       "language_servers": ["astro-language-server", "..."],
-      "prettier": {
-        "allowed": true,
-        "plugins": ["prettier-plugin-astro"],
-      },
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["prettier-plugin-astro"],
+      // },
     },
-    "Blade": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "Blade": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "C": {
       "use_on_type_format": false,
-      "prettier": {
-        "allowed": false,
-      },
+      // "prettier": {
+        // "allowed": false,
+      // },
     },
     "C++": {
       "use_on_type_format": false,
-      "prettier": {
-        "allowed": false,
-      },
+      // "prettier": {
+        // "allowed": false,
+      // },
     },
     "CSharp": {
       "language_servers": ["roslyn", "!csharp-ls", "!omnisharp", "..."],
     },
-    "CSS": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "CSS": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "Dart": {
       "format_on_save": "on",
       "tab_size": 2,
@@ -2510,44 +2509,44 @@
     },
     "GraphQL": {
       "format_on_save": "on",
-      "prettier": {
-        "allowed": true,
-      },
+      // "prettier": {
+        // "allowed": true,
+      // },
     },
     "HEEx": {
       "format_on_save": "on",
       "language_servers": ["elixir-ls", "!expert", "!dexter", "!next-ls", "!lexical", "..."],
     },
-    "HTML": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "HTML": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "HTML+ERB": {
       "language_servers": ["herb", "!ruby-lsp", "..."],
     },
-    "Java": {
-      "prettier": {
-        "allowed": true,
-        "plugins": ["prettier-plugin-java"],
-      },
-    },
+    // "Java": {
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["prettier-plugin-java"],
+      // },
+    // },
     "JavaScript": {
-      "language_servers": ["!typescript-language-server", "vtsls", "..."],
-      "prettier": {
-        "allowed": true,
-      },
+      "language_servers": ["typescript-ls", "..."],
+      // "prettier": {
+        // "allowed": true,
+      // },
     },
-    "JSON": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
-    "JSONC": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "JSON": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
+    // "JSONC": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "JS+ERB": {
       "language_servers": ["!ruby-lsp", "..."],
     },
@@ -2558,10 +2557,10 @@
     "LaTeX": {
       "formatter": "language_server",
       "language_servers": ["texlab", "..."],
-      "prettier": {
-        "allowed": true,
-        "plugins": ["prettier-plugin-latex"],
-      },
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["prettier-plugin-latex"],
+      // },
     },
     "Markdown": {
       "use_on_type_format": false,
@@ -2571,17 +2570,17 @@
       "completions": {
         "words": "disabled",
       },
-      "prettier": {
-        "allowed": true,
-      },
+      // "prettier": {
+        // "allowed": true,
+      // },
     },
     "PHP": {
       "language_servers": ["phpactor", "!intelephense", "!phptools", "!phpantom", "..."],
-      "prettier": {
-        "allowed": true,
-        "plugins": ["@prettier/plugin-php"],
-        "parser": "php",
-      },
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["@prettier/plugin-php"],
+        // "parser": "php",
+      // },
     },
     "Plain Text": {
       "allow_rewrap": "anywhere",
@@ -2621,38 +2620,39 @@
       "format_on_save": "on",
       "debuggers": ["CodeLLDB"],
     },
-    "SCSS": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "SCSS": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "Starlark": {
       "format_on_save": "on",
       "language_servers": ["starpls", "!buck2-lsp", "!tilt", "..."],
     },
-    "Svelte": {
-      "language_servers": ["svelte-language-server", "..."],
-      "prettier": {
-        "allowed": true,
-        "plugins": ["prettier-plugin-svelte"],
-      },
-    },
+    // Svelte's language server relies on a tsserver plugin, which TypeScript 7 cannot load.
+    // "Svelte": {
+      // "language_servers": ["svelte-language-server", "..."],
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["prettier-plugin-svelte"],
+      // },
+    // },
     "TSX": {
-      "language_servers": ["!typescript-language-server", "vtsls", "..."],
-      "prettier": {
-        "allowed": true,
-      },
+      "language_servers": ["typescript-ls", "..."],
+      // "prettier": {
+        // "allowed": true,
+      // },
     },
-    "Twig": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // "Twig": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "TypeScript": {
-      "language_servers": ["!typescript-language-server", "vtsls", "..."],
-      "prettier": {
-        "allowed": true,
-      },
+      "language_servers": ["typescript-ls", "..."],
+      // "prettier": {
+        // "allowed": true,
+      // },
     },
     "Typst": {
       "allow_rewrap": "anywhere",
@@ -2661,23 +2661,24 @@
       "language_servers": ["slang", "!verible", "!veridian", "!svls", "..."],
       "use_on_type_format": false,
     },
-    "Vue.js": {
-      "language_servers": ["vue-language-server", "vtsls", "..."],
-      "prettier": {
-        "allowed": true,
-      },
-    },
-    "XML": {
-      "prettier": {
-        "allowed": true,
-        "plugins": ["@prettier/plugin-xml"],
-      },
-    },
-    "YAML": {
-      "prettier": {
-        "allowed": true,
-      },
-    },
+    // Vue's language server relies on a tsserver plugin, which TypeScript 7 cannot load.
+    // "Vue.js": {
+      // "language_servers": ["vue-language-server", "..."],
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
+    // "XML": {
+      // "prettier": {
+        // "allowed": true,
+        // "plugins": ["@prettier/plugin-xml"],
+      // },
+    // },
+    // "YAML": {
+      // "prettier": {
+        // "allowed": true,
+      // },
+    // },
     "YAML+ERB": {
       "language_servers": ["!ruby-lsp", "..."],
     },
@@ -2748,24 +2749,26 @@
     // Default: false
     "trust_all_worktrees": false,
   },
-  // Zed's Prettier integration settings.
-  // Allows to enable/disable formatting with Prettier
-  // and configure default Prettier, used when no project-level Prettier installation is found.
-  "prettier": {
-    // Enables or disables formatting with Prettier for any given language.
-    "allowed": false,
-    // Forces Prettier integration to use a specific parser name when formatting files with the language.
-    "plugins": [],
-    // Default Prettier options, in the format as in package.json section for Prettier.
-    // If project installs Prettier via its package.json, these options will be ignored.
-    // "trailingComma": "es5",
-    // "tabWidth": 4,
-    // "semi": false,
-    // "singleQuote": true
-    // Forces Prettier integration to use a specific parser name when formatting files with the language
-    // when set to a non-empty string.
-    "parser": "",
-  },
+  // [FORK] Upstream `prettier` settings, kept for reference only. Prettier integration
+  // [FORK] is removed from this build and these settings are ignored.
+  // // Zed's Prettier integration settings.
+  // // Allows to enable/disable formatting with Prettier
+  // // and configure default Prettier, used when no project-level Prettier installation is found.
+  // "prettier": {
+    // // Enables or disables formatting with Prettier for any given language.
+    // "allowed": false,
+    // // Forces Prettier integration to use a specific parser name when formatting files with the language.
+    // "plugins": [],
+    // // Default Prettier options, in the format as in package.json section for Prettier.
+    // // If project installs Prettier via its package.json, these options will be ignored.
+    // // "trailingComma": "es5",
+    // // "tabWidth": 4,
+    // // "semi": false,
+    // // "singleQuote": true
+    // // Forces Prettier integration to use a specific parser name when formatting files with the language
+    // // when set to a non-empty string.
+    // "parser": "",
+  // },
   // Settings for auto-closing of JSX tags.
   "jsx_tag_auto_close": {
     "enabled": true,

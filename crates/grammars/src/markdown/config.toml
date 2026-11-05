@@ -34,4 +34,3 @@ decrease_indent_patterns = [
   { pattern = "^\\s*\\d",    valid_after = ["list_item"] },
   { pattern = "^\\s*",    valid_after = ["list_item"] },
 ]
-prettier_parser_name = "markdown"

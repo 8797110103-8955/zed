@@ -13665,25 +13665,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
-name = "prettier"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collections",
- "fs",
- "gpui",
- "language",
- "log",
- "lsp",
- "node_runtime",
- "parking_lot",
- "paths",
- "serde",
- "serde_json",
- "util",
-]
-
-[[package]]
 name = "pretty_assertions"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13878,7 +13859,6 @@ dependencies = [
  "paths",
  "percent-encoding",
  "postage",
- "prettier",
  "pretty_assertions",
  "project",
  "rand 0.9.4",

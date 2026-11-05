@@ -54,7 +54,7 @@ pub const DEFAULT_LSP_REQUEST_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_LSP_REQUEST_TIMEOUT: Duration =
     Duration::from_secs(DEFAULT_LSP_REQUEST_TIMEOUT_SECS);
 
-/// The shutdown timeout for LSP servers (including Prettier/Copilot).
+/// The shutdown timeout for LSP servers (including Copilot).
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn workspace_folder_for_uri(uri: Uri) -> WorkspaceFolder {

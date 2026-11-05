@@ -144,18 +144,18 @@ async fn test_lsp_log_view_labels_registered_supplementary_servers(cx: &mut Test
     let (server, _fake_server) = lsp::FakeLanguageServer::new(
         server_id,
         lsp::LanguageServerBinary {
-            path: "path/to/prettier".into(),
+            path: "path/to/supplemental-formatter".into(),
             arguments: Vec::new(),
             env: None,
         },
-        "prettier".to_string(),
+        "supplemental-formatter".to_string(),
         Default::default(),
         &mut cx.to_async(),
     );
     lsp_store.update(cx, |lsp_store, cx| {
         lsp_store.register_supplementary_language_server_for_test(
             server_id,
-            LanguageServerName::new_static("prettier (default)"),
+            LanguageServerName::new_static("supplemental-formatter (default)"),
             Arc::new(server),
             cx,
         );
@@ -171,7 +171,7 @@ async fn test_lsp_log_view_labels_registered_supplementary_servers(cx: &mut Test
             view.menu_items(cx).unwrap(),
             &[LogMenuItem {
                 server_id,
-                server_name: LanguageServerName::new_static("prettier (default)"),
+                server_name: LanguageServerName::new_static("supplemental-formatter (default)"),
                 worktree_root_name: "supplementary".to_string(),
                 rpc_trace_enabled: false,
                 selected_entry: LogKind::Logs,

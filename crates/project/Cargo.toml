@@ -26,7 +26,6 @@ test-support = [
     "settings/test-support",
     "snippet_provider/test-support",
     "text/test-support",
-    "prettier/test-support",
     "worktree/test-support",
     "gpui/test-support",
     "dap/test-support",
@@ -74,7 +73,6 @@ path.workspace = true
 paths.workspace = true
 percent-encoding.workspace = true
 postage.workspace = true
-prettier.workspace = true
 rand.workspace = true
 regex.workspace = true
 release_channel.workspace = true
@@ -120,7 +118,6 @@ fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 lsp = { workspace = true, features = ["test-support"] }
-prettier = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
 project = {workspace = true, features = ["test-support"]}
 rpc = { workspace = true, features = ["test-support"] }

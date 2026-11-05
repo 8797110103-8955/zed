@@ -92,8 +92,6 @@ pub struct LanguageSettings {
     pub line_ending: LineEndingSetting,
     /// How to perform a buffer format.
     pub formatter: settings::FormatterList,
-    /// Zed's Prettier integration settings.
-    pub prettier: PrettierSettings,
     /// Whether to automatically close JSX tags.
     pub jsx_tag_auto_close: bool,
     /// Whether to use language servers to provide code intelligence.
@@ -266,26 +264,6 @@ pub struct LanguageTaskSettings {
     /// * Zed task from either of the task config file
     /// * Zed task from history (e.g. one-off task was spawned before)
     pub prefer_lsp: bool,
-}
-
-/// Allows to enable/disable formatting with Prettier
-/// and configure default Prettier, used when no project-level Prettier installation is found.
-/// Prettier formatting is disabled by default.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PrettierSettings {
-    /// Enables or disables formatting with Prettier for a given language.
-    pub allowed: bool,
-
-    /// Forces Prettier integration to use a specific parser name when formatting files with the language.
-    pub parser: Option<String>,
-
-    /// Forces Prettier integration to use specific plugins when formatting files with the language.
-    /// The default Prettier will be installed with these plugins.
-    pub plugins: HashSet<String>,
-
-    /// Default Prettier options, in the format as in package.json section for Prettier.
-    /// If project installs Prettier via its package.json, these options will be ignored.
-    pub options: HashMap<String, serde_json::Value>,
 }
 
 impl LanguageSettings {
@@ -831,7 +809,6 @@ impl settings::Settings for AllLanguageSettings {
         fn load_from_content(settings: LanguageSettingsContent) -> LanguageSettings {
             let inlay_hints = settings.inlay_hints.unwrap();
             let completions = settings.completions.unwrap();
-            let prettier = settings.prettier.unwrap();
             let indent_guides = settings.indent_guides.unwrap();
             let tasks = settings.tasks.unwrap();
             let whitespace_map = settings.whitespace_map.unwrap();
@@ -858,12 +835,6 @@ impl settings::Settings for AllLanguageSettings {
                 ensure_final_newline_on_save: settings.ensure_final_newline_on_save.unwrap(),
                 line_ending: settings.line_ending.unwrap(),
                 formatter: settings.formatter.unwrap(),
-                prettier: PrettierSettings {
-                    allowed: prettier.allowed.unwrap(),
-                    parser: prettier.parser.filter(|parser| !parser.is_empty()),
-                    plugins: prettier.plugins.unwrap_or_default(),
-                    options: prettier.options.unwrap_or_default(),
-                },
                 jsx_tag_auto_close: settings.jsx_tag_auto_close.unwrap().enabled.unwrap(),
                 enable_language_server: settings.enable_language_server.unwrap(),
                 language_servers: settings.language_servers.unwrap(),

@@ -194,16 +194,6 @@ impl HeadlessProject {
             store
         });
 
-        let prettier_store = cx.new(|cx| {
-            PrettierStore::new(
-                node_runtime.clone(),
-                fs.clone(),
-                languages.clone(),
-                worktree_store.clone(),
-                cx,
-            )
-        });
-
         let task_store = cx.new(|cx| {
             let mut task_store = TaskStore::local(
                 buffer_store.downgrade(),
@@ -232,7 +222,6 @@ impl HeadlessProject {
             let mut lsp_store = LspStore::new_local(
                 buffer_store.clone(),
                 worktree_store.clone(),
-                prettier_store.clone(),
                 toolchain_store
                     .read(cx)
                     .as_local_store()

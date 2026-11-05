@@ -1,6 +1,6 @@
 use std::{borrow::Cow, num::NonZeroU32};
 
-use collections::{HashMap, HashSet};
+use collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
@@ -634,12 +634,6 @@ pub struct LanguageSettingsContent {
     ///
     /// Default: auto
     pub formatter: Option<FormatterList>,
-    /// Zed's Prettier integration settings.
-    /// Allows to enable/disable formatting with Prettier
-    /// and configure default Prettier, used when no project-level Prettier installation is found.
-    ///
-    /// Default: off
-    pub prettier: Option<PrettierSettingsContent>,
     /// Whether to automatically close JSX tags.
     pub jsx_tag_auto_close: Option<JsxTagAutoCloseSettingsContent>,
     /// Whether to use language servers to provide code intelligence.
@@ -1060,28 +1054,6 @@ pub enum WordsCompletionMode {
     Disabled,
 }
 
-/// Allows to enable/disable formatting with Prettier
-/// and configure default Prettier, used when no project-level Prettier installation is found.
-/// Prettier formatting is disabled by default.
-#[with_fallible_options]
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct PrettierSettingsContent {
-    /// Enables or disables formatting with Prettier for a given language.
-    pub allowed: Option<bool>,
-
-    /// Forces Prettier integration to use a specific parser name when formatting files with the language.
-    pub parser: Option<String>,
-
-    /// Forces Prettier integration to use specific plugins when formatting files with the language.
-    /// The default Prettier will be installed with these plugins.
-    pub plugins: Option<HashSet<String>>,
-
-    /// Default Prettier options, in the format as in package.json section for Prettier.
-    /// If project installs Prettier via its package.json, these options will be ignored.
-    #[serde(flatten)]
-    pub options: Option<HashMap<String, serde_json::Value>>,
-}
-
 /// TODO: this should just be a bool
 /// Controls the behavior of formatting files when they are saved.
 #[derive(
@@ -1178,14 +1150,12 @@ impl AsRef<[Formatter]> for FormatterList {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum Formatter {
-    /// Format files using Zed's Prettier integration (if applicable),
-    /// or falling back to formatting via language server.
+    /// Format files using a language server.
     #[default]
+    #[serde(alias = "prettier")]
     Auto,
     /// Do not format code.
     None,
-    /// Format code using Zed's Prettier integration.
-    Prettier,
     /// Format code using an external command.
     External {
         /// The external program to run.
@@ -1421,7 +1391,7 @@ mod test {
             Some(FormatterList::Vec(vec![
                 Formatter::LanguageServer(LanguageServerFormatterSpecifier::Current),
                 Formatter::LanguageServer(LanguageServerFormatterSpecifier::Current),
-                Formatter::Prettier
+                Formatter::Auto
             ]))
         );
 
@@ -1433,7 +1403,7 @@ mod test {
                 Formatter::LanguageServer(LanguageServerFormatterSpecifier::Specific {
                     name: "ruff".to_string()
                 }),
-                Formatter::Prettier
+                Formatter::Auto
             ]))
         );
 
@@ -1713,27 +1683,6 @@ mod test {
                 ConfiguredLanguageServer::new("typescript-language-server"),
                 ConfiguredLanguageServer::new(REST_OF_LANGUAGE_SERVERS),
             ]
-        );
-    }
-
-    #[test]
-    fn test_prettier_options() {
-        let raw_prettier = r#"{"allowed": false, "tabWidth": 4, "semi": false}"#;
-        let result = serde_json::from_str::<PrettierSettingsContent>(raw_prettier)
-            .expect("Failed to parse prettier options");
-        assert!(
-            result
-                .options
-                .as_ref()
-                .expect("options were flattened")
-                .contains_key("semi")
-        );
-        assert!(
-            result
-                .options
-                .as_ref()
-                .expect("options were flattened")
-                .contains_key("tabWidth")
         );
     }
 }

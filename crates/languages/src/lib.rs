@@ -20,17 +20,12 @@ mod bash;
 mod c;
 mod cpp;
 mod css;
-mod eslint;
 mod go;
 mod json;
 mod package_json;
 mod python;
 mod rust;
-mod tailwind;
-mod tailwindcss;
 mod typescript;
-mod vtsls;
-mod yaml;
 
 pub(crate) use package_json::{PackageJson, PackageJsonData};
 
@@ -211,25 +206,25 @@ fn init_with_task_detection(
         },
         LanguageInfo {
             name: "tsx",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![typescript_lsp_adapter.clone()],
             context: Some(typescript_context.clone()),
             ..Default::default()
         },
         LanguageInfo {
             name: "typescript",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![typescript_lsp_adapter.clone()],
             context: Some(typescript_context.clone()),
             ..Default::default()
         },
         LanguageInfo {
             name: "javascript",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![typescript_lsp_adapter.clone()],
             context: Some(typescript_context),
             ..Default::default()
         },
         LanguageInfo {
             name: "jsdoc",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![typescript_lsp_adapter.clone()],
             ..Default::default()
         },
         LanguageInfo {
@@ -239,7 +234,7 @@ fn init_with_task_detection(
         },
         LanguageInfo {
             name: "yaml",
-            adapters: vec![yaml_lsp_adapter],
+            adapters: vec![],
             ..Default::default()
         },
         LanguageInfo {
@@ -265,65 +260,10 @@ fn init_with_task_detection(
         );
     }
 
-    // Register globally available language servers.
-    //
-    // This will allow users to add support for a built-in language server (e.g., Tailwind)
-    // for a given language via the `language_servers` setting:
-    //
-    // ```json
-    // {
-    //   "languages": {
-    //     "My Language": {
-    //       "language_servers": ["tailwindcss-language-server", "..."]
-    //     }
-    //   }
-    // }
-    // ```
     languages.register_available_lsp_adapter(
-        LanguageServerName("tailwindcss-language-server".into()),
-        tailwind_adapter.clone(),
-    );
-    languages.register_available_lsp_adapter(
-        LanguageServerName("tailwindcss-intellisense-css".into()),
-        tailwindcss_adapter,
-    );
-    languages.register_available_lsp_adapter(
-        LanguageServerName("eslint".into()),
-        eslint_adapter.clone(),
-    );
-    languages.register_available_lsp_adapter(LanguageServerName("vtsls".into()), vtsls_adapter);
-    languages.register_available_lsp_adapter(
-        LanguageServerName("typescript-language-server".into()),
+        LanguageServerName("typescript-ls".into()),
         typescript_lsp_adapter,
     );
-
-    // Register Tailwind for the existing languages that should have it by default.
-    //
-    // This can be driven by the `language_servers` setting once we have a way for
-    // extensions to provide their own default value for that setting.
-    let tailwind_languages = [
-        "Astro",
-        "CSS",
-        "ERB",
-        "HTML+ERB",
-        "HEEx",
-        "HTML",
-        "JavaScript",
-        "TypeScript",
-        "PHP",
-        "Svelte",
-        "TSX",
-        "Vue.js",
-    ];
-
-    for language in tailwind_languages {
-        languages.register_lsp_adapter(language.into(), tailwind_adapter.clone());
-    }
-
-    let eslint_languages = ["TSX", "TypeScript", "JavaScript", "Vue.js", "Svelte"];
-    for language in eslint_languages {
-        languages.register_lsp_adapter(language.into(), eslint_adapter.clone());
-    }
 
     let mut subscription = languages.subscribe();
     let mut prev_language_settings = languages.language_settings();

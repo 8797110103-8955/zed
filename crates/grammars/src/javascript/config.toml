@@ -22,7 +22,6 @@ brackets = [
 word_characters = ["$", "#"]
 tab_size = 2
 scope_opt_in_language_servers = ["tailwindcss-language-server", "emmet-language-server"]
-prettier_parser_name = "babel"
 debuggers = ["JavaScript"]
 
 [jsx_tag_auto_close]

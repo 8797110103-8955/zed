@@ -633,7 +633,6 @@ impl VsCodeSettings {
             document_symbols: None,
             linked_edits: self.read_bool("editor.linkedEditing"),
             preferred_line_length: self.read_u32("editor.wordWrapColumn"),
-            prettier: None,
             remove_trailing_whitespace_on_save: self.read_bool("editor.trimAutoWhitespace"),
             show_completion_documentation: None,
             colorize_brackets: self.read_bool("editor.bracketPairColorization.enabled"),

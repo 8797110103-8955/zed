@@ -465,12 +465,6 @@ pub fn copilot_dir() -> &'static PathBuf {
     COPILOT_DIR.get_or_init(|| data_dir().join("copilot"))
 }
 
-/// Returns the path to the default Prettier directory.
-pub fn default_prettier_dir() -> &'static PathBuf {
-    static DEFAULT_PRETTIER_DIR: OnceLock<PathBuf> = OnceLock::new();
-    DEFAULT_PRETTIER_DIR.get_or_init(|| data_dir().join("prettier"))
-}
-
 /// Returns the path to the remote server binaries directory.
 pub fn remote_servers_dir() -> &'static PathBuf {
     static REMOTE_SERVERS_DIR: OnceLock<PathBuf> = OnceLock::new();

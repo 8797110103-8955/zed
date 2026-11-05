@@ -125,10 +125,6 @@ pub struct LanguageConfig {
     /// When set, selections can be wrapped using prefix/suffix pairs on both sides.
     #[serde(default)]
     pub wrap_characters: Option<WrapCharactersConfig>,
-    /// The name of a Prettier parser that will be used for this language when no file path is available.
-    /// If there's a parser name in the language settings, that will be used instead.
-    #[serde(default)]
-    pub prettier_parser_name: Option<String>,
     /// If true, this language is only for syntax highlighting via an injection into other
     /// languages, but should not appear to the user as a distinct language.
     #[serde(default)]
@@ -191,7 +187,6 @@ impl Default for LanguageConfig {
             tab_size: None,
             soft_wrap: None,
             wrap_characters: None,
-            prettier_parser_name: None,
             hidden: false,
             jsx_tag_auto_close: None,
             completion_query_characters: Default::default(),

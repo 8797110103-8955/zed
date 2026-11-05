@@ -251,10 +251,10 @@ Most of the servers would rely on this way of configuring only.
 
 ```json [settings]
 "lsp": {
-  "tailwindcss-language-server": {
+  "typescript-ls": {
     "settings": {
-      "tailwindCSS": {
-        "emmetCompletions": true,
+      "typescript": {
+        "suggest": { "completeFunctionCalls": false },
       },
     }
   }
