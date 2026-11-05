@@ -728,6 +728,11 @@ pub struct GitSettings {
     pub worktree_directory: Option<String>,
     /// Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
     pub auto_fetch: Option<AutoFetchSettingsContent>,
+    /// Whether to remove remote-tracking branches that no longer exist on the remote when fetching.
+    /// When false, Git's own `fetch.prune` configuration decides.
+    ///
+    /// Default: true
+    pub prune_on_fetch: Option<bool>,
 }
 
 #[with_fallible_options]

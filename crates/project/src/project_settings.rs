@@ -486,6 +486,11 @@ pub struct GitSettings {
     pub worktree_directory: String,
     /// Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
     pub auto_fetch: AutoFetchSettings,
+    /// Whether to remove remote-tracking branches that no longer exist on the remote when fetching.
+    /// When false, Git's own `fetch.prune` configuration decides.
+    ///
+    /// Default: true
+    pub prune_on_fetch: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -722,6 +727,7 @@ impl Settings for ProjectSettings {
                     interval_secs: auto_fetch.interval_secs.unwrap_or(60).max(15),
                 }
             },
+            prune_on_fetch: git.prune_on_fetch.unwrap_or(true),
         };
         Self {
             context_servers: project

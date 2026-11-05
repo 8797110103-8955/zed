@@ -1,3 +1,8 @@
+mod repository_actions;
+
+use self::repository_actions::{
+    RepositoryMenuAction, repository_action_submenus, repository_branch_status, repository_input,
+};
 use git_ui_core::askpass_modal::AskPassModal;
 pub(crate) use git_ui_core::notifications::{open_output, show_error_toast};
 
@@ -91,8 +96,7 @@ use time::OffsetDateTime;
 use ui::{
     ButtonLike, Checkbox, Chip, ContextMenu, ContextMenuEntry, Divider, DocumentationSide,
     ElevationIndex, IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle,
-    ProjectEmptyState, ScrollAxes, Scrollbars, SplitButton, Tab, TintColor, Tooltip, WithScrollbar,
-    prelude::*,
+    ProjectEmptyState, ScrollAxes, Scrollbars, TintColor, Tooltip, WithScrollbar, prelude::*,
 };
 use util::paths::PathStyle;
 use util::{ResultExt, TryFutureExt, markdown::MarkdownInlineCode, maybe, rel_path::RelPath};
@@ -1216,6 +1220,9 @@ pub struct GitPanel {
     generate_commit_message_task: Option<Task<Option<()>>>,
     entries: Vec<GitListEntry>,
     collapsed_sections: HashSet<Section>,
+    repositories_collapsed: bool,
+    collapsed_repositories: HashSet<RepositoryId>,
+    changes_collapsed: bool,
     view_mode: GitPanelViewMode,
     tree_expanded_dirs: HashMap<TreeKey, bool>,
     projected_entries_by_path: HashMap<RepoPath, SmallVec<[ProjectedChangeEntry; 2]>>,
@@ -1313,7 +1320,7 @@ pub(crate) fn commit_message_editor(
     let max_lines = if in_panel { MAX_PANEL_EDITOR_LINES } else { 18 };
     let mut commit_editor = Editor::new(
         EditorMode::AutoHeight {
-            min_lines: max_lines,
+            min_lines: if in_panel { 1 } else { max_lines },
             max_lines: Some(max_lines),
         },
         buffer,
@@ -1532,6 +1539,7 @@ impl GitPanel {
                     | GitStoreEvent::RepositoryRemoved(_)
                     | GitStoreEvent::ActiveRepositoryChanged(_) => {
                         this.schedule_update(window, cx);
+                        cx.notify();
                     }
                     GitStoreEvent::GlobalConfigurationUpdated => {
                         this.git_access = None;
@@ -1543,6 +1551,13 @@ impl GitPanel {
                                 workspace.show_error(format!("{error}"), cx);
                             })
                             .ok();
+                    }
+                    GitStoreEvent::RepositoryUpdated(
+                        _,
+                        RepositoryEvent::StatusesChanged | RepositoryEvent::HeadChanged,
+                        false,
+                    ) => {
+                        cx.notify();
                     }
                     GitStoreEvent::RepositoryUpdated(_, _, _) => {}
                     GitStoreEvent::JobsUpdated
@@ -1564,6 +1579,9 @@ impl GitPanel {
                 generate_commit_message_task: None,
                 entries: Vec::new(),
                 collapsed_sections: HashSet::default(),
+                repositories_collapsed: false,
+                collapsed_repositories: HashSet::default(),
+                changes_collapsed: false,
                 view_mode: GitPanelViewMode::from_settings(cx),
                 tree_expanded_dirs: HashMap::default(),
                 projected_entries_by_path: HashMap::default(),
@@ -2626,6 +2644,11 @@ impl GitPanel {
     }
 
     fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
+        self.changes_collapsed = false;
+        self.set_active_tab(GitPanelTab::Changes, window, cx);
+        if self.commit_editor_collapsed {
+            self.toggle_commit_editor(&ToggleCommitEditor, window, cx);
+        }
         self.commit_editor.update(cx, |editor, cx| {
             window.focus(&editor.focus_handle(cx), cx);
         });
@@ -2656,8 +2679,11 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.changes_collapsed = false;
+        self.set_active_tab(GitPanelTab::Changes, window, cx);
         self.focus_handle.focus(window, cx);
         self.select_first_entry_if_none(window, cx);
+        cx.notify();
     }
 
     fn get_selected_entry(&self) -> Option<&GitListEntry> {
@@ -4761,6 +4787,264 @@ impl GitPanel {
         }));
     }
 
+    fn repository_menu_action(
+        &mut self,
+        repository: Entity<Repository>,
+        action: RepositoryMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_write_access(cx) {
+            return;
+        }
+        repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+        self.schedule_update(window, cx);
+        if matches!(
+            action,
+            RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom
+        ) {
+            self.pull_from_or_sync(
+                repository,
+                matches!(action, RepositoryMenuAction::Sync),
+                window,
+                cx,
+            );
+            return;
+        }
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                match action {
+                    RepositoryMenuAction::CreateBranch => {
+                        let input = cx.update(|window, cx| repository_input("Create Branch", &["Branch name", "Base branch or commit (optional, defaults to HEAD)"], 1, workspace, window, cx))?.await;
+                        let Some(mut values) = input else { return Ok(()); };
+                        let base = values.pop().filter(|value| !value.is_empty());
+                        let name = values.pop().context("Missing branch name")?;
+                        repository.update(cx, |repository, _| repository.create_branch(name, base)).await??;
+                    }
+                    RepositoryMenuAction::DeleteBranch => {
+                        let scan = repository.update(cx, |repository, _| repository.branches()).await??;
+                        if let Some(error) = scan.error { anyhow::bail!("{error}"); }
+                        let branches: Vec<_> = scan.branches.into_iter().filter(|branch| !branch.is_head && !branch.is_remote()).collect();
+                        let labels = branches.iter().map(|branch| branch.name().to_owned().into()).collect();
+                        let selection = cx.update(|window, cx| picker_prompt::prompt("Delete which local branch?", labels, workspace, window, cx))?.await;
+                        let Some(branch) = selection.and_then(|index| branches.get(index)) else { return Ok(()); };
+                        let name = branch.name().to_owned();
+                        let confirmation = cx.update(|window, cx| window.prompt(PromptLevel::Warning, &format!("Delete branch {name}?"), Some("Unmerged branches will be kept."), &["Delete", "Cancel"], cx))?.await?;
+                        if confirmation == 0 {
+                            repository.update(cx, |repository, _| repository.delete_branch(false, name, false)).await??;
+                        }
+                    }
+                    RepositoryMenuAction::AddRemote => {
+                        let input = cx.update(|window, cx| repository_input("Add Remote", &["Remote name (for example, origin)", "Remote URL"], 2, workspace, window, cx))?.await;
+                        let Some(mut values) = input else { return Ok(()); };
+                        let url = values.pop().context("Missing remote URL")?;
+                        let name = values.pop().context("Missing remote name")?;
+                        repository.update(cx, |repository, _| repository.create_remote(name, url)).await??;
+                    }
+                    RepositoryMenuAction::RemoveRemote => {
+                        let remotes = repository.update(cx, |repository, _| repository.get_remotes(None, false)).await??;
+                        let labels = remotes.iter().map(|remote| remote.name.clone()).collect();
+                        let selection = cx.update(|window, cx| picker_prompt::prompt("Remove which remote?", labels, workspace, window, cx))?.await;
+                        let Some(remote) = selection.and_then(|index| remotes.get(index)) else { return Ok(()); };
+                        let name = remote.name.to_string();
+                        let confirmation = cx.update(|window, cx| window.prompt(PromptLevel::Warning, &format!("Remove remote {name}?"), Some("This removes the local remote configuration and tracking references."), &["Remove", "Cancel"], cx))?.await?;
+                        if confirmation == 0 {
+                            repository.update(cx, |repository, _| repository.remove_remote(name)).await??;
+                        }
+                    }
+                    RepositoryMenuAction::DropStash | RepositoryMenuAction::ClearStashes => {
+                        let stash = repository.read_with(cx, |repository, _| repository.cached_stash());
+                        let mut entries = stash.entries.to_vec();
+                        if matches!(action, RepositoryMenuAction::DropStash) {
+                            let labels = entries.iter().map(|entry| format!("stash@{{{}}}: {}", entry.index, entry.message).into()).collect();
+                            let selection = cx.update(|window, cx| picker_prompt::prompt("Drop which stash?", labels, workspace, window, cx))?.await;
+                            let Some(entry) = selection.and_then(|index| entries.get(index)).cloned() else { return Ok(()); };
+                            entries = vec![entry];
+                        }
+                        if entries.is_empty() { return Ok(()); }
+                        let message = if entries.len() == 1 { format!("Permanently drop stash: {}?", entries.first().context("Missing stash")?.message) } else { format!("Permanently drop all {} stashes?", entries.len()) };
+                        let confirmation = cx.update(|window, cx| window.prompt(PromptLevel::Warning, &message, Some("The stored changes will be deleted."), &["Drop", "Cancel"], cx))?.await?;
+                        if confirmation == 0 {
+                            entries.sort_by_key(|entry| std::cmp::Reverse(entry.index));
+                            for entry in entries {
+                                repository.update(cx, |repository, cx| {
+                                    if !repository.cached_stash().entries.iter().any(|current| current.index == entry.index && current.oid == entry.oid) {
+                                        anyhow::bail!("The stash list changed. Select the stash again.");
+                                    }
+                                    anyhow::Ok(repository.stash_drop(Some(entry.index), cx))
+                                })?.await??;
+                            }
+                        }
+                    }
+                    RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom => {}
+                }
+                anyhow::Ok(())
+            }.await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| this.show_error_toast("repository operation", error, cx)).log_err();
+            }
+        }).detach();
+    }
+
+    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        if !self.has_write_access(cx) {
+            return;
+        }
+        self.pull_from_or_sync(repository, true, window, cx);
+    }
+
+    fn pull_from_or_sync(
+        &mut self,
+        repository: Entity<Repository>,
+        sync: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_push_and_pull(cx)
+            || !self.start_remote_operation(RemoteOperationKind::Pull, cx)
+        {
+            return;
+        }
+        let Some(branch) = repository.read(cx).branch.clone() else {
+            self.clear_remote_operation(cx);
+            return;
+        };
+        // The panel's active repository is updated asynchronously after
+        // `set_as_active_repository`, so query the menu's repository directly.
+        let remote = self.get_remote(Some(repository.clone()), !sync, false, window, cx);
+        let push_remote =
+            sync.then(|| self.get_remote(Some(repository.clone()), false, true, window, cx));
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let _clear_pending_remote_operation =
+                cx.on_drop(&this, |this, cx| this.clear_remote_operation(cx));
+            let result = async {
+                let Some(remote) = remote.await? else {
+                    return Ok(());
+                };
+                let branch_name = if sync {
+                    branch
+                        .upstream
+                        .as_ref()
+                        .and_then(|upstream| upstream.branch_name())
+                        .unwrap_or_else(|| branch.name())
+                        .to_owned()
+                        .into()
+                } else {
+                    let askpass = this.update_in(cx, |this, window, cx| {
+                        this.askpass_delegate("git fetch", window, cx)
+                    })?;
+                    repository
+                        .update(cx, |repository, cx| {
+                            repository.fetch(
+                                FetchOptions::Remote(remote.clone()),
+                                Some(askpass),
+                                cx,
+                            )
+                        })
+                        .await??;
+                    let branches = repository
+                        .update(cx, |repository, _| repository.branches())
+                        .await??;
+                    if let Some(error) = branches.error {
+                        anyhow::bail!("{error}");
+                    }
+                    let selection = cx
+                        .update(|window, cx| {
+                            branch_picker::prompt_remote_branch(
+                                workspace,
+                                repository.clone(),
+                                remote.name.clone(),
+                                branches.branches.into(),
+                                window,
+                                cx,
+                            )
+                        })?
+                        .await?;
+                    let Some(branch) = selection else {
+                        return Ok(());
+                    };
+                    branch
+                        .name()
+                        .strip_prefix(&format!("{}/", remote.name))
+                        .context("Selected branch does not belong to the pull remote")?
+                        .to_owned()
+                        .into()
+                };
+                let askpass = this.update_in(cx, |this, window, cx| {
+                    this.askpass_delegate("git pull", window, cx)
+                })?;
+                let output = repository
+                    .update(cx, |repository, cx| {
+                        repository.pull(Some(branch_name), remote.name.clone(), false, askpass, cx)
+                    })
+                    .await??;
+                this.update(cx, |this, cx| {
+                    this.show_remote_output(RemoteAction::Pull(remote.clone()), output, cx)
+                })?;
+                if sync {
+                    let Some(push_remote) = push_remote
+                        .context("Missing push remote selection")?
+                        .await?
+                    else {
+                        return Ok(());
+                    };
+                    let options = match &branch.upstream {
+                        None
+                        | Some(Upstream {
+                            tracking: UpstreamTracking::Gone,
+                            ..
+                        }) => Some(PushOptions::SetUpstream),
+                        _ => None,
+                    };
+                    let askpass = this.update_in(cx, |this, window, cx| {
+                        this.pending_remote_operation = Some(RemoteOperationKind::Push);
+                        cx.notify();
+                        this.askpass_delegate("git push", window, cx)
+                    })?;
+                    let output = repository
+                        .update(cx, |repository, cx| {
+                            repository.push(
+                                branch.name().to_owned().into(),
+                                branch
+                                    .upstream
+                                    .as_ref()
+                                    .and_then(|upstream| upstream.branch_name())
+                                    .unwrap_or_else(|| branch.name())
+                                    .to_owned()
+                                    .into(),
+                                push_remote.name.clone(),
+                                options,
+                                askpass,
+                                cx,
+                            )
+                        })
+                        .await??;
+                    this.update(cx, |this, cx| {
+                        this.show_remote_output(
+                            RemoteAction::Push(branch.name().to_owned().into(), push_remote),
+                            output,
+                            cx,
+                        )
+                    })?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| {
+                    this.show_error_toast(if sync { "sync" } else { "pull" }, error, cx)
+                })
+                .log_err();
+            }
+        })
+        .detach();
+    }
+
     fn get_fetch_options(
         &self,
         window: &mut Window,
@@ -4969,7 +5253,7 @@ impl GitPanel {
         }
 
         telemetry::event!("Git Pulled");
-        let remote = self.get_remote(false, false, window, cx);
+        let remote = self.get_remote(self.active_repository.clone(), false, false, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
                 this.clear_remote_operation(cx);
@@ -5052,7 +5336,13 @@ impl GitPanel {
                 _ => None,
             }
         };
-        let remote = self.get_remote(select_remote, true, window, cx);
+        let remote = self.get_remote(
+            self.active_repository.clone(),
+            select_remote,
+            true,
+            window,
+            cx,
+        );
 
         cx.spawn_in(window, async move |this, cx| {
             let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
@@ -5266,12 +5556,12 @@ impl GitPanel {
 
     fn get_remote(
         &mut self,
+        repo: Option<Entity<Repository>>,
         always_select: bool,
         is_push: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl Future<Output = anyhow::Result<Option<Remote>>> + use<> {
-        let repo = self.active_repository.clone();
         let workspace = self.workspace.clone();
         let mut cx = window.to_async(cx);
 
@@ -5296,7 +5586,11 @@ impl GitPanel {
             let selection = cx
                 .update(|window, cx| {
                     picker_prompt::prompt(
-                        "Pick which remote to push to",
+                        if is_push {
+                            "Pick which remote to push to"
+                        } else {
+                            "Pick which remote to fetch from"
+                        },
                         current_remotes.clone(),
                         workspace,
                         window,
@@ -6177,7 +6471,18 @@ impl GitPanel {
         self.select_last_entry_if_out_of_bounds(window, cx);
 
         let suggested_commit_message = self.suggest_commit_message(cx);
-        let placeholder_text = suggested_commit_message.unwrap_or("Enter commit message".into());
+        let placeholder_text = suggested_commit_message.unwrap_or_else(|| {
+            self.active_repository
+                .as_ref()
+                .and_then(|repository| {
+                    repository
+                        .read(cx)
+                        .branch
+                        .as_ref()
+                        .map(|branch| format!("Message (commit on '{}')", branch.name()))
+                })
+                .unwrap_or_else(|| "Enter commit message".into())
+        });
 
         self.commit_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text(&placeholder_text, window, cx)
@@ -6743,6 +7048,8 @@ impl GitPanel {
         PopoverMenu::new(id.into())
             .trigger(
                 crate::render_split_button_chevron_trigger("commit-split-button-right", menu_open)
+                    .height(rems_from_px(26_f32).into())
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
                     .disabled(disabled),
             )
             .with_handle(self.commit_menu_handle.clone())
@@ -6859,7 +7166,7 @@ impl GitPanel {
                 })
             } else {
                 editor.set_mode(EditorMode::AutoHeight {
-                    min_lines: MAX_PANEL_EDITOR_LINES,
+                    min_lines: 1,
                     max_lines: Some(MAX_PANEL_EDITOR_LINES),
                 })
             }
@@ -6919,10 +7226,12 @@ impl GitPanel {
         let menu_open = self.changes_actions_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "changes-actions-split-button-right",
-                menu_open,
-            ))
+            .trigger_with_tooltip(
+                IconButton::new("changes-actions-menu-button", IconName::Ellipsis)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(menu_open),
+                Tooltip::text("Changes Actions"),
+            )
             .with_handle(self.changes_actions_menu_handle.clone())
             .menu(move |window, cx| {
                 Some(git_panel_context_menu(
@@ -6948,36 +7257,374 @@ impl GitPanel {
     }
 
     fn render_git_changes_actions_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (text, action, stage, tooltip) = if self.primary_changes_action_stages() {
-            ("Stage All", StageAll.boxed_clone(), true, "git add --all")
+        let (icon, action, stage, tooltip) = if self.primary_changes_action_stages() {
+            (
+                IconName::Plus,
+                StageAll.boxed_clone(),
+                true,
+                "Stage All Changes",
+            )
         } else {
-            ("Unstage All", UnstageAll.boxed_clone(), false, "git reset")
+            (
+                IconName::Dash,
+                UnstageAll.boxed_clone(),
+                false,
+                "Unstage All Changes",
+            )
         };
 
-        SplitButton::new(
-            ButtonLike::new_rounded_left("git-changes-actions-split-button-left")
-                .layer(ElevationIndex::ModalSurface)
-                .size(ButtonSize::Compact)
-                .child(Label::new(text).size(LabelSize::Small).mr_0p5())
-                .tooltip(Tooltip::for_action_title_in(
-                    tooltip,
-                    action.as_ref(),
-                    &self.focus_handle,
-                ))
-                .disabled(self.entry_count == 0)
-                .on_click({
-                    let git_panel = cx.weak_entity();
-                    move |_, _, cx| {
-                        git_panel
-                            .update(cx, |git_panel, cx| {
-                                git_panel.change_all_files_stage(stage, cx);
-                            })
-                            .ok();
+        h_flex()
+            .gap_0p5()
+            .child(
+                IconButton::new("git-changes-actions", icon)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::for_action_title_in(
+                        tooltip,
+                        action.as_ref(),
+                        &self.focus_handle,
+                    ))
+                    .disabled(self.entry_count == 0)
+                    .on_click({
+                        let git_panel = cx.weak_entity();
+                        move |_, _, cx| {
+                            git_panel
+                                .update(cx, |git_panel, cx| {
+                                    git_panel.change_all_files_stage(stage, cx);
+                                })
+                                .log_err();
+                        }
+                    }),
+            )
+            .child(self.render_git_changes_actions_menu("git-changes-actions-menu", cx))
+    }
+
+    fn render_repositories(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut repositories = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        repositories.sort_by_cached_key(|repository| {
+            repository
+                .read(cx)
+                .work_directory_abs_path
+                .components()
+                .map(|component| {
+                    let component = component.as_os_str().to_string_lossy().into_owned();
+                    (component.to_lowercase(), component)
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut rows = Vec::new();
+        let mut ancestors: Vec<(Arc<Path>, bool)> = Vec::new();
+        for (index, repository) in repositories.iter().enumerate() {
+            let repository_state = repository.read(cx);
+            let path = repository_state.work_directory_abs_path.clone();
+            while ancestors.last().is_some_and(|(ancestor, _)| {
+                !path.starts_with(ancestor.as_ref()) || path == *ancestor
+            }) {
+                ancestors.pop();
+            }
+            let depth = ancestors.len();
+            let hidden = ancestors.last().is_some_and(|(_, collapsed)| *collapsed);
+            let collapsed = self.collapsed_repositories.contains(&repository_state.id);
+            let has_children = repositories.get(index + 1).is_some_and(|next| {
+                let next = next.read(cx);
+                next.work_directory_abs_path != path
+                    && next.work_directory_abs_path.starts_with(path.as_ref())
+            });
+            let parent_name = ancestors.last().map(|(parent, _)| {
+                let parent_name = parent.file_name().unwrap_or_default().to_string_lossy();
+                let relative_parent = path
+                    .parent()
+                    .and_then(|directory| directory.strip_prefix(parent.as_ref()).ok())
+                    .filter(|relative| !relative.as_os_str().is_empty());
+                match relative_parent {
+                    Some(relative) => format!("{parent_name} • {}", relative.to_string_lossy()),
+                    None => parent_name.into_owned(),
+                }
+            });
+            ancestors.push((path.clone(), hidden || collapsed));
+            if hidden {
+                continue;
+            }
+
+            let repository_id = repository_state.id;
+            let selected = self.active_repository.as_ref() == Some(repository);
+            let display_name = repository_state.display_name();
+            let summary = repository_state.status_summary();
+            let (status_suffix, status_color) = repository_branch_status(summary);
+            let branch_name = repository_state
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_owned())
+                .or_else(|| {
+                    repository_state
+                        .head_commit
+                        .as_ref()
+                        .map(|commit| commit.sha.chars().take(8).collect())
+                })
+                .unwrap_or_else(|| "No branch".to_owned());
+            let branch_name = format!("{branch_name}{status_suffix}");
+            let tracking = repository_state
+                .branch
+                .as_ref()
+                .and_then(|branch| branch.upstream.as_ref())
+                .and_then(|upstream| upstream.tracking.status());
+            let sync_disabled = self.pending_remote_operation.is_some()
+                || !self.has_write_access(cx)
+                || !self.can_push_and_pull(cx)
+                || repository_state.branch.is_none();
+
+            let branch_selector = PopoverMenu::new(("repository-branch", repository_id.0))
+                .trigger_with_tooltip(
+                    Button::new(("repository-branch-button", repository_id.0), branch_name)
+                        .size(ButtonSize::None)
+                        .label_size(LabelSize::Small)
+                        .color(status_color)
+                        .start_icon(
+                            Icon::new(IconName::GitBranch)
+                                .size(IconSize::Small)
+                                .color(status_color),
+                        )
+                        .truncate(true),
+                    Tooltip::text(format!(
+                        "Switch Branch • {} changed files, {} conflicts",
+                        summary.count, summary.conflict
+                    )),
+                )
+                .menu({
+                    let workspace = self.workspace.clone();
+                    let repository = repository.clone();
+                    move |window, cx| {
+                        repository.update(cx, |repository, cx| {
+                            repository.set_as_active_repository(cx);
+                        });
+                        Some(branch_picker::popover(
+                            workspace.clone(),
+                            false,
+                            Some(repository.clone()),
+                            window,
+                            cx,
+                        ))
                     }
-                }),
-            self.render_git_changes_actions_menu("git-changes-actions-split-button-menu", cx)
-                .into_any_element(),
-        )
+                })
+                .anchor(Anchor::TopRight);
+
+            let repository_menu = PopoverMenu::new(("repository-menu", repository_id.0))
+                .trigger_with_tooltip(
+                    IconButton::new(
+                        ("repository-menu-button", repository_id.0),
+                        IconName::Ellipsis,
+                    )
+                    .icon_size(IconSize::Small),
+                    Tooltip::text("Repository Actions"),
+                )
+                .menu({
+                    let repository = repository.clone();
+                    let focus_handle = self.focus_handle.clone();
+                    let panel = cx.weak_entity();
+                    move |window, cx| {
+                        repository.update(cx, |repository, cx| {
+                            repository.set_as_active_repository(cx);
+                        });
+                        Some(ContextMenu::build(window, cx, |menu, _, cx| {
+                            menu.context(focus_handle.clone())
+                                .action("Fetch", Box::new(git::Fetch))
+                                .action("Pull", Box::new(git::Pull))
+                                .action("Push", Box::new(git::Push))
+                                .separator()
+                                .map(|menu| {
+                                    repository_action_submenus(
+                                        menu,
+                                        panel.clone(),
+                                        repository.clone(),
+                                        focus_handle.clone(),
+                                        cx,
+                                    )
+                                })
+                                .separator()
+                                .action("View Diff", Box::new(Diff))
+                                .action("View History", Box::new(crate::git_graph::Open))
+                        }))
+                    }
+                })
+                .anchor(Anchor::TopRight);
+
+            rows.push(
+                h_flex()
+                    .id(("repository-row", repository_id.0))
+                    .h_6()
+                    .w_full()
+                    .pl(px(8. + depth as f32 * TREE_INDENT))
+                    .pr_1()
+                    .gap_0p5()
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.bg(cx.theme().colors().element_selected)
+                    })
+                    .hover(|this| this.bg(cx.theme().colors().element_hover))
+                    .on_click(cx.listener({
+                        let repository = repository.clone();
+                        move |this, _, window, cx| {
+                            repository.update(cx, |repository, cx| {
+                                repository.set_as_active_repository(cx);
+                            });
+                            this.set_active_tab(GitPanelTab::Changes, window, cx);
+                        }
+                    }))
+                    .child(if has_children {
+                        IconButton::new(
+                            ("toggle-repository", repository_id.0),
+                            if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            },
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(if collapsed {
+                            "Expand Repository"
+                        } else {
+                            "Collapse Repository"
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if !this.collapsed_repositories.remove(&repository_id) {
+                                this.collapsed_repositories.insert(repository_id);
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    } else {
+                        div().w_4().flex_none().into_any_element()
+                    })
+                    .child(
+                        Icon::new(IconName::GitWorktree)
+                            .size(IconSize::Small)
+                            .color(status_color),
+                    )
+                    .child(
+                        h_flex()
+                            .id(("repository-name", repository_id.0))
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .gap_1()
+                            .tooltip(Tooltip::text(path.to_string_lossy().into_owned()))
+                            .child(
+                                Label::new(display_name)
+                                    .size(LabelSize::Small)
+                                    .color(status_color)
+                                    .truncate(),
+                            )
+                            .when_some(parent_name, |this, parent| {
+                                this.child(
+                                    Label::new(parent)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(relative(0.4))
+                            .overflow_hidden()
+                            .child(branch_selector),
+                    )
+                    .when_some(tracking, |this, tracking| {
+                        this.when(tracking.ahead > 0 || tracking.behind > 0, |this| {
+                            this.child(
+                                Button::new(
+                                    ("sync-repository-counts", repository_id.0),
+                                    format!("{}↓ {}↑", tracking.behind, tracking.ahead),
+                                )
+                                .size(ButtonSize::None)
+                                .label_size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .disabled(sync_disabled)
+                                .tooltip(Tooltip::text("Sync Changes (Pull then Push)"))
+                                .on_click(cx.listener({
+                                    let repository = repository.clone();
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.repository_menu_action(
+                                            repository.clone(),
+                                            RepositoryMenuAction::Sync,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                            )
+                        })
+                    })
+                    .child(
+                        IconButton::new(
+                            ("sync-repository", repository_id.0),
+                            IconName::ArrowCircle,
+                        )
+                        .icon_size(IconSize::Small)
+                        .disabled(sync_disabled)
+                        .tooltip(Tooltip::text("Sync Changes (Pull then Push)"))
+                        .on_click(cx.listener({
+                            let repository = repository.clone();
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.repository_menu_action(
+                                    repository.clone(),
+                                    RepositoryMenuAction::Sync,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        })),
+                    )
+                    .child(repository_menu)
+                    .into_any_element(),
+            );
+        }
+
+        v_flex()
+            .w_full()
+            .flex_none()
+            .child(
+                h_flex()
+                    .id("repositories-header")
+                    .h_6()
+                    .px_1()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.repositories_collapsed = !this.repositories_collapsed;
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(if self.repositories_collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::Small),
+                    )
+                    .child(Label::new("Repositories").size(LabelSize::Small)),
+            )
+            .when(!self.repositories_collapsed, |this| {
+                this.child(
+                    v_flex()
+                        .id("repositories-list")
+                        .max_h(rems(18.))
+                        .overflow_y_scroll()
+                        .children(rows),
+                )
+            })
     }
 
     fn render_changes_header(
@@ -6988,62 +7635,74 @@ impl GitPanel {
         if matches!(self.git_access, Some(GitAccess::No)) {
             return None;
         }
-
         self.active_repository.as_ref()?;
-
         let diff_stat_total = self.diff_stat_total;
 
         Some(
             h_flex()
-                .min_h(Tab::container_height(cx))
+                .h_6()
                 .w_full()
-                .pl_1()
-                .pr_2()
+                .px_1()
                 .flex_none()
-                .flex_wrap()
-                .gap_1()
                 .justify_between()
                 .child(
-                    ButtonLike::new("diff-button")
+                    h_flex()
+                        .id("changes-header")
+                        .gap_1()
+                        .flex_1()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.changes_collapsed = !this.changes_collapsed;
+                            if this.changes_collapsed {
+                                this.focus_handle.focus(window, cx);
+                            }
+                            cx.notify();
+                        }))
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::Diff)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(
-                                    Label::new("View Diff")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .when(
-                                    GitPanelSettings::get_global(cx).diff_stats
-                                        && diff_stat_total != DiffStat::default(),
-                                    |this| {
-                                        this.child(ui::DiffStat::new(
-                                            "changes-diff-stat-total",
-                                            diff_stat_total.added as usize,
-                                            diff_stat_total.deleted as usize,
-                                        ))
-                                    },
-                                ),
-                        )
-                        .tooltip(Tooltip::for_action_title_in(
-                            "View Diff",
-                            &Diff,
-                            &self.focus_handle,
-                        ))
-                        .on_click(|_, _, cx| {
-                            cx.defer(|cx| {
-                                cx.dispatch_action(&Diff);
+                            Icon::new(if self.changes_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
                             })
-                        }),
+                            .size(IconSize::Small),
+                        )
+                        .child(Label::new("Changes").size(LabelSize::Small))
+                        .when(self.changes_count > 0, |this| {
+                            this.child(
+                                Label::new(self.changes_count.to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
+                        .when(
+                            GitPanelSettings::get_global(cx).diff_stats
+                                && diff_stat_total != DiffStat::default(),
+                            |this| {
+                                this.child(ui::DiffStat::new(
+                                    "changes-diff-stat-total",
+                                    diff_stat_total.added as usize,
+                                    diff_stat_total.deleted as usize,
+                                ))
+                            },
+                        ),
                 )
                 .child(
                     h_flex()
-                        .gap_1()
+                        .gap_0p5()
+                        .child(
+                            IconButton::new("view-history", IconName::HistoryRerun)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    "View History",
+                                    &crate::git_graph::Open,
+                                    &self.focus_handle,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window
+                                        .dispatch_action(crate::git_graph::Open.boxed_clone(), cx);
+                                }),
+                        )
                         .child(self.render_view_options_menu("view_options_menu"))
                         .child(self.render_git_changes_actions_button(cx)),
                 ),
@@ -7066,7 +7725,6 @@ impl GitPanel {
                         "remote-button",
                         &branch,
                         focus_handle,
-                        true,
                         self.pending_remote_operation,
                         self.remote_action_menu_handle.clone(),
                     ))
@@ -7080,206 +7738,92 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let active_repository = self.active_repository.clone()?;
+        self.active_repository.as_ref()?;
         let settings = ThemeSettings::get_global(cx);
         let panel_editor_style =
             git_commit_editor_style(settings.git_commit_buffer_font_size(cx), cx);
-        let enable_coauthors = self.render_co_authors(cx);
-        let editor_focus_handle = self.commit_editor.focus_handle(cx);
-        let branch = active_repository.read(cx).branch.clone();
-        let head_commit = active_repository.read(cx).head_commit.clone();
-
-        let git_panel = cx.entity();
-        let display_name = SharedString::from(Arc::from(
-            active_repository
-                .read(cx)
-                .display_name()
-                .trim_end_matches("/"),
-        ));
-        let editor_is_long = self.commit_editor.update(cx, |editor, cx| {
-            editor.max_point(cx).row().0 >= MAX_PANEL_EDITOR_LINES as u32
-        });
-
         let max_title_length = GitPanelSettings::get_global(cx).commit_title_max_length;
-        let title_exceeds_limit = if max_title_length > 0 {
-            self.commit_editor
+        let title_exceeds_limit = max_title_length > 0
+            && self
+                .commit_editor
                 .read(cx)
                 .text(cx)
                 .lines()
                 .next()
-                .is_some_and(|title| commit_title_exceeds_limit(title, max_title_length))
-        } else {
-            false
-        };
+                .is_some_and(|title| commit_title_exceeds_limit(title, max_title_length));
 
-        let vertical_buttons = v_flex()
-            .h_full()
-            .gap_px()
-            .p_1p5()
-            .child(
-                IconButton::new("expand-commit-editor", IconName::MaximizeAlt)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Hidden)
-                    .hover_color(Color::Muted)
-                    .tooltip({
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                "Open Commit Modal",
-                                &git::ExpandCommitEditor,
-                                &editor_focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            window.dispatch_action(git::ExpandCommitEditor.boxed_clone(), cx)
-                        }
-                    })),
-            )
-            .child({
-                let (icon, label) = if self.commit_editor_expanded {
-                    (IconName::Minimize, "Collapse Commit Editor")
-                } else {
-                    (IconName::Maximize, "Expand Commit Editor")
-                };
-                let focus_handle = self.focus_handle.clone();
-
-                IconButton::new("fill-commit-editor", icon)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Hidden)
-                    .hover_color(Color::Muted)
-                    .tooltip({
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                label,
-                                &git::ToggleFillCommitEditor,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            window.dispatch_action(git::ToggleFillCommitEditor.boxed_clone(), cx)
-                        }
-                    }))
-            });
-
-        let collapsed = self.commit_editor_collapsed;
-        let toggle_commit_editor_button = {
-            let (icon, label) = if collapsed {
-                (IconName::ChevronUp, "Show Commit Editor")
-            } else {
-                (IconName::ChevronDown, "Hide Commit Editor")
-            };
-            let focus_handle = self.focus_handle.clone();
-
-            IconButton::new("toggle-commit-editor", icon)
-                .icon_size(IconSize::Small)
-                .tooltip(move |_window, cx| {
-                    Tooltip::for_action_in(label, &git::ToggleCommitEditor, &focus_handle, cx)
-                })
-                .on_click(cx.listener(move |_, _, window, cx| {
-                    window.dispatch_action(git::ToggleCommitEditor.boxed_clone(), cx)
-                }))
-        };
-
-        let footer = v_flex()
-            .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
-            .child(PanelRepoFooter::new(
-                display_name,
-                branch,
-                head_commit,
-                Some(git_panel),
-            ))
-            .when(title_exceeds_limit, |this| {
-                this.child(
-                    h_flex()
-                        .px_2()
-                        .py_1()
-                        .gap_1()
-                        .border_t_1()
-                        .border_color(cx.theme().status().warning_border)
-                        .bg(cx.theme().status().warning_background.opacity(0.5))
-                        .child(
-                            Icon::new(IconName::Warning)
-                                .size(IconSize::XSmall)
-                                .color(Color::Warning),
-                        )
-                        .child(
-                            Label::new(format!(
-                                "Commit message title exceeds {max_title_length}-character limit."
-                            ))
-                            .size(LabelSize::Small),
-                        ),
-                )
-            })
-            .child(
-                panel_editor_container(window, cx)
-                    .id("commit-editor-container")
-                    .w_full()
-                    .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
-                    .border_t_1()
-                    .border_color(if title_exceeds_limit {
-                        cx.theme().status().warning_border
-                    } else {
-                        cx.theme().colors().border
-                    })
-                    .when(!collapsed, |this| {
-                        this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            window.focus(&this.commit_editor.focus_handle(cx), cx);
-                        }))
-                        .child(
-                            h_flex()
-                                .size_full()
-                                .child(
-                                    div()
-                                        .pt_2()
-                                        .px_2()
-                                        .h_full()
-                                        .flex_grow_1()
-                                        .cursor_text()
-                                        .on_action(|&zed_actions::editor::MoveUp, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_action(|&zed_actions::editor::MoveDown, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(EditorElement::new(
-                                            &self.commit_editor,
-                                            panel_editor_style,
-                                        )),
-                                )
-                                .child(vertical_buttons),
-                        )
-                    })
-                    .child(
-                        h_flex()
-                            .id("commit-footer")
+        Some(
+            v_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .flex_none()
+                .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
+                .when(!self.commit_editor_collapsed, |this| {
+                    this.child(
+                        panel_editor_container(window, cx)
+                            .id("commit-editor-container")
                             .w_full()
-                            .p_1p5()
-                            .border_t_1()
-                            .when(editor_is_long, |el| {
-                                el.border_color(cx.theme().colors().border_variant)
+                            .h_auto()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if title_exceeds_limit {
+                                cx.theme().status().warning_border
+                            } else {
+                                cx.theme().colors().border_variant
                             })
-                            .justify_between()
+                            .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                window.focus(&this.commit_editor.focus_handle(cx), cx);
+                            }))
                             .child(
                                 h_flex()
-                                    .gap_0p5()
-                                    .child(toggle_commit_editor_button)
-                                    .children(self.render_generate_commit_message_button(cx)),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_0p5()
-                                    .children(enable_coauthors)
-                                    .child(self.render_commit_button(cx)),
+                                    .w_full()
+                                    .items_start()
+                                    .when(self.commit_editor_expanded, |this| {
+                                        this.flex_1().min_h_0()
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .p_1()
+                                            .cursor_text()
+                                            .when(self.commit_editor_expanded, |this| this.h_full())
+                                            .on_action(|&zed_actions::editor::MoveUp, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_action(|&zed_actions::editor::MoveDown, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .child(EditorElement::new(
+                                                &self.commit_editor,
+                                                panel_editor_style,
+                                            )),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .p_0p5()
+                                            .children(self.render_co_authors(cx))
+                                            .children(
+                                                self.render_generate_commit_message_button(cx),
+                                            ),
+                                    ),
                             ),
-                    ),
-            );
-
-        Some(footer)
+                    )
+                })
+                .when(title_exceeds_limit, |this| {
+                    this.child(
+                        Label::new(format!(
+                            "Commit message title exceeds {max_title_length}-character limit."
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                    )
+                })
+                .child(self.render_commit_button(cx)),
+        )
     }
 
     fn render_commit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7299,62 +7843,74 @@ impl GitPanel {
 
         h_flex()
             .id("commit-wrapper")
+            .w_full()
+            .rounded_sm()
+            .bg(cx.theme().status().info_background)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.show_placeholders =
                     *hovered && !this.has_staged_changes() && !this.has_unstaged_conflicts();
                 cx.notify()
             }))
-            .child(SplitButton::new(
-                ButtonLike::new_rounded_left(format!("split-button-left-{}", title))
-                    .layer(ElevationIndex::ModalSurface)
-                    .size(ButtonSize::Compact)
-                    .disabled(!can_commit || self.modal_open)
-                    .child(
-                        Label::new(title)
-                            .size(LabelSize::Small)
-                            .color(label_color)
-                            .mr_0p5(),
-                    )
-                    .on_click({
-                        let git_panel = cx.weak_entity();
-                        move |_, window, cx| {
-                            telemetry::event!("Git Committed", source = "Git Panel");
-                            git_panel
-                                .update(cx, |git_panel, cx| {
-                                    let options = git_panel.commit_options();
-                                    git_panel.commit_changes(options, window, cx);
-                                })
-                                .ok();
-                        }
-                    })
-                    .tooltip({
-                        let handle = commit_tooltip_focus_handle.clone();
-                        move |_window, cx| {
-                            if can_commit {
-                                Tooltip::with_meta_in(
-                                    tooltip,
-                                    Some(&git::Commit),
-                                    format!(
-                                        "git commit{}{}{}",
-                                        if amend { " --amend" } else { "" },
-                                        if signoff { " --signoff" } else { "" },
-                                        if no_verify { " --no-verify" } else { "" }
-                                    ),
-                                    &handle.clone(),
-                                    cx,
-                                )
-                            } else {
-                                Tooltip::simple(tooltip, cx)
+            .child(
+                div().flex_1().min_w_0().child(
+                    ButtonLike::new_rounded_left(format!("split-button-left-{}", title))
+                        .full_width()
+                        .height(rems_from_px(26_f32).into())
+                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                        .size(ButtonSize::Compact)
+                        .disabled(!can_commit || self.modal_open)
+                        .child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Small)
+                                .color(label_color),
+                        )
+                        .child(
+                            Label::new(title)
+                                .size(LabelSize::Small)
+                                .color(label_color)
+                                .mr_0p5(),
+                        )
+                        .on_click({
+                            let git_panel = cx.weak_entity();
+                            move |_, window, cx| {
+                                telemetry::event!("Git Committed", source = "Git Panel");
+                                git_panel
+                                    .update(cx, |git_panel, cx| {
+                                        let options = git_panel.commit_options();
+                                        git_panel.commit_changes(options, window, cx);
+                                    })
+                                    .log_err();
                             }
-                        }
-                    }),
-                self.render_git_commit_menu(
-                    ElementId::Name(format!("split-button-right-{}", title).into()),
-                    Some(commit_tooltip_focus_handle),
-                    self.generate_commit_message_task.is_some(),
-                    cx,
-                )
-                .into_any_element(),
+                        })
+                        .tooltip({
+                            let handle = commit_tooltip_focus_handle.clone();
+                            move |_window, cx| {
+                                if can_commit {
+                                    Tooltip::with_meta_in(
+                                        tooltip,
+                                        Some(&git::Commit),
+                                        format!(
+                                            "git commit{}{}{}",
+                                            if amend { " --amend" } else { "" },
+                                            if signoff { " --signoff" } else { "" },
+                                            if no_verify { " --no-verify" } else { "" }
+                                        ),
+                                        &handle.clone(),
+                                        cx,
+                                    )
+                                } else {
+                                    Tooltip::simple(tooltip, cx)
+                                }
+                            }
+                        }),
+                ),
+            )
+            .child(Divider::vertical().h_4())
+            .child(self.render_git_commit_menu(
+                ElementId::Name(format!("split-button-right-{}", title).into()),
+                Some(commit_tooltip_focus_handle),
+                self.generate_commit_message_task.is_some(),
+                cx,
             ))
     }
 
@@ -7490,75 +8046,72 @@ impl GitPanel {
         )
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_tab = self.active_tab;
-
-        let focus_handle = self.focus_handle.clone();
-        let tab = |id: ElementId,
-                   active: bool,
-                   show_changes: bool,
-                   label: SharedString,
-                   set_active_tab: GitPanelTab,
-                   tooltip_action: Box<dyn Action>| {
-            let focus_handle = focus_handle.clone();
-
-            h_flex()
-                .cursor_pointer()
-                .id(id)
-                .h_full()
-                .py_1()
-                .gap_1()
-                .flex_1()
-                .justify_center()
-                .hover(|s| s.bg(cx.theme().colors().element_hover))
-                .border_b_1()
-                .when(!active, |s| {
-                    s.bg(cx.theme().colors().editor_background.opacity(0.6))
-                        .border_color(cx.theme().colors().border.opacity(0.6))
-                })
-                .child(Label::new(label.clone()).when(!active, |this| this.color(Color::Muted)))
-                .when(show_changes && self.changes_count > 0, |this| {
-                    this.child(
-                        Label::new(format!("({})", self.changes_count))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                })
-                .tooltip(Tooltip::for_action_title_in(
-                    format!("Toggle {} Tab", label),
-                    tooltip_action.as_ref(),
-                    &focus_handle,
-                ))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_active_tab(set_active_tab, window, cx)
-                }))
-        };
-
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .relative()
-            .h(Tab::container_height(cx))
+            .h_8()
             .w_full()
-            .child(tab(
-                ElementId::Name("changes-tab".into()),
-                active_tab == GitPanelTab::Changes,
-                true,
-                "Changes".into(),
-                GitPanelTab::Changes,
-                ActivateChangesTab.boxed_clone(),
-            ))
+            .px_2()
+            .flex_none()
+            .justify_between()
+            .child(Label::new("Source Control").size(LabelSize::Small))
             .child(
-                Divider::vertical()
-                    .color(ui::DividerColor::BorderFaded)
-                    .h_full(),
+                h_flex().gap_0p5().child(
+                    PopoverMenu::new("source-control-menu")
+                        .trigger_with_tooltip(
+                            IconButton::new("source-control-menu-button", IconName::Ellipsis)
+                                .icon_size(IconSize::Small),
+                            Tooltip::text("Source Control Actions"),
+                        )
+                        .menu({
+                            let focus_handle = self.focus_handle.clone();
+                            let panel = cx.weak_entity();
+                            move |window, cx| {
+                                Some(ContextMenu::build(window, cx, |menu, _, cx| {
+                                    menu.context(focus_handle.clone())
+                                        .action("Show Changes", Box::new(ActivateChangesTab))
+                                        .action("View History", Box::new(crate::git_graph::Open))
+                                        .separator()
+                                        .action(
+                                            "Switch Repository",
+                                            Box::new(zed_actions::git::SelectRepo),
+                                        )
+                                        .action("Fetch", Box::new(git::Fetch))
+                                        .action("Pull", Box::new(git::Pull))
+                                        .action("Push", Box::new(git::Push))
+                                        .separator()
+                                        .when_some(
+                                            panel
+                                                .read_with(cx, |panel, _| {
+                                                    panel.active_repository.clone()
+                                                })
+                                                .ok()
+                                                .flatten(),
+                                            |menu, repository| {
+                                                repository_action_submenus(
+                                                    menu,
+                                                    panel.clone(),
+                                                    repository,
+                                                    focus_handle.clone(),
+                                                    cx,
+                                                )
+                                            },
+                                        )
+                                        .separator()
+                                        .action(
+                                            "Show / Hide Commit Editor",
+                                            Box::new(ToggleCommitEditor),
+                                        )
+                                        .action(
+                                            "Expand / Collapse Commit Editor",
+                                            Box::new(ToggleFillCommitEditor),
+                                        )
+                                        .action("Open Commit Modal", Box::new(ExpandCommitEditor))
+                                }))
+                            }
+                        })
+                        .anchor(Anchor::TopRight),
+                ),
             )
-            .child(tab(
-                ElementId::Name("history-tab".into()),
-                active_tab != GitPanelTab::Changes,
-                false,
-                "History".into(),
-                GitPanelTab::History,
-                ActivateHistoryTab.boxed_clone(),
-            ))
     }
 
     fn render_history_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7729,7 +8282,7 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_active_tab(GitPanelTab::History, window, cx);
+        window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx);
     }
 
     fn set_active_tab(&mut self, tab: GitPanelTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -9786,35 +10339,55 @@ impl Render for GitPanel {
             .child(
                 v_flex()
                     .size_full()
-                    .when(!self.commit_editor_expanded, |this| {
-                        this.child(self.render_tab_bar(cx))
-                    })
+                    .min_h_0()
+                    .child(self.render_header(cx))
+                    .when(
+                        !self.commit_editor_expanded || self.active_tab == GitPanelTab::History,
+                        |this| this.child(self.render_repositories(cx)),
+                    )
                     .map(|this| match self.active_tab {
                         GitPanelTab::Changes => this
                             .children(self.render_changes_header(window, cx))
-                            .when(!self.commit_editor_expanded, |this| {
-                                this.map(|this| {
-                                    if let Some(repo) = self.active_repository.clone()
-                                        && has_entries
-                                    {
-                                        this.child(self.render_entries(
-                                            has_write_access,
-                                            repo,
-                                            window,
-                                            cx,
-                                        ))
-                                    } else {
-                                        this.child(self.render_empty_state(cx).into_any_element())
-                                    }
-                                })
-                            })
-                            .children(self.render_footer(window, cx))
-                            .when(self.amend_pending, |this| {
-                                this.child(self.render_pending_amend(cx))
-                            })
-                            .when(!self.amend_pending, |this| {
-                                this.children(self.render_previous_commit(window, cx))
-                            }),
+                            .when(
+                                !self.changes_collapsed || self.active_repository.is_none(),
+                                |this| {
+                                    this.children(self.render_footer(window, cx))
+                                        .when(self.amend_pending, |this| {
+                                            this.child(self.render_pending_amend(cx))
+                                        })
+                                        .when(!self.commit_editor_expanded, |this| {
+                                            this.map(|this| {
+                                                if let Some(repo) = self.active_repository.clone()
+                                                    && has_entries
+                                                {
+                                                    this.child(self.render_entries(
+                                                        has_write_access,
+                                                        repo,
+                                                        window,
+                                                        cx,
+                                                    ))
+                                                } else {
+                                                    this.child(
+                                                        self.render_empty_state(cx)
+                                                            .into_any_element(),
+                                                    )
+                                                }
+                                            })
+                                        })
+                                        .when(
+                                            !self.amend_pending && !self.commit_editor_expanded,
+                                            |this| {
+                                                this.children(
+                                                    self.render_previous_commit(window, cx),
+                                                )
+                                            },
+                                        )
+                                },
+                            )
+                            .when(
+                                self.changes_collapsed && self.active_repository.is_some(),
+                                |this| this.child(div().flex_1()),
+                            ),
                         GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
                     })
                     .into_any_element(),
@@ -10471,6 +11044,7 @@ mod tests {
     };
     use gpui::{Modifiers, TestAppContext, UpdateGlobal, VisualTestContext, px};
     use indoc::indoc;
+    use picker::PickerDelegate;
     use project::FakeFs;
     use search::{BufferSearchBar, buffer_search::Deploy};
     use serde_json::json;
@@ -10487,7 +11061,7 @@ mod tests {
 
     use super::*;
 
-    fn init_test(cx: &mut gpui::TestAppContext) {
+    pub(super) fn init_test(cx: &mut gpui::TestAppContext) {
         zlog::init_test();
 
         cx.update(|cx| {
@@ -10639,7 +11213,7 @@ mod tests {
         });
     }
 
-    async fn setup_git_panel_with_changes(
+    pub(super) async fn setup_git_panel_with_changes(
         cx: &mut TestAppContext,
         tree: serde_json::Value,
         status_entries: &[(&str, git::status::StatusCode)],
@@ -10690,6 +11264,34 @@ mod tests {
         await_git_panel_entries(&panel, &mut cx).await;
 
         (fs, project, workspace, panel, cx)
+    }
+
+    #[gpui::test]
+    async fn test_view_history_opens_full_graph_without_changing_sidebar(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_, _, workspace, panel, mut cx) =
+            setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.focus_handle.focus(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.dispatch_action(crate::git_graph::Open);
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, _| {
+            assert_eq!(panel.active_tab, GitPanelTab::Changes)
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .items_of_type::<crate::git_graph::GitGraph>(cx)
+                    .count(),
+                1
+            );
+        });
     }
 
     #[gpui::test]
@@ -11207,7 +11809,7 @@ mod tests {
 
         let panel = workspace.update_in(&mut cx, GitPanel::new);
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_history_tab(&ActivateHistoryTab, window, cx);
+            panel.set_active_tab(GitPanelTab::History, window, cx);
         });
         cx.run_until_parked();
         HistoryPanelTest {
@@ -11478,7 +12080,7 @@ mod tests {
         assert_eq!(test.history_state(), (Some(oldest_sha), None));
 
         test.panel.update_in(&mut test.cx, |panel, window, cx| {
-            panel.activate_history_tab(&ActivateHistoryTab, window, cx);
+            panel.set_active_tab(GitPanelTab::History, window, cx);
         });
         wait_for_commit_history_to_settle(&test.panel, &mut test.cx).await;
         assert_eq!(
@@ -13913,6 +14515,71 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_pull_from_cancellation_reenables_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+        for cancel_branch_picker in [false, true] {
+            let (fs, _, workspace, panel, mut cx) =
+                setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+            fs.set_branch_name(path!("/project/.git").as_ref(), Some("main"));
+            fs.with_git_state(path!("/project/.git").as_ref(), true, |state| {
+                state
+                    .remotes
+                    .insert("origin".into(), "https://example.com/repo.git".into());
+                if !cancel_branch_picker {
+                    state
+                        .remotes
+                        .insert("upstream".into(), "https://example.com/upstream.git".into());
+                }
+                state.branches.extend([
+                    "main".into(),
+                    "origin/main".into(),
+                    "origin/feature".into(),
+                ]);
+            })
+            .expect("configure repository");
+            cx.run_until_parked();
+            panel.update_in(&mut cx, |panel, window, cx| {
+                let repository = panel.active_repository.clone().expect("active repository");
+                panel.pull_from_or_sync(repository, false, window, cx);
+                assert!(panel.pending_remote_operation.is_some());
+            });
+            cx.run_until_parked();
+            if cancel_branch_picker {
+                let modal = workspace.read_with(&cx, |workspace, cx| {
+                    workspace
+                        .active_modal::<branch_picker::BranchList>(cx)
+                        .expect("Pull From branch picker")
+                });
+                let picker = modal.read_with(&cx, |modal, _| modal.picker.clone());
+                picker.update_in(&mut cx, |picker, window, cx| {
+                    assert!(picker.delegate.match_count() > 0);
+                    picker.cancel(&menu::Cancel, window, cx);
+                });
+            } else {
+                let modal = workspace.read_with(&cx, |workspace, cx| {
+                    workspace
+                        .active_modal::<picker_prompt::PickerPrompt>(cx)
+                        .expect("Pull From remote picker")
+                });
+                let picker = modal.read_with(&cx, |modal, _| modal.picker.clone());
+                picker.update_in(&mut cx, |picker, window, cx| {
+                    assert!(picker.delegate.match_count() > 0);
+                    picker.cancel(&menu::Cancel, window, cx);
+                });
+            }
+            cx.run_until_parked();
+            panel.update(&mut cx, |panel, cx| {
+                assert!(
+                    panel.pending_remote_operation.is_none(),
+                    "canceling Pull From must finish the remote operation"
+                );
+                assert!(panel.start_remote_operation(RemoteOperationKind::Fetch, cx));
+                panel.clear_remote_operation(cx);
+            });
+        }
+    }
+
+    #[gpui::test]
     async fn test_remote_operation_serialization(cx: &mut TestAppContext) {
         init_test(cx);
 
@@ -15267,7 +15934,10 @@ mod tests {
             assert!(!panel.commit_editor_expanded);
             assert!(matches!(
                 panel.commit_editor.read(cx).mode().clone(),
-                EditorMode::AutoHeight { .. }
+                EditorMode::AutoHeight {
+                    min_lines: 1,
+                    max_lines: Some(MAX_PANEL_EDITOR_LINES),
+                }
             ));
 
             panel.toggle_fill_commit_editor(&ToggleFillCommitEditor, window, cx);
@@ -15281,7 +15951,10 @@ mod tests {
             assert!(!panel.commit_editor_expanded);
             assert!(matches!(
                 panel.commit_editor.read(cx).mode().clone(),
-                EditorMode::AutoHeight { .. }
+                EditorMode::AutoHeight {
+                    min_lines: 1,
+                    max_lines: Some(MAX_PANEL_EDITOR_LINES),
+                }
             ));
         });
     }
@@ -15327,6 +16000,12 @@ mod tests {
                 panel.commit_editor.read(cx).mode().clone(),
                 EditorMode::AutoHeight { .. }
             ));
+
+            panel.changes_collapsed = true;
+            panel.focus_editor(&FocusEditor, window, cx);
+            assert!(!panel.changes_collapsed);
+            assert!(!panel.commit_editor_collapsed);
+            assert!(panel.commit_editor.read(cx).is_focused(window));
         });
     }
 
@@ -15393,7 +16072,7 @@ mod tests {
         });
         panel.update_in(&mut cx, |panel, window, cx| {
             assert!(panel.entries.is_empty());
-            panel.activate_history_tab(&ActivateHistoryTab, window, cx);
+            panel.set_active_tab(GitPanelTab::History, window, cx);
         });
         center_item.update_in(&mut cx, |center_item, window, cx| {
             center_item.focus_handle(cx).focus(window, cx);

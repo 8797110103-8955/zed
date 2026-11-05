@@ -1574,6 +1574,23 @@ mod tests {
     }
 
     #[test]
+    fn test_import_prune_on_fetch() {
+        for (content, expected) in [
+            (r#"{ "git.pruneOnFetch": true }"#, Some(true)),
+            (r#"{ "git.pruneOnFetch": false }"#, Some(false)),
+            ("{}", None),
+        ] {
+            let settings = VsCodeSettings::from_str(content, VsCodeSettingsSource::VsCode)
+                .unwrap()
+                .settings_content();
+            assert_eq!(
+                settings.git.and_then(|settings| settings.prune_on_fetch),
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn test_import_reveal_if_open() {
         let settings = VsCodeSettings::from_str(
             r#"{ "workbench.editor.revealIfOpen": true }"#,

@@ -8189,7 +8189,7 @@ fn terminal_page() -> SettingsPage {
 }
 
 fn version_control_page() -> SettingsPage {
-    fn git_integration_section() -> [SettingsPageItem; 3] {
+    fn git_integration_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Git Integration"),
             SettingsPageItem::DynamicItem(DynamicItem {
@@ -8359,6 +8359,20 @@ fn version_control_page() -> SettingsPage {
                         metadata: None,
                     }],
                 ],
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Prune on Fetch",
+                description: "Remove remote-tracking branches that no longer exist on the remote when fetching. When off, Git's own fetch.prune configuration decides.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.prune_on_fetch"),
+                    pick: |settings_content| settings_content.git.as_ref()?.prune_on_fetch.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.git.get_or_insert_default().prune_on_fetch = value;
+                    },
+                }),
+                metadata: None,
             }),
         ]
     }

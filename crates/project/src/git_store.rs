@@ -8749,6 +8749,8 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        // Remote repositories re-enter this method on the host, so the host's setting applies.
+        let prune = ProjectSettings::get_global(cx).git.prune_on_fetch;
 
         let updates_tx = self
             .git_store()
@@ -8772,7 +8774,7 @@ impl Repository {
                         bail!("auto-fetch requires a trusted repository");
                     }
                     let result = backend
-                        .fetch(fetch_options, askpass, environment, cx.clone())
+                        .fetch(fetch_options, prune, askpass, environment, cx.clone())
                         .await;
                     if result.is_ok() {
                         Self::refresh_branch_list(&this, backend, updates_tx, &mut cx).await?;

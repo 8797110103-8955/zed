@@ -252,6 +252,14 @@ pub fn init(cx: &mut App) {
                     panel.pull(true, window, cx);
                 });
             });
+            workspace.register_action(|workspace, _: &git::Sync, window, cx| {
+                let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
+                    return;
+                };
+                panel.update(cx, |panel, cx| {
+                    panel.sync(window, cx);
+                });
+            });
         }
         workspace.register_action(|workspace, action: &git::StashAll, window, cx| {
             let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
@@ -948,50 +956,29 @@ fn render_remote_button(
     id: impl Into<SharedString>,
     branch: &Branch,
     keybinding_target: Option<FocusHandle>,
-    show_fetch_button: bool,
     in_progress_operation: Option<RemoteOperationKind>,
     menu_handle: PopoverMenuHandle<ContextMenu>,
 ) -> Option<impl IntoElement> {
     let id = id.into();
-    let upstream = branch.upstream.as_ref();
-    match upstream {
+    // Mirrors VS Code: a branch whose upstream exists on the remote is synced
+    // (pull, then push); otherwise a tracking branch is created on the remote.
+    match branch.upstream.as_ref() {
         Some(Upstream {
             tracking: UpstreamTracking::Tracked(UpstreamTrackingStatus { ahead, behind }),
             ..
-        }) => match (*ahead, *behind) {
-            (0, 0) if show_fetch_button => Some(remote_button::render_fetch_button(
-                keybinding_target,
-                id,
-                in_progress_operation,
-                menu_handle,
-            )),
-            (0, 0) => None,
-            (ahead, 0) => Some(remote_button::render_push_button(
-                keybinding_target,
-                id,
-                ahead,
-                in_progress_operation,
-                menu_handle,
-            )),
-            (ahead, behind) => Some(remote_button::render_pull_button(
-                keybinding_target,
-                id,
-                ahead,
-                behind,
-                in_progress_operation,
-                menu_handle,
-            )),
-        },
-        Some(Upstream {
-            tracking: UpstreamTracking::Gone,
-            ..
-        }) => Some(remote_button::render_republish_button(
+        }) => Some(remote_button::render_sync_button(
             keybinding_target,
             id,
+            *ahead,
+            *behind,
             in_progress_operation,
             menu_handle,
         )),
-        None => Some(remote_button::render_publish_button(
+        Some(Upstream {
+            tracking: UpstreamTracking::Gone,
+            ..
+        })
+        | None => Some(remote_button::render_create_remote_branch_button(
             keybinding_target,
             id,
             in_progress_operation,
@@ -1008,68 +995,7 @@ mod remote_button {
         PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
     };
 
-    pub fn render_fetch_button(
-        keybinding_target: Option<FocusHandle>,
-        id: SharedString,
-        in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
-    ) -> SplitButton {
-        split_button(
-            id,
-            "Fetch",
-            0,
-            0,
-            Some(IconName::ArrowCircle),
-            keybinding_target.clone(),
-            in_progress_operation,
-            menu_handle,
-            move |_, window, cx| {
-                window.dispatch_action(Box::new(git::Fetch), cx);
-            },
-            move |_window, cx| {
-                git_action_tooltip(
-                    "Fetch updates from remote",
-                    &git::Fetch,
-                    "git fetch",
-                    keybinding_target.clone(),
-                    cx,
-                )
-            },
-        )
-    }
-
-    pub fn render_push_button(
-        keybinding_target: Option<FocusHandle>,
-        id: SharedString,
-        ahead: u32,
-        in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
-    ) -> SplitButton {
-        split_button(
-            id,
-            "Push",
-            ahead as usize,
-            0,
-            None,
-            keybinding_target.clone(),
-            in_progress_operation,
-            menu_handle,
-            move |_, window, cx| {
-                window.dispatch_action(Box::new(git::Push), cx);
-            },
-            move |_window, cx| {
-                git_action_tooltip(
-                    "Push committed changes to remote",
-                    &git::Push,
-                    "git push",
-                    keybinding_target.clone(),
-                    cx,
-                )
-            },
-        )
-    }
-
-    pub fn render_pull_button(
+    pub fn render_sync_button(
         keybinding_target: Option<FocusHandle>,
         id: SharedString,
         ahead: u32,
@@ -1079,21 +1005,21 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Pull",
+            "Sync",
             ahead as usize,
             behind as usize,
-            None,
+            (ahead == 0 && behind == 0).then_some(IconName::ArrowCircle),
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
             move |_, window, cx| {
-                window.dispatch_action(Box::new(git::Pull), cx);
+                window.dispatch_action(Box::new(git::Sync), cx);
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Pull",
-                    &git::Pull,
-                    "git pull",
+                    "Pull changes from remote, then push local commits",
+                    &git::Sync,
+                    "git pull && git push",
                     keybinding_target.clone(),
                     cx,
                 )
@@ -1101,7 +1027,7 @@ mod remote_button {
         )
     }
 
-    pub fn render_publish_button(
+    pub fn render_create_remote_branch_button(
         keybinding_target: Option<FocusHandle>,
         id: SharedString,
         in_progress_operation: Option<RemoteOperationKind>,
@@ -1109,10 +1035,10 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Publish",
+            "Create Branch",
             0,
             0,
-            Some(IconName::ExpandUp),
+            Some(IconName::CloudUpload),
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
@@ -1121,37 +1047,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Publish branch to remote",
-                    &git::Push,
-                    "git push --set-upstream",
-                    keybinding_target.clone(),
-                    cx,
-                )
-            },
-        )
-    }
-
-    pub fn render_republish_button(
-        keybinding_target: Option<FocusHandle>,
-        id: SharedString,
-        in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
-    ) -> SplitButton {
-        split_button(
-            id,
-            "Republish",
-            0,
-            0,
-            Some(IconName::ExpandUp),
-            keybinding_target.clone(),
-            in_progress_operation,
-            menu_handle,
-            move |_, window, cx| {
-                window.dispatch_action(Box::new(git::Push), cx);
-            },
-            move |_window, cx| {
-                git_action_tooltip(
-                    "Re-publish branch to remote",
+                    "Create tracking branch on remote",
                     &git::Push,
                     "git push --set-upstream",
                     keybinding_target.clone(),
@@ -1209,6 +1105,7 @@ mod remote_button {
                         .action("Fetch From", git::FetchFrom.boxed_clone())
                         .action("Pull", git::Pull.boxed_clone())
                         .action("Pull (Rebase)", git::PullRebase.boxed_clone())
+                        .action("Sync", git::Sync.boxed_clone())
                         .separator()
                         .action("Push", git::Push.boxed_clone())
                         .action("Push To", git::PushTo.boxed_clone())

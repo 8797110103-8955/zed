@@ -73,6 +73,7 @@ pub enum IconName {
     Clock,
     Close,
     CloudDownload,
+    CloudUpload,
     Code,
     Codeberg,
     Command,

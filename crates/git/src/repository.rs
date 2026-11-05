@@ -1043,6 +1043,7 @@ pub trait GitRepository: Send + Sync {
     fn fetch(
         &self,
         fetch_options: FetchOptions,
+        prune: bool,
         askpass: Option<AskPassDelegate>,
         env: Arc<HashMap<String, String>>,
         // This method takes an AsyncApp to ensure it's invoked on the main thread,
@@ -2928,6 +2929,7 @@ impl GitRepository for RealGitRepository {
     fn fetch(
         &self,
         fetch_options: FetchOptions,
+        prune: bool,
         askpass: Option<AskPassDelegate>,
         env: Arc<HashMap<String, String>>,
         cx: AsyncApp,
@@ -2949,7 +2951,12 @@ impl GitRepository for RealGitRepository {
                 executor,
                 is_trusted,
             );
-            git.run_remote_command(askpass, &env, &["fetch", &remote_name], |command| {
+            let mut arguments = vec!["fetch"];
+            if prune {
+                arguments.push("--prune");
+            }
+            arguments.push(&remote_name);
+            git.run_remote_command(askpass, &env, &arguments, |command| {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
             })
             .await
@@ -4989,6 +4996,56 @@ mod tests {
                 .unwrap(),
             "true"
         );
+    }
+
+    #[gpui::test]
+    async fn test_fetch_prunes_deleted_remote_branches_only_when_requested(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        for prune in [true, false] {
+            for fetch_options in [
+                FetchOptions::All,
+                FetchOptions::Remote(Remote {
+                    name: "origin".into(),
+                }),
+            ] {
+                let directory = tempfile::tempdir().expect("temporary directory");
+                let (remote_directory, clone_directory) =
+                    clone_remote_repository_with_main_and_feature(directory.path());
+                let repository = RealGitRepository::new(
+                    &clone_directory.join(".git"),
+                    None,
+                    Some("git".into()),
+                    cx.executor(),
+                )
+                .expect("open clone");
+                repository.set_trusted(true);
+                git_command(&clone_directory, ["branch", "feature", "origin/feature"]);
+                let git = repository.git_binary_in_worktree().expect("git binary");
+                assert!(
+                    git.run(&["show-ref", "--verify", "refs/remotes/origin/feature"])
+                        .await
+                        .is_ok()
+                );
+                git_command(&remote_directory, ["branch", "-D", "feature"]);
+                repository
+                    .fetch(fetch_options, prune, None, Arc::default(), cx.to_async())
+                    .await
+                    .expect("fetch");
+                assert_eq!(
+                    git.run(&["show-ref", "--verify", "refs/remotes/origin/feature"])
+                        .await
+                        .is_err(),
+                    prune,
+                    "deleted remote branch should be pruned only when requested (prune: {prune})"
+                );
+                for reference in ["refs/remotes/origin/main", "refs/heads/feature"] {
+                    assert!(git.run(&["show-ref", "--verify", reference]).await.is_ok());
+                }
+            }
+        }
     }
 
     #[gpui::test]

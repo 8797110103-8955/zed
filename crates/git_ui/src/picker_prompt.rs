@@ -207,6 +207,7 @@ impl PickerDelegate for PickerPromptDelegate {
     }
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
+        self.tx.take();
         cx.emit(DismissEvent);
     }
 

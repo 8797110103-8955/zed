@@ -1,5 +1,6 @@
 use anyhow::Context as _;
 use editor::Editor;
+use futures::channel::oneshot;
 use fuzzy_nucleo::StringMatchCandidate;
 
 use collections::{HashMap, HashSet};
@@ -156,6 +157,54 @@ pub fn select_modal(
 }
 
 pub type SelectBranchCallback = Arc<dyn Fn(Branch, &mut Window, &mut App)>;
+
+pub(crate) fn prompt_remote_branch(
+    workspace: WeakEntity<Workspace>,
+    repository: Entity<Repository>,
+    remote_name: SharedString,
+    branches: Arc<[Branch]>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<anyhow::Result<Option<Branch>>> {
+    if !branches
+        .iter()
+        .any(|branch| branch.remote_name() == Some(remote_name.as_ref()))
+    {
+        return Task::ready(Ok(None));
+    }
+
+    window.spawn(cx, async move |cx| {
+        let (response, selection) = oneshot::channel();
+        workspace.update_in(cx, |workspace_view, window, cx| {
+            workspace_view.toggle_modal(window, cx, |window, cx| {
+                let mut list = BranchList::new_inner_with_behavior(
+                    workspace.clone(),
+                    Some(repository),
+                    BranchListStyle::Modal,
+                    rems(34.),
+                    false,
+                    BranchSelectionBehavior::PromptRemote {
+                        remote_name,
+                        response: Some(response),
+                    },
+                    window,
+                    cx,
+                );
+                list.picker.update(cx, |picker, cx| {
+                    picker.delegate.all_branches = process_branches(&branches, false);
+                    picker.refresh(window, cx);
+                });
+                list._subscriptions
+                    .push(cx.subscribe(&list.picker, |_, _, _, cx| {
+                        cx.emit(DismissEvent);
+                    }));
+                list.focus_handle(cx).focus(window, cx);
+                list
+            });
+        })?;
+        Ok(selection.await.ok())
+    })
+}
 
 pub fn create_embedded(
     workspace: WeakEntity<Workspace>,
@@ -455,6 +504,16 @@ impl BranchList {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .picker
+            .read(cx)
+            .delegate
+            .branch_selection_behavior
+            .remote_name()
+            .is_some()
+        {
+            return;
+        }
         cx.set_global(GlobalBranchFilter(branch_filter));
         self.picker.update(cx, |picker, cx| {
             if picker.delegate.branch_filter == branch_filter {
@@ -684,12 +743,16 @@ enum BranchSelectionBehavior {
         selected_branch: Option<SharedString>,
         on_select: SelectBranchCallback,
     },
+    PromptRemote {
+        remote_name: SharedString,
+        response: Option<oneshot::Sender<Branch>>,
+    },
 }
 
 impl BranchSelectionBehavior {
     fn selected_branch(&self) -> Option<&SharedString> {
         match self {
-            Self::Checkout => None,
+            Self::Checkout | Self::PromptRemote { .. } => None,
             Self::Select {
                 selected_branch, ..
             } => selected_branch.as_ref(),
@@ -697,7 +760,14 @@ impl BranchSelectionBehavior {
     }
 
     fn is_select_only(&self) -> bool {
-        matches!(self, Self::Select { .. })
+        !matches!(self, Self::Checkout)
+    }
+
+    fn remote_name(&self) -> Option<&str> {
+        match self {
+            Self::PromptRemote { remote_name, .. } => Some(remote_name),
+            _ => None,
+        }
     }
 }
 
@@ -1000,15 +1070,13 @@ impl BranchListDelegate {
         branch_selection_behavior: BranchSelectionBehavior,
         cx: &mut Context<BranchList>,
     ) -> Self {
-        let restore_selected_branch = match &branch_selection_behavior {
-            BranchSelectionBehavior::Checkout => None,
-            BranchSelectionBehavior::Select {
-                selected_branch, ..
-            } => selected_branch.clone(),
+        let restore_selected_branch = branch_selection_behavior.selected_branch().cloned();
+        let branch_filter = if branch_selection_behavior.remote_name().is_some() {
+            BranchFilter::Remote
+        } else {
+            cx.try_global::<GlobalBranchFilter>()
+                .map_or(BranchFilter::All, |filter| filter.0)
         };
-        let branch_filter = cx
-            .try_global::<GlobalBranchFilter>()
-            .map_or(BranchFilter::All, |filter| filter.0);
 
         Self {
             workspace,
@@ -1256,6 +1324,9 @@ impl PickerDelegate for BranchListDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
+        if self.branch_selection_behavior.remote_name().is_some() {
+            return "Pull which remote branch?".into();
+        }
         match self.state {
             PickerState::List | PickerState::NewRemote | PickerState::NewBranch => {
                 "Switch or type to create a branch…"
@@ -1311,6 +1382,9 @@ impl PickerDelegate for BranchListDelegate {
                         .overflow_hidden()
                         .child(editor.clone())
                         .map(|this| {
+                            if self.branch_selection_behavior.remote_name().is_some() {
+                                return this;
+                            }
                             let branch_filter = self.branch_filter;
                             let focus_handle = self.focus_handle.clone();
 
@@ -1419,7 +1493,11 @@ impl PickerDelegate for BranchListDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Task<()> {
         let all_branches = self.all_branches.clone();
-        let branch_selection_context = self.is_select_only().then(|| {
+        let branch_selection_context = matches!(
+            self.branch_selection_behavior,
+            BranchSelectionBehavior::Select { .. }
+        )
+        .then(|| {
             BranchSelectionContext::new(
                 self.branch_selection_behavior.selected_branch().cloned(),
                 self.repo.as_ref(),
@@ -1428,11 +1506,20 @@ impl PickerDelegate for BranchListDelegate {
         });
 
         let branch_filter = self.branch_filter;
+        let remote_name = self
+            .branch_selection_behavior
+            .remote_name()
+            .map(str::to_owned);
         cx.spawn_in(window, async move |picker, cx| {
-            let branch_matches_filter = |branch: &Branch| match branch_filter {
-                BranchFilter::All => true,
-                BranchFilter::Local => !branch.is_remote(),
-                BranchFilter::Remote => branch.is_remote(),
+            let branch_matches_filter = |branch: &Branch| {
+                if let Some(remote_name) = &remote_name {
+                    return branch.remote_name() == Some(remote_name.as_str());
+                }
+                match branch_filter {
+                    BranchFilter::All => true,
+                    BranchFilter::Local => !branch.is_remote(),
+                    BranchFilter::Remote => branch.is_remote(),
+                }
             };
 
             let mut matches: Vec<Entry> = if query.is_empty() {
@@ -1555,6 +1642,17 @@ impl PickerDelegate for BranchListDelegate {
 
         match entry {
             Entry::Branch { branch, .. } => {
+                if let BranchSelectionBehavior::PromptRemote { response, .. } =
+                    &mut self.branch_selection_behavior
+                {
+                    if let Some(response) = response.take() {
+                        if response.send(branch.clone()).is_err() {
+                            log::debug!("Remote branch selection is no longer needed");
+                        }
+                    }
+                    cx.emit(DismissEvent);
+                    return;
+                }
                 if let BranchSelectionBehavior::Select { on_select, .. } =
                     &self.branch_selection_behavior
                 {
@@ -1628,6 +1726,11 @@ impl PickerDelegate for BranchListDelegate {
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
         self.state = PickerState::List;
+        if let BranchSelectionBehavior::PromptRemote { response, .. } =
+            &mut self.branch_selection_behavior
+        {
+            response.take();
+        }
         cx.emit(DismissEvent);
     }
 
@@ -2402,6 +2505,86 @@ mod tests {
     ) -> (Entity<Project>, Entity<Repository>) {
         let (_, project, repository) = init_fake_repository_with_fs(cx).await;
         (project, repository)
+    }
+
+    #[gpui::test]
+    async fn test_pull_from_branch_picker(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (project, repository) = init_fake_repository(cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("workspace");
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
+
+        let branches: Arc<[Branch]> = Arc::from([
+            create_test_branch("main", false, Some("origin"), Some(100)),
+            create_test_branch("main", true, None, Some(500)),
+            create_test_branch("topic", false, Some("fork"), Some(600)),
+            create_test_branch("feature/fix", false, Some("origin"), Some(300)),
+            create_test_branch("feature", false, Some("origin"), Some(200)),
+            create_test_branch_with_upstream(
+                "feature",
+                false,
+                None,
+                Some(400),
+                Some("refs/remotes/origin/feature"),
+            ),
+        ]);
+        let active_branch = repository.read_with(cx, |repository, _| repository.branch.clone());
+        cx.update(|_, cx| cx.set_global(GlobalBranchFilter(BranchFilter::Local)));
+        let selection = workspace.update_in(cx, |workspace, window, cx| {
+            prompt_remote_branch(
+                workspace.weak_handle(),
+                repository.clone(),
+                "origin".into(),
+                branches,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let modal = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_modal::<BranchList>(cx)
+                .expect("branch picker")
+        });
+        modal.update_in(cx, |modal, window, cx| {
+            modal.set_branch_filter(BranchFilter::Local, window, cx);
+            assert!(cx.global::<GlobalBranchFilter>().0 == BranchFilter::Local);
+            modal.picker.update(cx, |picker, cx| {
+                assert_eq!(
+                    picker
+                        .delegate
+                        .matches
+                        .iter()
+                        .map(Entry::name)
+                        .collect::<Vec<_>>(),
+                    ["origin/feature/fix", "origin/feature", "origin/main"]
+                );
+                assert!(picker.delegate.branch_filter == BranchFilter::Remote);
+                picker.set_query("feature/fix", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        modal.update_in(cx, |modal, window, cx| {
+            modal.picker.update(cx, |picker, cx| {
+                assert_eq!(picker.delegate.matches.len(), 1);
+                picker.delegate.confirm(false, window, cx);
+            });
+        });
+        let selected = selection.await.expect("selection result").expect("branch");
+        assert_eq!(
+            selected.ref_name.as_ref(),
+            "refs/remotes/origin/feature/fix"
+        );
+        assert_eq!(
+            repository.read_with(cx, |repository, _| repository.branch.clone()),
+            active_branch
+        );
     }
 
     #[gpui::test]

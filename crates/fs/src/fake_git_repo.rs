@@ -1327,6 +1327,7 @@ impl GitRepository for FakeGitRepository {
     fn fetch(
         &self,
         fetch_options: FetchOptions,
+        _prune: bool,
         _askpass: Option<AskPassDelegate>,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,

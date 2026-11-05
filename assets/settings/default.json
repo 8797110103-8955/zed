@@ -1911,6 +1911,9 @@
       // Only applies when auto fetch is enabled. (min: 15)
       "interval_secs": 60,
     },
+    // Whether to remove remote-tracking branches that no longer exist on the remote when fetching.
+    // When false, Git's own `fetch.prune` configuration decides.
+    "prune_on_fetch": true,
   },
   // The list of custom Git hosting providers.
   "git_hosting_providers": [
