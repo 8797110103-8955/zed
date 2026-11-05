@@ -1288,6 +1288,9 @@ pub fn prepare_task_for_spawn(
     shell: &Shell,
     is_windows: bool,
 ) -> SpawnInTerminal {
+    if task.command.as_deref() == Some(task::PACKAGE_MANAGER_COMMAND) {
+        return task.clone();
+    }
     let builder = ShellBuilder::new(shell, is_windows);
     let command_label = builder.command_label(task.command.as_deref().unwrap_or(""));
     let (command, args) = builder.build_no_quote(task.command.clone(), &task.args);

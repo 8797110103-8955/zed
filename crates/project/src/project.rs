@@ -107,9 +107,8 @@ pub use lsp_command::EditPredictionDefinition;
 use lsp_command::*;
 use lsp_store::{CompletionDocumentation, LspFormatTarget, OpenLspBufferHandle};
 pub use manifest_tree::ManifestProvidersStore;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use parking_lot::Mutex;
-pub use prettier_store::PrettierStore;
 use project_settings::{ProjectSettings, SettingsObserver, SettingsObserverEvent};
 #[cfg(target_os = "windows")]
 use remote::wsl_path_to_windows_path;
@@ -253,7 +252,7 @@ pub struct Project {
     git_diff_debouncer: DebouncedDelay<Self>,
     remotely_created_models: Arc<Mutex<RemotelyCreatedModels>>,
     terminals: Terminals,
-    node: Option<NodeRuntime>,
+    node: Option<PackageManagerRuntime>,
     search_history: SearchHistory,
     search_included_history: SearchHistory,
     search_excluded_history: SearchHistory,
@@ -1291,7 +1290,7 @@ impl Project {
 
     pub fn local(
         client: Arc<Client>,
-        node: NodeRuntime,
+        node: PackageManagerRuntime,
         user_store: Entity<UserStore>,
         languages: Arc<LanguageRegistry>,
         fs: Arc<dyn Fs>,
@@ -1498,7 +1497,7 @@ impl Project {
     pub fn remote(
         remote: Entity<RemoteClient>,
         client: Arc<Client>,
-        node: NodeRuntime,
+        node: PackageManagerRuntime,
         user_store: Entity<UserStore>,
         languages: Arc<LanguageRegistry>,
         fs: Arc<dyn Fs>,
@@ -2148,7 +2147,7 @@ impl Project {
         let project = cx.update(|cx| {
             Project::local(
                 client,
-                node_runtime::NodeRuntime::unavailable(),
+                node_runtime::PackageManagerRuntime::unavailable(),
                 user_store,
                 Arc::new(languages),
                 fs,
@@ -2208,7 +2207,7 @@ impl Project {
         let project = cx.update(|cx| {
             Project::local(
                 client,
-                node_runtime::NodeRuntime::unavailable(),
+                node_runtime::PackageManagerRuntime::unavailable(),
                 user_store,
                 Arc::new(languages),
                 fs,
@@ -2352,7 +2351,7 @@ impl Project {
     }
 
     #[inline]
-    pub fn node_runtime(&self) -> Option<&NodeRuntime> {
+    pub fn node_runtime(&self) -> Option<&PackageManagerRuntime> {
         self.node.as_ref()
     }
 

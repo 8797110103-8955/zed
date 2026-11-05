@@ -31,7 +31,8 @@ use futures::{FutureExt, StreamExt, channel::oneshot, future};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
-    App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _, block_on,
+    Action, App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _,
+    block_on,
 };
 use gpui_platform;
 
@@ -44,6 +45,7 @@ use remote::RemoteConnectionOptions;
 use reqwest_client::ReqwestClient;
 
 use assets::Assets;
+use node_runtime::PackageManagerRuntime;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
@@ -69,7 +71,10 @@ use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore,
-    notifications::{NotificationId, NotifyResultExt},
+    notifications::{
+        NotificationId, NotifyResultExt, dismiss_app_notification, show_app_notification,
+        simple_message_notification::MessageNotification,
+    },
     restore_multiworkspace,
 };
 use zed::{
@@ -530,34 +535,80 @@ fn main() {
         let mut languages = LanguageRegistry::new(cx.background_executor().clone());
         languages.set_language_server_download_dir(paths::languages_dir().clone());
         let languages = Arc::new(languages);
-        let (mut tx, rx) = watch::channel(None);
+        let (mut package_manager_tx, package_manager_rx) = watch::channel(None);
         cx.observe_global::<SettingsStore>(move |cx| {
-            let settings = &ProjectSettings::get_global(cx).node;
-            let options = NodeBinaryOptions {
-                allow_path_lookup: !settings.ignore_system_version,
-                // TODO: Expose this setting
-                allow_binary_download: true,
-                use_paths: settings.path.as_ref().map(|node_path| {
-                    let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
-                    let npm_path = settings
-                        .npm_path
-                        .as_ref()
-                        .map(|path| PathBuf::from(shellexpand::tilde(&path).as_ref()));
-                    (
-                        node_path.clone(),
-                        npm_path.unwrap_or_else(|| {
-                            let base_path = PathBuf::new();
-                            node_path.parent().unwrap_or(&base_path).join("npm")
-                        }),
-                    )
-                }),
-            };
-            tx.send(Some(options)).log_err();
+            package_manager_tx
+                .send(Some(ProjectSettings::get_global(cx).package_manager))
+                .log_err();
         })
         .detach();
         ui::observe_scrollbar_settings::<SettingsStore>(cx);
 
-        let node_runtime = NodeRuntime::new(client.http_client(), Some(shell_env_loaded_rx), rx);
+        let node_runtime = NodeRuntime::new(
+            Some(shell_env_loaded_rx),
+            watch::channel(Some(NodeBinaryOptions {
+                allow_path_lookup: true,
+            }))
+            .1,
+        );
+        let node_runtime =
+            PackageManagerRuntime::new(node_runtime, client.http_client(), package_manager_rx);
+        for (mut node_errors, notification_name, install_label, install_url, open_settings) in [
+            (
+                node_runtime.node_runtime().errors(),
+                "system-node-unavailable",
+                "Open Node.js Website",
+                "https://nodejs.org/en/download",
+                false,
+            ),
+            (
+                node_runtime.errors(),
+                "system-package-manager-unavailable",
+                "Install pnpm",
+                "https://pnpm.io/installation",
+                true,
+            ),
+        ] {
+            cx.spawn(async move |cx| {
+                loop {
+                    let error = node_errors.borrow().clone();
+                    cx.update(|cx| {
+                        let notification_id = NotificationId::Named(notification_name.into());
+                        if let Some(error) = error {
+                            show_app_notification(notification_id, cx, move |cx| {
+                                cx.new(|cx| {
+                                    let notification =
+                                        MessageNotification::new(error.as_str().to_owned(), cx)
+                                            .primary_message(install_label)
+                                            .primary_on_click(move |_, cx| {
+                                                cx.open_url(install_url);
+                                            });
+                                    // Node.js has no settings left to change, only the package manager does.
+                                    if open_settings {
+                                        notification
+                                            .secondary_message("Open Settings")
+                                            .secondary_on_click(|window, cx| {
+                                                window.dispatch_action(
+                                                    zed_actions::OpenSettingsFile.boxed_clone(),
+                                                    cx,
+                                                );
+                                            })
+                                    } else {
+                                        notification
+                                    }
+                                })
+                            });
+                        } else {
+                            dismiss_app_notification(&notification_id, cx);
+                        }
+                    });
+                    if node_errors.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
 
         debug_adapter_extension::init(extension_host_proxy.clone(), cx);
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);

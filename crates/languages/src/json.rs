@@ -11,7 +11,7 @@ use language::{
     LspAdapterDelegate, LspInstaller, Toolchain,
 };
 use lsp::{LanguageServerBinary, LanguageServerName, Uri};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
 use project::lsp_store::language_server_settings;
 use semver::Version;
 use serde_json::{Value, json};
@@ -40,7 +40,9 @@ use crate::PackageJsonData;
 const SERVER_PATH: &str =
     "node_modules/vscode-langservers-extracted/bin/vscode-json-language-server";
 
-pub(crate) struct JsonTaskProvider;
+pub(crate) struct JsonTaskProvider {
+    pub defer_package_manager_detection: bool,
+}
 
 impl ContextProvider for JsonTaskProvider {
     fn associated_tasks(
@@ -62,13 +64,15 @@ impl ContextProvider for JsonTaskProvider {
             return Task::ready(None);
         }
 
+        let defer_package_manager_detection =
+            self.defer_package_manager_detection && file.worktree.read(cx).is_local();
         cx.spawn(async move |cx| {
             let contents = file
                 .worktree
                 .update(cx, |this, cx| this.load_file(&file.path, cx))
                 .await
                 .ok()?;
-            let path = cx.update(|cx| file.abs_path(cx)).as_path().into();
+            let path: Arc<Path> = cx.update(|cx| file.abs_path(cx)).as_path().into();
             let contents_text = contents.text.to_string();
 
             let task_templates = if is_package_json {
@@ -76,8 +80,16 @@ impl ContextProvider for JsonTaskProvider {
                     HashMap<String, serde_json_lenient::Value>,
                 >(&contents_text)
                 .ok()?;
-                let package_json = PackageJsonData::new(path, package_json);
-                let command = package_json.package_manager.unwrap_or("npm").to_owned();
+                let package_json = PackageJsonData::new(
+                    path,
+                    package_json,
+                    !defer_package_manager_detection,
+                );
+                let command = if defer_package_manager_detection {
+                    task::PACKAGE_MANAGER_COMMAND.to_owned()
+                } else {
+                    package_json.package_manager.unwrap_or("npm").to_owned()
+                };
                 package_json
                     .scripts
                     .into_iter()
@@ -139,13 +151,13 @@ fn server_binary_arguments(server_path: &Path) -> Vec<OsString> {
 
 pub struct JsonLspAdapter {
     languages: Arc<LanguageRegistry>,
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
 }
 
 impl JsonLspAdapter {
     const PACKAGE_NAME: &str = "vscode-langservers-extracted";
 
-    pub fn new(languages: Arc<LanguageRegistry>, node: NodeRuntime) -> Self {
+    pub fn new(languages: Arc<LanguageRegistry>, node: PackageManagerRuntime) -> Self {
         Self { languages, node }
     }
 }
@@ -155,12 +167,13 @@ impl LspInstaller for JsonLspAdapter {
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
         self.node
-            .npm_package_latest_version(Self::PACKAGE_NAME)
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version(Self::PACKAGE_NAME)
             .await
     }
 
@@ -196,7 +209,7 @@ impl LspInstaller for JsonLspAdapter {
             let server_path = container_dir.join(SERVER_PATH);
 
             let should_install_language_server = node
-                .should_install_npm_package(
+                .should_install_package(
                     Self::PACKAGE_NAME,
                     &server_path,
                     &container_dir,
@@ -220,14 +233,14 @@ impl LspInstaller for JsonLspAdapter {
         &self,
         _latest_version: Self::BinaryVersion,
         container_dir: PathBuf,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
             let server_path = container_dir.join(SERVER_PATH);
 
-            node.npm_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
+            node.package_manager_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
                 .await?;
 
             Ok(LanguageServerBinary {
@@ -296,6 +309,11 @@ impl LspAdapter for JsonLspAdapter {
             // `Server Info`
             serde_json::json!({
                 "json": {
+                    "resultLimit": 5000,
+                    "jsonFoldingLimit": 5000,
+                    "jsoncFoldingLimit": 5000,
+                    "jsonColorDecoratorLimit": 5000,
+                    "jsoncColorDecoratorLimit": 5000,
                     "format": {
                         "enable": true,
                     },
@@ -403,7 +421,7 @@ fn json_schema_proxy_settings(proxy: Option<String>) -> Option<Value> {
 
 async fn get_cached_server_binary(
     container_dir: PathBuf,
-    node: &NodeRuntime,
+    node: &PackageManagerRuntime,
 ) -> Option<LanguageServerBinary> {
     maybe!(async {
         let server_path = container_dir.join(SERVER_PATH);

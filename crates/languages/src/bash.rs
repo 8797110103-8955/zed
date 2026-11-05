@@ -4,7 +4,7 @@ use collections::HashMap;
 use gpui::AsyncApp;
 use language::{LanguageServerName, LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
 use lsp::{LanguageServerBinary, Uri};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
 use project::{ContextProviderWithTasks, lsp_store::language_server_settings};
 use semver::Version;
 use serde_json::Value;
@@ -29,21 +29,21 @@ pub(super) fn bash_task_context() -> ContextProviderWithTasks {
 }
 
 pub struct BashLspAdapter {
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
 }
 
 impl BashLspAdapter {
     const PACKAGE_NAME: &str = "bash-language-server";
     const NODE_MODULE_RELATIVE_SERVER_PATH: &str = "bash-language-server/out/cli.js";
 
-    pub fn new(node: NodeRuntime) -> Self {
+    pub fn new(node: PackageManagerRuntime) -> Self {
         Self { node }
     }
 
     async fn get_cached_server_binary(
         container_dir: PathBuf,
         env: HashMap<String, String>,
-        node: &NodeRuntime,
+        node: &PackageManagerRuntime,
     ) -> Option<lsp::LanguageServerBinary> {
         maybe!(async {
             let server_path = container_dir
@@ -109,7 +109,7 @@ impl LspInstaller for BashLspAdapter {
                 .join(Self::NODE_MODULE_RELATIVE_SERVER_PATH);
 
             let should_install_language_server = node
-                .should_install_npm_package(
+                .should_install_package(
                     Self::PACKAGE_NAME,
                     &server_path,
                     &container_dir,
@@ -132,12 +132,13 @@ impl LspInstaller for BashLspAdapter {
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut gpui::AsyncApp,
     ) -> Result<Self::BinaryVersion> {
         self.node
-            .npm_package_latest_version(Self::PACKAGE_NAME)
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version(Self::PACKAGE_NAME)
             .await
     }
 
@@ -147,7 +148,7 @@ impl LspInstaller for BashLspAdapter {
         container_dir: std::path::PathBuf,
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<lsp::LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
         let delegate = delegate.clone();
 
         async move {
@@ -155,7 +156,7 @@ impl LspInstaller for BashLspAdapter {
                 .join("node_modules")
                 .join(Self::NODE_MODULE_RELATIVE_SERVER_PATH);
 
-            node.npm_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
+            node.package_manager_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
                 .await?;
 
             let env = delegate.shell_env().await;

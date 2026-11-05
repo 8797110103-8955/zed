@@ -22,7 +22,7 @@ use language::{
     point_to_lsp, range_from_lsp,
 };
 use lsp::{LanguageServer, LanguageServerBinary, LanguageServerId, LanguageServerName};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
 use parking_lot::Mutex;
 use project::project_settings::ProjectSettings;
 use project::{DisableAiSettings, Project};
@@ -239,7 +239,7 @@ pub struct Completion {
 
 pub struct Copilot {
     fs: Arc<dyn Fs>,
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     server: CopilotServer,
     buffers: HashSet<WeakEntity<Buffer>>,
     server_id: LanguageServerId,
@@ -260,7 +260,7 @@ impl GlobalCopilotAuth {
     pub fn set_global(
         server_id: LanguageServerId,
         fs: Arc<dyn Fs>,
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         cx: &mut App,
     ) -> GlobalCopilotAuth {
         let auth =
@@ -318,7 +318,7 @@ impl Copilot {
         project: Option<Entity<Project>>,
         new_server_id: LanguageServerId,
         fs: Arc<dyn Fs>,
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         cx: &mut Context<Self>,
     ) -> Self {
         let send_focus_notification = project.map(|project| {
@@ -531,7 +531,7 @@ impl Copilot {
         use fs::FakeFs;
         use gpui::Subscription;
         use lsp::FakeLanguageServer;
-        use node_runtime::NodeRuntime;
+        use node_runtime::PackageManagerRuntime;
 
         let (server, mut fake_server) = FakeLanguageServer::new(
             LanguageServerId(0),
@@ -545,7 +545,7 @@ impl Copilot {
             &mut cx.to_async(),
         );
         initializer(&mut fake_server);
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let send_focus_notification = Subscription::new(|| {});
         let this = cx.new(|cx| Self {
             server_id: LanguageServerId(0),
@@ -568,7 +568,7 @@ impl Copilot {
     async fn start_language_server(
         new_server_id: LanguageServerId,
         fs: Arc<dyn Fs>,
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         env: Option<HashMap<String, String>>,
         this: WeakEntity<Self>,
         awaiting_sign_in_after_start: bool,
@@ -1344,13 +1344,16 @@ async fn clear_copilot_dir() {
     remove_matching(paths::copilot_dir(), |_| true).await
 }
 
-async fn get_copilot_lsp(fs: Arc<dyn Fs>, node_runtime: NodeRuntime) -> anyhow::Result<PathBuf> {
+async fn get_copilot_lsp(
+    fs: Arc<dyn Fs>,
+    node_runtime: PackageManagerRuntime,
+) -> anyhow::Result<PathBuf> {
     const PACKAGE_NAME: &str = "@github/copilot-language-server";
     const SERVER_PATH: &str =
         "node_modules/@github/copilot-language-server/dist/language-server.js";
 
     let latest_version = node_runtime
-        .npm_package_latest_version(PACKAGE_NAME)
+        .package_manager_latest_version(PACKAGE_NAME)
         .await?;
     let server_path = paths::copilot_dir().join(SERVER_PATH);
     let binary_path = copilot_lsp_native_binary_path()?;
@@ -1359,7 +1362,7 @@ async fn get_copilot_lsp(fs: Arc<dyn Fs>, node_runtime: NodeRuntime) -> anyhow::
 
     let should_install = !fs.is_file(&binary_path).await
         || node_runtime
-            .should_install_npm_package(
+            .should_install_package(
                 PACKAGE_NAME,
                 &server_path,
                 paths::copilot_dir(),
@@ -1368,7 +1371,7 @@ async fn get_copilot_lsp(fs: Arc<dyn Fs>, node_runtime: NodeRuntime) -> anyhow::
             .await;
     if should_install {
         node_runtime
-            .npm_install_latest_packages(paths::copilot_dir(), &[PACKAGE_NAME])
+            .package_manager_install_latest_packages(paths::copilot_dir(), &[PACKAGE_NAME])
             .await?;
     }
 
@@ -1414,7 +1417,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::TestAppContext;
     use language::language_settings::AllLanguageSettings;
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use settings::{Settings, SettingsStore};
     use util::{
         path,
@@ -1437,7 +1440,7 @@ mod tests {
         let copilot = cx.new(|cx| Copilot {
             server_id: LanguageServerId(0),
             fs: FakeFs::new(cx.background_executor().clone()),
-            node_runtime: NodeRuntime::unavailable(),
+            node_runtime: PackageManagerRuntime::unavailable(),
             server: CopilotServer::Disabled,
             buffers: Default::default(),
             _subscriptions: vec![],
@@ -1783,7 +1786,7 @@ mod tests {
         let copilot = cx.new(|cx| Copilot {
             server_id: LanguageServerId(0),
             fs: FakeFs::new(cx.background_executor().clone()),
-            node_runtime: NodeRuntime::unavailable(),
+            node_runtime: PackageManagerRuntime::unavailable(),
             server: CopilotServer::Disabled,
             buffers: Default::default(),
             _subscriptions: vec![],

@@ -3415,6 +3415,27 @@ fn editor_page() -> SettingsPage {
 }
 
 fn languages_and_tools_page(cx: &App) -> SettingsPage {
+    fn package_manager_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Package Management"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Package Manager",
+                description: "Choose the package manager for project tasks and extension tools. Auto detects project declarations and lockfiles. Tool installation uses an available alternative if the preferred manager is missing.",
+                field: Box::new(SettingField {
+                    json_path: Some("package_manager"),
+                    pick: |content| content.package_manager.as_ref(),
+                    write: |content, value, _| content.package_manager = value,
+                    organization_override: None,
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+        ]
+    }
+
     fn file_types_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("File Types"),
@@ -3721,6 +3742,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
             concat_sections!(
                 non_editor_language_settings_data(),
                 file_types_section(),
+                package_manager_section(),
                 diagnostics_section(),
                 inline_diagnostics_section(),
                 lsp_pull_diagnostics_section(),

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore};
@@ -10,6 +9,7 @@ use gpui::{App, AppContext as _, Entity};
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use language_extension::LspAccess;
+use node_runtime::PackageManagerRuntime;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use project::project_settings::ProjectSettings;
 use prompt_store::PromptBuilder;
@@ -23,7 +23,7 @@ pub struct AgentCliAppState {
     pub client: Arc<Client>,
     pub user_store: Entity<UserStore>,
     pub fs: Arc<dyn fs::Fs>,
-    pub node_runtime: NodeRuntime,
+    pub node_runtime: PackageManagerRuntime,
 }
 
 pub fn init(cx: &mut App) -> Arc<AgentCliAppState> {
@@ -78,31 +78,22 @@ pub fn init(cx: &mut App) -> Arc<AgentCliAppState> {
 
     extension::init(cx);
 
-    let (mut node_options_tx, node_options_rx) = watch::channel(None);
+    let (mut package_manager_tx, package_manager_rx) = watch::channel(None);
     cx.observe_global::<SettingsStore>(move |cx| {
-        let settings = &ProjectSettings::get_global(cx).node;
-        let options = NodeBinaryOptions {
-            allow_path_lookup: !settings.ignore_system_version,
-            allow_binary_download: true,
-            use_paths: settings.path.as_ref().map(|node_path| {
-                let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
-                let npm_path = settings
-                    .npm_path
-                    .as_ref()
-                    .map(|path| PathBuf::from(shellexpand::tilde(&path).as_ref()));
-                (
-                    node_path.clone(),
-                    npm_path.unwrap_or_else(|| {
-                        let base_path = PathBuf::new();
-                        node_path.parent().unwrap_or(&base_path).join("npm")
-                    }),
-                )
-            }),
-        };
-        node_options_tx.send(Some(options)).log_err();
+        package_manager_tx
+            .send(Some(ProjectSettings::get_global(cx).package_manager))
+            .log_err();
     })
     .detach();
-    let node_runtime = NodeRuntime::new(client.http_client(), None, node_options_rx);
+    let node_runtime = NodeRuntime::new(
+        None,
+        watch::channel(Some(NodeBinaryOptions {
+            allow_path_lookup: true,
+        }))
+        .1,
+    );
+    let node_runtime =
+        PackageManagerRuntime::new(node_runtime, client.http_client(), package_manager_rx);
 
     let extension_host_proxy = ExtensionHostProxy::global(cx);
     debug_adapter_extension::init(extension_host_proxy.clone(), cx);

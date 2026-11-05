@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use gpui::AsyncApp;
 use language::{LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
 use lsp::{LanguageServerBinary, LanguageServerName, Uri};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
 use project::lsp_store::language_server_settings;
 use semver::Version;
 use serde_json::json;
@@ -23,12 +23,12 @@ fn server_binary_arguments(server_path: &Path) -> Vec<OsString> {
 }
 
 pub struct CssLspAdapter {
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
 }
 
 impl CssLspAdapter {
     const PACKAGE_NAME: &str = "vscode-langservers-extracted";
-    pub fn new(node: NodeRuntime) -> Self {
+    pub fn new(node: PackageManagerRuntime) -> Self {
         CssLspAdapter { node }
     }
 }
@@ -38,12 +38,13 @@ impl LspInstaller for CssLspAdapter {
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
         self.node
-            .npm_package_latest_version("vscode-langservers-extracted")
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version("vscode-langservers-extracted")
             .await
     }
 
@@ -69,14 +70,14 @@ impl LspInstaller for CssLspAdapter {
         &self,
         _latest_version: Self::BinaryVersion,
         container_dir: PathBuf,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
             let server_path = container_dir.join(SERVER_PATH);
 
-            node.npm_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
+            node.package_manager_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
                 .await?;
 
             Ok(LanguageServerBinary {
@@ -101,7 +102,7 @@ impl LspInstaller for CssLspAdapter {
             let server_path = container_dir.join(SERVER_PATH);
 
             let should_install_language_server = node
-                .should_install_npm_package(
+                .should_install_package(
                     Self::PACKAGE_NAME,
                     &server_path,
                     &container_dir,
@@ -180,7 +181,7 @@ impl LspAdapter for CssLspAdapter {
 
 async fn get_cached_server_binary(
     container_dir: PathBuf,
-    node: &NodeRuntime,
+    node: &PackageManagerRuntime,
 ) -> Option<LanguageServerBinary> {
     maybe!(async {
         let server_path = container_dir.join(SERVER_PATH);

@@ -2,7 +2,7 @@ use assets::Assets;
 use gpui::{Entity, KeyBinding, Length, StyleRefinement, WindowOptions, rgb};
 use language::LanguageRegistry;
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use settings::SettingsStore;
 use std::sync::Arc;
 use theme::LoadThemes;
@@ -24,7 +24,7 @@ pub fn main() {
         cx.set_global(store);
         cx.bind_keys([KeyBinding::new("cmd-c", markdown::Copy, None)]);
 
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let language_registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
         let fs = fs::FakeFs::new(cx.background_executor().clone());
         languages::init(language_registry, fs, node_runtime, cx);

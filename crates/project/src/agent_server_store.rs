@@ -15,7 +15,7 @@ use gpui::{
     TaskExt,
 };
 use http_client::HttpClient;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use percent_encoding::percent_decode_str;
 use remote::RemoteClient;
 use rpc::{AnyProtoClient, TypedEnvelope, proto};
@@ -145,7 +145,7 @@ pub trait ExternalAgentServer {
 
 enum AgentServerStoreState {
     Local {
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         fs: Arc<dyn Fs>,
         project_environment: Entity<ProjectEnvironment>,
         downstream_client: Option<(u64, AnyProtoClient)>,
@@ -489,7 +489,7 @@ impl AgentServerStore {
         cx.emit(AgentServersUpdated);
     }
 
-    pub fn node_runtime(&self) -> Option<NodeRuntime> {
+    pub fn node_runtime(&self) -> Option<PackageManagerRuntime> {
         match &self.state {
             AgentServerStoreState::Local { node_runtime, .. } => Some(node_runtime.clone()),
             _ => None,
@@ -497,7 +497,7 @@ impl AgentServerStore {
     }
 
     pub fn local(
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         fs: Arc<dyn Fs>,
         project_environment: Entity<ProjectEnvironment>,
         http_client: Arc<dyn HttpClient>,
@@ -1118,7 +1118,7 @@ async fn remove_stale_versioned_archive_cache_dirs(
 struct LocalRegistryArchiveAgent {
     fs: Arc<dyn Fs>,
     http_client: Arc<dyn HttpClient>,
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     project_environment: Entity<ProjectEnvironment>,
     installation_dir: PathBuf,
     version: SharedString,
@@ -1341,7 +1341,7 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
 
 struct LocalRegistryNpxAgent {
     fs: Arc<dyn Fs>,
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     project_environment: Entity<ProjectEnvironment>,
     registry_id: Arc<str>,
     version: SharedString,
@@ -1381,6 +1381,11 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         let settings_env = self.settings_env.clone();
 
         cx.spawn(async move |cx| {
+            let node_runtime = project_environment.read_with(cx, |environment, cx| {
+                environment.default_directory(cx)
+                    .map(|directory| node_runtime.for_project(directory))
+                    .unwrap_or_else(|| node_runtime.clone())
+            })?;
             let mut env = project_environment
                 .update(cx, |project_environment, cx| {
                     project_environment.default_environment(cx)
@@ -1424,7 +1429,7 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
                 node_runtime::read_package_executable(node_modules_dir, package_name).await?;
 
             let node_binary = node_runtime.binary_path().await?;
-            env.extend(node_runtime::npm_command_env(&node_binary));
+            env.extend(node_runtime::package_manager_command_env(&node_binary));
             env.extend(distribution_env);
             env.extend(extra_env);
             env.extend(settings_env);
@@ -1465,12 +1470,12 @@ fn npx_install_lock(install_dir: &Path) -> Arc<async_lock::Mutex<()>> {
 }
 
 async fn install_npx_package(
-    node_runtime: &NodeRuntime,
+    node_runtime: &PackageManagerRuntime,
     install_dir: &Path,
     package_spec: &str,
 ) -> Result<()> {
     node_runtime
-        .run_npm_subcommand(
+        .run_package_manager_subcommand(
             Some(install_dir),
             "install",
             &[package_spec, "--save-exact"],
@@ -1782,7 +1787,7 @@ mod tests {
     use gpui::TestAppContext;
     #[cfg(feature = "test-support")]
     use http_client::{AsyncBody, FakeHttpClient, Response};
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use settings::Settings as _;
 
     #[cfg(feature = "test-support")]
@@ -1837,7 +1842,7 @@ mod tests {
             LocalRegistryArchiveAgent {
                 fs,
                 http_client,
-                node_runtime: NodeRuntime::unavailable(),
+                node_runtime: PackageManagerRuntime::unavailable(),
                 project_environment,
                 installation_dir,
                 version: "1.0.0".into(),
@@ -1919,7 +1924,7 @@ mod tests {
 
             cx.new(|cx| {
                 AgentServerStore::local(
-                    NodeRuntime::unavailable(),
+                    PackageManagerRuntime::unavailable(),
                     fs,
                     project_environment,
                     http_client,

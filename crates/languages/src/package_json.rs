@@ -22,7 +22,11 @@ pub struct PackageJsonData {
 }
 
 impl PackageJsonData {
-    pub fn new(path: Arc<Path>, package_json: HashMap<String, Value>) -> Self {
+    pub fn new(
+        path: Arc<Path>,
+        package_json: HashMap<String, Value>,
+        detect_package_manager: bool,
+    ) -> Self {
         let mut scripts = BTreeSet::new();
         if let Some(Value::Object(package_json_scripts)) = package_json.get("scripts") {
             scripts.extend(
@@ -80,7 +84,11 @@ impl PackageJsonData {
             }
         }
 
-        let package_manager = package_manager_from_package_json(&package_json);
+        let package_manager = if detect_package_manager {
+            package_manager_from_package_json(&package_json)
+        } else {
+            None
+        };
 
         Self {
             jest_package_path,
@@ -164,6 +172,7 @@ mod tests {
             PackageJsonData::new(
                 Path::new("/root/package.json").into(),
                 serde_json_lenient::from_str(source).expect("provided source should be valid JSON"),
+                true,
             )
             .package_manager
         }

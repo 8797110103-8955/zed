@@ -26,7 +26,7 @@ use http_client::HttpClient;
 use language::LanguageName;
 use lsp::LanguageServerName;
 use moka::sync::Cache;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use release_channel::ReleaseChannel;
 use semver::Version;
 use settings::Settings;
@@ -49,7 +49,7 @@ pub struct WasmHost {
     engine: Engine,
     release_channel: ReleaseChannel,
     http_client: Arc<dyn HttpClient>,
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     pub(crate) proxy: Arc<ExtensionHostProxy>,
     fs: Arc<dyn Fs>,
     pub work_dir: PathBuf,
@@ -94,6 +94,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Command> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let command = extension
                     .call_language_server_command(
@@ -121,6 +123,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_initialization_options(
@@ -146,6 +150,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_workspace_configuration(
@@ -170,6 +176,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 extension
                     .call_language_server_initialization_options_schema(
@@ -193,6 +201,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 extension
                     .call_language_server_workspace_configuration_schema(
@@ -217,6 +227,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_additional_initialization_options(
@@ -243,6 +255,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_additional_workspace_configuration(
@@ -453,6 +467,8 @@ impl extension::Extension for WasmExtension {
     ) -> Result<DebugAdapterBinary> {
         self.call(|extension, store| {
             async move {
+                store.data_mut().package_manager_project_root =
+                    Some(PathBuf::from(worktree.root_path()).into());
                 let resource = store.data_mut().table.push(worktree)?;
                 let dap_binary = extension
                     .call_get_dap_binary(store, dap_name, config, user_installed_path, resource)
@@ -546,6 +562,7 @@ pub struct WasmState {
     pub host: Arc<WasmHost>,
     pub(crate) capability_granter: CapabilityGranter,
     pub(crate) language_server_status_source: Option<gpui::EntityId>,
+    package_manager_project_root: Option<Arc<Path>>,
 }
 
 type MainThreadCall = Box<dyn Send + for<'a> FnOnce(&'a mut AsyncApp) -> LocalBoxFuture<'a, ()>>;
@@ -612,7 +629,7 @@ impl WasmHost {
     pub fn new(
         fs: Arc<dyn Fs>,
         http_client: Arc<dyn HttpClient>,
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         proxy: Arc<ExtensionHostProxy>,
         work_dir: PathBuf,
         cx: &mut App,
@@ -680,6 +697,7 @@ impl WasmHost {
                         manifest.clone(),
                     ),
                     language_server_status_source: None,
+                    package_manager_project_root: None,
                 },
             );
             // Store will yield after 1 tick, and get a new deadline of 1 tick after each yield.
@@ -921,6 +939,7 @@ impl WasmExtension {
             .unbounded_send(Box::new(move |extension, store| {
                 async {
                     let result = f(extension, store).await;
+                    store.data_mut().package_manager_project_root = None;
                     return_tx.send(result).ok();
                 }
                 .boxed()
@@ -942,6 +961,13 @@ impl WasmExtension {
 }
 
 impl WasmState {
+    fn node_runtime(&self) -> PackageManagerRuntime {
+        match &self.package_manager_project_root {
+            Some(root) => self.host.node_runtime.for_project(root.clone()),
+            None => self.host.node_runtime.clone(),
+        }
+    }
+
     fn on_main_thread<T, Fn>(&self, f: Fn) -> impl 'static + Future<Output = T>
     where
         T: 'static + Send,
@@ -1040,7 +1066,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::TestAppContext;
     use http_client::FakeHttpClient;
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use serde_json::json;
     use settings::SettingsStore;
 
@@ -1077,7 +1103,7 @@ mod tests {
             WasmHost::new(
                 fs.clone(),
                 FakeHttpClient::with_200_response(),
-                NodeRuntime::unavailable(),
+                PackageManagerRuntime::unavailable(),
                 Arc::new(ExtensionHostProxy::default()),
                 PathBuf::from("/work"),
                 cx,

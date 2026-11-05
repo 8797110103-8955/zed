@@ -17,6 +17,36 @@ use crate::{
     RootUserSettings, SaturatingBool, SplicingVec, fallible_options,
 };
 
+/// Package manager used for project tasks and installing extension tools.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "lowercase")]
+pub enum PackageManager {
+    /// Detect the package manager from project declarations and lockfiles.
+    #[default]
+    Auto,
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+    /// Vite+
+    Vp,
+}
+
 #[with_fallible_options]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct LspSettingsMap(pub HashMap<Arc<str>, LspSettings>);
@@ -971,17 +1001,6 @@ pub struct InlineDiagnosticsSettingsContent {
     pub min_column: Option<u32>,
 
     pub max_severity: Option<DiagnosticSeverityContent>,
-}
-
-#[with_fallible_options]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct NodeBinarySettings {
-    /// The path to the Node binary.
-    pub path: Option<String>,
-    /// The path to the npm binary Zed should use (defaults to `.path/../npm`).
-    pub npm_path: Option<String>,
-    /// If enabled, Zed will download its own copy of Node.
-    pub ignore_system_version: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]

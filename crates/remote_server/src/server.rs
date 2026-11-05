@@ -22,6 +22,7 @@ use gpui_tokio::Tokio;
 use http_client::{Url, read_proxy_from_env};
 use language::LanguageRegistry;
 use net::async_net::{UnixListener, UnixStream};
+use node_runtime::PackageManagerRuntime;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use paths::logs_dir;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
@@ -784,7 +785,7 @@ pub fn execute_run(
 
         let project = cx.new(|cx| {
             let fs = RealFs::new(None, cx.background_executor().clone());
-            let node_settings_rx = initialize_settings(session.clone(), fs.clone(), cx);
+            let package_manager_rx = initialize_settings(session.clone(), fs.clone(), cx);
 
             let proxy_url = read_proxy_settings(cx);
 
@@ -804,8 +805,43 @@ pub fn execute_run(
                 )
             };
 
-            let node_runtime =
-                NodeRuntime::new(http_client.clone(), shell_env_loaded_rx, node_settings_rx);
+            let node_runtime = PackageManagerRuntime::new(
+                NodeRuntime::new(
+                    shell_env_loaded_rx,
+                    watch::channel(Some(NodeBinaryOptions {
+                        allow_path_lookup: true,
+                    }))
+                    .1,
+                ),
+                http_client.clone(),
+                package_manager_rx,
+            );
+            let mut package_manager_errors = node_runtime.errors();
+            cx.spawn({
+                let session = session.clone();
+                async move |_, _| {
+                    while package_manager_errors.changed().await.is_ok() {
+                        let error = package_manager_errors.borrow().clone();
+                        if let Some(error) = error {
+                            session
+                                .send(proto::Toast {
+                                    project_id: REMOTE_SERVER_PROJECT_ID,
+                                    notification_id: "system-package-manager-unavailable".into(),
+                                    message: error.as_str().to_owned(),
+                                })
+                                .log_err();
+                        } else {
+                            session
+                                .send(proto::HideToast {
+                                    project_id: REMOTE_SERVER_PROJECT_ID,
+                                    notification_id: "system-package-manager-unavailable".into(),
+                                })
+                                .log_err();
+                        }
+                    }
+                }
+            })
+            .detach();
 
             let mut languages = LanguageRegistry::new(cx.background_executor().clone());
             languages.set_language_server_download_dir(paths::languages_dir().clone());
@@ -1314,7 +1350,7 @@ fn initialize_settings(
     session: AnyProtoClient,
     fs: Arc<dyn Fs>,
     cx: &mut App,
-) -> watch::Receiver<Option<NodeBinaryOptions>> {
+) -> watch::Receiver<Option<node_runtime::PackageManager>> {
     let (user_settings_file_rx, watcher_task) =
         watch_config_file(cx.background_executor(), fs, paths::settings_file().clone());
 
@@ -1345,38 +1381,19 @@ fn initialize_settings(
         }
     });
 
-    let (mut tx, rx) = watch::channel(None);
-    let mut node_settings = None;
+    let (mut package_manager_tx, package_manager_rx) = watch::channel(None);
+    let mut package_manager = None;
     cx.observe_global::<SettingsStore>(move |cx| {
-        let new_node_settings = &ProjectSettings::get_global(cx).node;
-        if Some(new_node_settings) != node_settings.as_ref() {
-            log::info!("Got new node settings: {new_node_settings:?}");
-            let options = NodeBinaryOptions {
-                allow_path_lookup: !new_node_settings.ignore_system_version,
-                // TODO: Implement this setting
-                allow_binary_download: true,
-                use_paths: new_node_settings.path.as_ref().map(|node_path| {
-                    let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
-                    let npm_path = new_node_settings
-                        .npm_path
-                        .as_ref()
-                        .map(|path| PathBuf::from(shellexpand::tilde(&path).as_ref()));
-                    (
-                        node_path.clone(),
-                        npm_path.unwrap_or_else(|| {
-                            let base_path = PathBuf::new();
-                            node_path.parent().unwrap_or(&base_path).join("npm")
-                        }),
-                    )
-                }),
-            };
-            node_settings = Some(new_node_settings.clone());
-            tx.send(Some(options)).ok();
+        let new_package_manager = ProjectSettings::get_global(cx).package_manager;
+        if Some(new_package_manager) != package_manager {
+            log::info!("Got new package manager setting: {new_package_manager:?}");
+            package_manager = Some(new_package_manager);
+            package_manager_tx.send(Some(new_package_manager)).log_err();
         }
     })
     .detach();
 
-    rx
+    package_manager_rx
 }
 
 pub fn handle_settings_file_changes(

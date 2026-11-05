@@ -6,7 +6,7 @@ use fs::FakeFs;
 use gpui::{AppContext as _, TestAppContext};
 use language::{Buffer, BufferSnapshot, LanguageRegistry};
 use languages::init as init_languages;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use settings::SettingsStore;
 use std::hint::black_box;
 
@@ -295,7 +295,7 @@ fn parsed_cases() -> Vec<ParsedCase> {
 
     let languages = Arc::new(LanguageRegistry::new(context.executor()));
     let fs = FakeFs::new(context.executor());
-    let node_runtime = NodeRuntime::unavailable();
+    let node_runtime = PackageManagerRuntime::unavailable();
     context.update(|cx| init_languages(languages.clone(), fs, node_runtime, cx));
 
     vec![

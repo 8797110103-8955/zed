@@ -175,17 +175,21 @@ impl ProjectEnvironment {
         cx: &mut App,
     ) -> Shared<Task<Option<HashMap<String, String>>>> {
         let abs_path = self
-            .worktree_store
+            .default_directory(cx)
+            .unwrap_or_else(|| paths::home_dir().as_path().into());
+        self.local_directory_environment(&Shell::System, abs_path, cx)
+    }
+
+    pub(crate) fn default_directory(&self, cx: &App) -> Option<Arc<Path>> {
+        self.worktree_store
             .read_with(cx, |worktree_store, cx| {
                 crate::Project::default_visible_worktree_paths(worktree_store, cx)
                     .into_iter()
                     .next()
             })
-            .ok()
+            .log_err()
             .flatten()
             .map(|path| Arc::<Path>::from(path))
-            .unwrap_or_else(|| paths::home_dir().as_path().into());
-        self.local_directory_environment(&Shell::System, abs_path, cx)
     }
 
     /// Returns the project environment, if possible.

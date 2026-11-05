@@ -7,7 +7,7 @@ use gpui::{AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, act
 
 use client::{Client, UserStore};
 use language::LanguageRegistry;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use project::Project;
 use reqwest_client::ReqwestClient;
 use session::{AppSession, Session};
@@ -62,7 +62,7 @@ fn main() {
             .foreground_executor()
             .block_on(Session::new(session_id, kvp));
         let session = cx.new(|cx| AppSession::new(session, cx));
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
 
         let app_state = Arc::new(AppState {
             languages,

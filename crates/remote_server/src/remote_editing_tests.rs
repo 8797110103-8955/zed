@@ -39,7 +39,7 @@ use lsp::{
     CompletionContext, CompletionResponse, CompletionTriggerKind, DEFAULT_LSP_REQUEST_TIMEOUT,
     LanguageServerId, LanguageServerName,
 };
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 #[cfg(not(windows))]
 use project::{
     AgentId,
@@ -524,7 +524,7 @@ async fn test_remote_telemetry_event_forwarding(
 
     let (opts, server_session, _) = RemoteClient::fake_server(cx, server_cx);
     let http_client = Arc::new(BlockedHttpClient);
-    let node_runtime = NodeRuntime::unavailable();
+    let node_runtime = PackageManagerRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
     let proxy = Arc::new(ExtensionHostProxy::new());
     server_cx.update(HeadlessProject::init);
@@ -6499,7 +6499,7 @@ pub async fn init_test(
 
     let (opts, ssh_server_client, _) = RemoteClient::fake_server(cx, server_cx);
     let http_client = Arc::new(BlockedHttpClient);
-    let node_runtime = NodeRuntime::unavailable();
+    let node_runtime = PackageManagerRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
     let proxy = Arc::new(ExtensionHostProxy::new());
     server_cx.update(HeadlessProject::init);
@@ -6583,7 +6583,7 @@ fn build_project(ssh: Entity<RemoteClient>, cx: &mut TestAppContext) -> Entity<P
         )
     });
 
-    let node = NodeRuntime::unavailable();
+    let node = PackageManagerRuntime::unavailable();
     let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
     let languages = Arc::new(LanguageRegistry::test(cx.executor()));
     let fs = FakeFs::new(cx.executor());

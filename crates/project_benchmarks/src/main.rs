@@ -9,7 +9,7 @@ use gpui::AppContext as _;
 use gpui::TaskExt;
 use http_client::FakeHttpClient;
 use language::LanguageRegistry;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use project::{
     Project, RealFs,
     search::{SearchQuery, SearchResult},
@@ -133,7 +133,11 @@ fn main() -> Result<(), anyhow::Error> {
         let client = Client::production(cx);
         let http_client = FakeHttpClient::with_200_response();
         let (_, rx) = watch::channel(None);
-        let node = NodeRuntime::new(http_client, None, rx);
+        let node = PackageManagerRuntime::new(
+            node_runtime::NodeRuntime::new(None, rx),
+            http_client,
+            watch::channel(Some(node_runtime::PackageManager::Auto)).1,
+        );
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
         let fs = RealFs::new(None, cx.background_executor().clone());

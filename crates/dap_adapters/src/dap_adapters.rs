@@ -71,7 +71,7 @@ mod test_mocks {
             unimplemented!("Not needed for tests")
         }
 
-        fn node_runtime(&self) -> node_runtime::NodeRuntime {
+        fn node_runtime(&self) -> node_runtime::PackageManagerRuntime {
             unimplemented!("Not needed for tests")
         }
 

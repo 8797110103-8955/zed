@@ -29,6 +29,7 @@ impl DapLocator for NodeLocator {
             return None;
         }
         if build_config.command != TYPESCRIPT_RUNNER_VARIABLE.template_value()
+            && build_config.command != task::PACKAGE_MANAGER_COMMAND
             && build_config.command != "npm"
             && build_config.command != "pnpm"
             && build_config.command != "yarn"

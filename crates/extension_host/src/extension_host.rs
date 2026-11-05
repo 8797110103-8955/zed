@@ -39,7 +39,7 @@ use language::{
     LanguageConfig, LanguageMatcher, LanguageName, LanguageQueries, LoadedLanguage, QueryFile,
     QueryFileContents, QueryFiles, Rope,
 };
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use project::{ContextProviderWithTasks, Project};
 use release_channel::ReleaseChannel;
 use remote::{ConnectionState, RemoteClient, RemoteClientEvent};
@@ -321,7 +321,7 @@ pub fn init(
     extension_host_proxy: Arc<ExtensionHostProxy>,
     fs: Arc<dyn Fs>,
     client: Arc<Client>,
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     cx: &mut App,
 ) {
     let store = cx.new(move |cx| {
@@ -374,7 +374,7 @@ impl ExtensionStore {
         http_client: Arc<HttpClientWithUrl>,
         builder_client: Arc<dyn HttpClient>,
         telemetry: Option<Arc<Telemetry>>,
-        node_runtime: NodeRuntime,
+        node_runtime: PackageManagerRuntime,
         cx: &mut Context<Self>,
     ) -> Self {
         let work_dir = extensions_dir.join("work");

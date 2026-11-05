@@ -71,8 +71,7 @@ pub struct ProjectSettings {
     /// Configuration for Git-related features
     pub git: GitSettings,
 
-    /// Configuration for Node-related features
-    pub node: NodeBinarySettings,
+    pub package_manager: node_runtime::PackageManager,
 
     /// Configuration for how direnv configuration should be loaded
     pub load_direnv: DirenvSettings,
@@ -96,26 +95,6 @@ pub struct SessionSettings {
     ///
     /// Default: false
     pub trust_all_worktrees: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct NodeBinarySettings {
-    /// The path to the Node binary.
-    pub path: Option<String>,
-    /// The path to the npm binary Zed should use (defaults to `.path/../npm`).
-    pub npm_path: Option<String>,
-    /// If enabled, Zed will download its own copy of Node.
-    pub ignore_system_version: bool,
-}
-
-impl From<settings::NodeBinarySettings> for NodeBinarySettings {
-    fn from(settings: settings::NodeBinarySettings) -> Self {
-        Self {
-            path: settings.path,
-            npm_path: settings.npm_path,
-            ignore_system_version: settings.ignore_system_version.unwrap_or(false),
-        }
-    }
 }
 
 /// Common language server settings.
@@ -816,7 +795,14 @@ impl Settings for ProjectSettings {
                 },
             },
             git: git_settings,
-            node: content.node.clone().unwrap().into(),
+            package_manager: match content.package_manager.unwrap_or_default() {
+                settings::PackageManager::Auto => node_runtime::PackageManager::Auto,
+                settings::PackageManager::Npm => node_runtime::PackageManager::Npm,
+                settings::PackageManager::Pnpm => node_runtime::PackageManager::Pnpm,
+                settings::PackageManager::Yarn => node_runtime::PackageManager::Yarn,
+                settings::PackageManager::Bun => node_runtime::PackageManager::Bun,
+                settings::PackageManager::Vp => node_runtime::PackageManager::Vp,
+            },
             load_direnv: project.load_direnv.clone().unwrap(),
             session: SessionSettings {
                 restore_unsaved_buffers: content.session.unwrap().restore_unsaved_buffers.unwrap(),

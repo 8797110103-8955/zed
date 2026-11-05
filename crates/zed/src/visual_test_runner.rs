@@ -965,7 +965,7 @@ cargo run
 #[cfg(target_os = "macos")]
 fn init_app_state(cx: &mut App) -> Arc<AppState> {
     use fs::Fs;
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use session::Session;
     use settings::SettingsStore;
 
@@ -997,7 +997,7 @@ fn init_app_state(cx: &mut App) -> Arc<AppState> {
         languages,
         user_store,
         workspace_store,
-        node_runtime: NodeRuntime::unavailable(),
+        node_runtime: PackageManagerRuntime::unavailable(),
         build_window_options: |_, _| Default::default(),
         session,
     });

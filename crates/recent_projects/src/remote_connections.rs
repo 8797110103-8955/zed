@@ -500,7 +500,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::{AppContext, Entity, TestAppContext};
     use http_client::BlockedHttpClient;
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use project::Project;
     use remote::RemoteClient;
     use remote_server::{HeadlessAppState, HeadlessProject};
@@ -541,7 +541,7 @@ mod tests {
 
         server_cx.update(HeadlessProject::init);
         let http_client = Arc::new(BlockedHttpClient);
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
         let proxy = Arc::new(ExtensionHostProxy::new());
 
@@ -619,7 +619,7 @@ mod tests {
 
         server_cx.update(HeadlessProject::init);
         let http_client = Arc::new(BlockedHttpClient);
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
         let proxy = Arc::new(ExtensionHostProxy::new());
 
@@ -864,7 +864,7 @@ mod tests {
 
         server_cx.update(HeadlessProject::init);
         let http_client = Arc::new(BlockedHttpClient);
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
         let proxy = Arc::new(ExtensionHostProxy::new());
 
@@ -956,7 +956,7 @@ mod tests {
 
         server_cx.update(HeadlessProject::init);
         let http_client = Arc::new(BlockedHttpClient);
-        let node_runtime = NodeRuntime::unavailable();
+        let node_runtime = PackageManagerRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
         let proxy = Arc::new(ExtensionHostProxy::new());
 

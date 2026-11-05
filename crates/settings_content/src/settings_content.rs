@@ -277,8 +277,10 @@ pub struct SettingsContent {
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
-    /// Configuration for Node-related features
-    pub node: Option<NodeBinarySettings>,
+    /// Package manager used for project tasks and installing extension tools.
+    /// Auto detects project declarations and lockfiles. Tool installation falls back
+    /// to an available system package manager when the preferred one is missing.
+    pub package_manager: Option<crate::PackageManager>,
 
     pub proxy: Option<String>,
 
@@ -410,7 +412,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,
-        node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
+        package_manager, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
     },

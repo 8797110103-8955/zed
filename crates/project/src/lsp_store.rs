@@ -17085,7 +17085,7 @@ impl LspAdapterDelegate for LocalLspAdapterDelegate {
         task.await.unwrap_or_default()
     }
 
-    async fn npm_package_installed_version(
+    async fn package_manager_installed_version(
         &self,
         package_name: &str,
     ) -> Result<Option<(PathBuf, Version)>> {

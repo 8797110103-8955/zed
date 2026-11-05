@@ -32,6 +32,9 @@ pub use vscode_debug_format::VsCodeDebugTaskFile;
 pub use vscode_format::VsCodeTaskFile;
 pub use zed_actions::RevealTarget;
 
+// Resolve this only when starting a task so listing tasks never probes package managers.
+pub const PACKAGE_MANAGER_COMMAND: &str = "zed-auto-package-manager";
+
 /// Task identifier, unique within the application.
 /// Based on it, task reruns and terminal tabs are managed.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]

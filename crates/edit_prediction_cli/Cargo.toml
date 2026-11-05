@@ -52,7 +52,6 @@ reqwest_client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
-shellexpand.workspace = true
 smol.workspace = true
 sqlez.workspace = true
 strum.workspace = true

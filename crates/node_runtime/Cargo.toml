@@ -17,9 +17,6 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
-async-tar.workspace = true
-async-trait.workspace = true
 chrono = { workspace = true, default-features = true }
 futures.workspace = true
 http_client.workspace = true
@@ -29,13 +26,11 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 util.workspace = true
 watch.workspace = true
 which.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 async-std.workspace = true

@@ -757,8 +757,7 @@ async fn convert_response(
 
 impl nodejs::Host for WasmState {
     async fn node_binary_path(&mut self) -> wasmtime::Result<Result<String, String>> {
-        self.host
-            .node_runtime
+        self.node_runtime()
             .binary_path()
             .await
             .map(|path| path.to_string_lossy().into_owned())
@@ -769,9 +768,8 @@ impl nodejs::Host for WasmState {
         &mut self,
         package_name: String,
     ) -> wasmtime::Result<Result<String, String>> {
-        self.host
-            .node_runtime
-            .npm_package_latest_version(&package_name)
+        self.node_runtime()
+            .package_manager_latest_version(&package_name)
             .await
             .map(|v| v.to_string())
             .to_wasmtime_result()
@@ -781,9 +779,8 @@ impl nodejs::Host for WasmState {
         &mut self,
         package_name: String,
     ) -> wasmtime::Result<Result<Option<String>, String>> {
-        self.host
-            .node_runtime
-            .npm_package_installed_version(&self.work_dir(), &package_name)
+        self.node_runtime()
+            .package_manager_installed_version(&self.work_dir(), &package_name)
             .await
             .map(|option| option.map(|version| version.to_string()))
             .to_wasmtime_result()
@@ -798,9 +795,8 @@ impl nodejs::Host for WasmState {
             .grant_npm_install_package(&package_name)
             .into_wasmtime_result()?;
 
-        self.host
-            .node_runtime
-            .npm_install_packages(&self.work_dir(), &[(&package_name, &version)])
+        self.node_runtime()
+            .package_manager_install_packages(&self.work_dir(), &[(&package_name, &version)])
             .await
             .to_wasmtime_result()
     }

@@ -509,7 +509,7 @@ pub trait LspAdapterDelegate: Send + Sync {
     fn registered_lsp_adapters(&self) -> Vec<Arc<dyn LspAdapter>>;
     async fn language_server_download_dir(&self, name: &LanguageServerName) -> Option<Arc<Path>>;
 
-    async fn npm_package_installed_version(
+    async fn package_manager_installed_version(
         &self,
         package_name: &str,
     ) -> Result<Option<(PathBuf, Version)>>;

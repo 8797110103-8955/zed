@@ -19,7 +19,7 @@ use language::{LanguageName, ManifestName, ManifestProvider, ManifestQuery};
 use language::{Toolchain, ToolchainList, ToolchainLister, ToolchainMetadata};
 use lsp::{CompletionItemKind, LanguageServerBinary, Uri};
 use lsp::{LanguageServerBinaryOptions, LanguageServerName};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
 use pet_core::Configuration;
 use pet_core::os_environment::Environment;
 use pet_core::python_environment::{PythonEnvironment, PythonEnvironmentKind};
@@ -638,7 +638,7 @@ impl LspInstaller for TyLspAdapter {
 }
 
 pub struct PyrightLspAdapter {
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
 }
 
 impl PyrightLspAdapter {
@@ -646,13 +646,13 @@ impl PyrightLspAdapter {
     const SERVER_PATH: &str = "node_modules/pyright/langserver.index.js";
     const NODE_MODULE_RELATIVE_SERVER_PATH: &str = "pyright/langserver.index.js";
 
-    pub fn new(node: NodeRuntime) -> Self {
+    pub fn new(node: PackageManagerRuntime) -> Self {
         PyrightLspAdapter { node }
     }
 
     async fn get_cached_server_binary(
         container_dir: PathBuf,
-        node: &NodeRuntime,
+        node: &PackageManagerRuntime,
     ) -> Option<LanguageServerBinary> {
         let server_path = container_dir.join(Self::SERVER_PATH);
         if server_path.exists() {
@@ -775,12 +775,13 @@ impl LspInstaller for PyrightLspAdapter {
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
         self.node
-            .npm_package_latest_version(Self::SERVER_NAME.as_ref())
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version(Self::SERVER_NAME.as_ref())
             .await
     }
 
@@ -800,7 +801,7 @@ impl LspInstaller for PyrightLspAdapter {
         } else {
             let node = delegate.which("node".as_ref()).await?;
             let (node_modules_path, _) = delegate
-                .npm_package_installed_version(Self::SERVER_NAME.as_ref())
+                .package_manager_installed_version(Self::SERVER_NAME.as_ref())
                 .await
                 .log_err()??;
 
@@ -822,12 +823,15 @@ impl LspInstaller for PyrightLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
             let server_path = container_dir.join(Self::SERVER_PATH);
-            node.npm_install_latest_packages(&container_dir, &[Self::SERVER_NAME.as_ref()])
-                .await?;
+            node.package_manager_install_latest_packages(
+                &container_dir,
+                &[Self::SERVER_NAME.as_ref()],
+            )
+            .await?;
 
             let env = delegate.shell_env().await;
             Ok(LanguageServerBinary {
@@ -853,7 +857,7 @@ impl LspInstaller for PyrightLspAdapter {
             let server_path = container_dir.join(Self::SERVER_PATH);
 
             let should_install_language_server = node
-                .should_install_npm_package(
+                .should_install_package(
                     Self::SERVER_NAME.as_ref(),
                     &server_path,
                     &container_dir,
@@ -2059,7 +2063,7 @@ impl LspInstaller for PyLspAdapter {
 }
 
 pub(crate) struct BasedPyrightLspAdapter {
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
 }
 
 impl BasedPyrightLspAdapter {
@@ -2068,13 +2072,13 @@ impl BasedPyrightLspAdapter {
     const SERVER_PATH: &str = "node_modules/basedpyright/langserver.index.js";
     const NODE_MODULE_RELATIVE_SERVER_PATH: &str = "basedpyright/langserver.index.js";
 
-    pub(crate) fn new(node: NodeRuntime) -> Self {
+    pub(crate) fn new(node: PackageManagerRuntime) -> Self {
         BasedPyrightLspAdapter { node }
     }
 
     async fn get_cached_server_binary(
         container_dir: PathBuf,
-        node: &NodeRuntime,
+        node: &PackageManagerRuntime,
     ) -> Option<LanguageServerBinary> {
         let server_path = container_dir.join(Self::SERVER_PATH);
         if server_path.exists() {
@@ -2218,12 +2222,13 @@ impl LspInstaller for BasedPyrightLspAdapter {
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
         self.node
-            .npm_package_latest_version(Self::SERVER_NAME.as_ref())
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version(Self::SERVER_NAME.as_ref())
             .await
     }
 
@@ -2244,7 +2249,7 @@ impl LspInstaller for BasedPyrightLspAdapter {
             // TODO shouldn't this be self.node.binary_path()?
             let node = delegate.which("node".as_ref()).await?;
             let (node_modules_path, _) = delegate
-                .npm_package_installed_version(Self::SERVER_NAME.as_ref())
+                .package_manager_installed_version(Self::SERVER_NAME.as_ref())
                 .await
                 .log_err()??;
 
@@ -2266,12 +2271,15 @@ impl LspInstaller for BasedPyrightLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
             let server_path = container_dir.join(Self::SERVER_PATH);
-            node.npm_install_latest_packages(&container_dir, &[Self::SERVER_NAME.as_ref()])
-                .await?;
+            node.package_manager_install_latest_packages(
+                &container_dir,
+                &[Self::SERVER_NAME.as_ref()],
+            )
+            .await?;
 
             let env = delegate.shell_env().await;
             Ok(LanguageServerBinary {
@@ -2297,7 +2305,7 @@ impl LspInstaller for BasedPyrightLspAdapter {
             let server_path = container_dir.join(Self::SERVER_PATH);
 
             let should_install_language_server = node
-                .should_install_npm_package(
+                .should_install_package(
                     Self::SERVER_NAME.as_ref(),
                     &server_path,
                     &container_dir,

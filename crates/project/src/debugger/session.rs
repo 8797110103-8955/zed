@@ -41,7 +41,7 @@ use gpui::{
     Task, TaskExt, WeakEntity,
 };
 use http_client::HttpClient;
-use node_runtime::NodeRuntime;
+use node_runtime::PackageManagerRuntime;
 use remote::RemoteClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -714,7 +714,7 @@ pub struct Session {
     memory: memory::Memory,
     quirks: SessionQuirks,
     remote_client: Option<Entity<RemoteClient>>,
-    node_runtime: Option<NodeRuntime>,
+    node_runtime: Option<PackageManagerRuntime>,
     http_client: Option<Arc<dyn HttpClient>>,
     companion_port: Option<u16>,
 }
@@ -835,7 +835,7 @@ impl Session {
         task_context: SharedTaskContext,
         quirks: SessionQuirks,
         remote_client: Option<Entity<RemoteClient>>,
-        node_runtime: Option<NodeRuntime>,
+        node_runtime: Option<PackageManagerRuntime>,
         http_client: Option<Arc<dyn HttpClient>>,
         cx: &mut App,
     ) -> Entity<Self> {
@@ -3270,7 +3270,7 @@ struct KillCompanionBrowserParams {
 }
 
 async fn spawn_companion(
-    node_runtime: NodeRuntime,
+    node_runtime: PackageManagerRuntime,
     cx: &mut AsyncApp,
 ) -> Result<(u16, util::command::Child)> {
     let binary_path = node_runtime
@@ -3309,16 +3309,19 @@ async fn spawn_companion(
     Ok((port, child))
 }
 
-async fn get_or_install_companion(node: NodeRuntime, cx: &mut AsyncApp) -> Result<PathBuf> {
+async fn get_or_install_companion(
+    node: PackageManagerRuntime,
+    cx: &mut AsyncApp,
+) -> Result<PathBuf> {
     const PACKAGE_NAME: &str = "@zed-industries/js-debug-companion-cli";
 
-    async fn install_latest_version(dir: PathBuf, node: NodeRuntime) -> Result<PathBuf> {
+    async fn install_latest_version(dir: PathBuf, node: PackageManagerRuntime) -> Result<PathBuf> {
         let temp_dir = tempfile::tempdir().context("creating temporary directory")?;
-        node.npm_install_latest_packages(temp_dir.path(), &[PACKAGE_NAME])
+        node.package_manager_install_latest_packages(temp_dir.path(), &[PACKAGE_NAME])
             .await
             .context("installing latest companion package")?;
         let version = node
-            .npm_package_installed_version(temp_dir.path(), PACKAGE_NAME)
+            .package_manager_installed_version(temp_dir.path(), PACKAGE_NAME)
             .await
             .context("getting installed companion version")?
             .context("companion was not installed")?;
@@ -3357,7 +3360,7 @@ async fn get_or_install_companion(node: NodeRuntime, cx: &mut AsyncApp) -> Resul
                     .max_by_key(|(_, version)| version.clone());
 
                 let latest_version = node
-                    .npm_package_latest_version(PACKAGE_NAME)
+                    .package_manager_latest_version(PACKAGE_NAME)
                     .await
                     .log_err();
                 anyhow::Ok((latest_installed_version, latest_version))

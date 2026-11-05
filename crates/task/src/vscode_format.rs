@@ -108,11 +108,14 @@ impl VsCodeTaskDefinition {
 
         let (command, args, cwd) = match command {
             Command::Npm { script, path } => (
-                "npm".to_owned(),
+                crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 vec!["run".to_string(), script],
-                path.map(|path| {
-                    format!("{}/{}", VariableName::WorktreeRoot.template_value(), path)
-                }),
+                Some(
+                    path.map(|path| {
+                        format!("{}/{}", VariableName::WorktreeRoot.template_value(), path)
+                    })
+                    .unwrap_or_else(|| VariableName::WorktreeRoot.template_value()),
+                ),
             ),
             Command::Shell { command, args } => (command, args, None),
             Command::Gulp { task } => ("gulp".to_owned(), vec![task], None),
@@ -317,28 +320,29 @@ mod tests {
         let expected = vec![
             TaskTemplate {
                 label: "With env".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "build".to_string()],
+                cwd: Some("$ZED_WORKTREE_ROOT".to_string()),
                 env: HashMap::from_iter([("NODE_ENV".to_string(), "production".to_string())]),
                 ..Default::default()
             },
             TaskTemplate {
                 label: "With path".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "build".to_string()],
                 cwd: Some("$ZED_WORKTREE_ROOT/packages/components".to_string()),
                 ..Default::default()
             },
             TaskTemplate {
                 label: "With cwd".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "build".to_string()],
                 cwd: Some("${ZED_WORKTREE_ROOT}/packages/app".to_string()),
                 ..Default::default()
             },
             TaskTemplate {
                 label: "With path and cwd".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "build".to_string()],
                 cwd: Some("${ZED_WORKTREE_ROOT}/packages/app".to_string()),
                 ..Default::default()
@@ -484,14 +488,14 @@ mod tests {
         let expected = vec![
             TaskTemplate {
                 label: "Build Extension in Background".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "watch".to_string()],
                 cwd: Some("$ZED_WORKTREE_ROOT/editors/code/".to_string()),
                 ..Default::default()
             },
             TaskTemplate {
                 label: "Build Extension".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "build".to_string()],
                 cwd: Some("$ZED_WORKTREE_ROOT/editors/code/".to_string()),
                 ..Default::default()
@@ -508,7 +512,7 @@ mod tests {
             },
             TaskTemplate {
                 label: "Pretest".to_string(),
-                command: "npm".to_string(),
+                command: crate::PACKAGE_MANAGER_COMMAND.to_owned(),
                 args: vec!["run".to_string(), "pretest".to_string()],
                 cwd: Some("$ZED_WORKTREE_ROOT/editors/code/".to_string()),
                 ..Default::default()

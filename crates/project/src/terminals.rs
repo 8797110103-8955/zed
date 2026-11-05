@@ -64,7 +64,7 @@ impl Project {
 
     pub fn create_terminal_task(
         &mut self,
-        spawn_task: SpawnInTerminal,
+        mut spawn_task: SpawnInTerminal,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
         let is_via_remote = self.remote_client.is_some();
@@ -93,7 +93,16 @@ impl Project {
         let settings = TerminalSettings::get(settings_location, cx).clone();
         let detect_venv = settings.detect_venv.as_option().is_some();
 
-        let terminal_mode = TerminalMode::task(spawn_task.clone());
+        let package_manager =
+            crate::project_settings::ProjectSettings::get(settings_location, cx).package_manager;
+        let package_manager_sources = self
+            .settings_observer
+            .read(cx)
+            .vscode_workspace_path()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let package_manager_runtime = self.node_runtime().cloned();
 
         let local_path = if is_via_remote { None } else { path.clone() };
         let remote_client = self.remote_client.clone();
@@ -135,6 +144,58 @@ impl Project {
         cx.spawn(async move |project, cx| {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+
+            if spawn_task.command.as_deref() == Some(task::PACKAGE_MANAGER_COMMAND) {
+                // Remote servers resolve the package manager while building the task context,
+                // so the placeholder should never reach a remote terminal.
+                anyhow::ensure!(
+                    !is_via_remote,
+                    "Package manager task {:?} was not resolved by the remote server",
+                    spawn_task.label
+                );
+                env.extend(spawn_task.env.clone());
+                let directory = path
+                    .as_ref()
+                    .context("Package manager task has no working directory")?
+                    .to_path_buf();
+                let (command, arguments) = {
+                    let runtime =
+                        package_manager_runtime.context("Package manager tasks are unavailable")?;
+                    let arguments = spawn_task.args.clone();
+                    let environment = env.clone();
+                    let resolved = cx
+                        .background_spawn(async move {
+                            runtime
+                                .task_command(
+                                    &directory,
+                                    &arguments,
+                                    environment.into_iter().collect(),
+                                    package_manager,
+                                    &package_manager_sources,
+                                )
+                                .await
+                        })
+                        .await?;
+                    (resolved.path.to_string_lossy().into_owned(), resolved.args)
+                };
+                let task_shell = if spawn_task.shell == Shell::System {
+                    Shell::Program(shell.clone())
+                } else {
+                    spawn_task.shell.clone()
+                };
+                let builder = ShellBuilder::new(&task_shell, path_style.is_windows());
+                spawn_task.command_label =
+                    builder.command_label(&format!("{} {}", command, arguments.join(" ")));
+                let quoted_command = task_shell
+                    .shell_kind(path_style.is_windows())
+                    .try_quote_prefix_aware(&command)
+                    .map(Cow::into_owned)
+                    .unwrap_or(command);
+                let (command, args) = builder.build_no_quote(Some(quoted_command), &arguments);
+                spawn_task.command = Some(command);
+                spawn_task.args = args;
+            }
+            let terminal_mode = TerminalMode::task(spawn_task.clone());
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {

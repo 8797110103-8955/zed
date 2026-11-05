@@ -3628,25 +3628,9 @@ Positive `integer` values, or `0` to disable modeline parsing
 
 ## Node
 
-- Description: Configuration for Node.js integration
-- Setting: `node`
-- Default:
+<!-- [FORK] The upstream `node` settings are not supported in this build. -->
 
-```json [settings]
-{
-  "node": {
-    "ignore_system_version": false,
-    "path": null,
-    "npm_path": null
-  }
-}
-```
-
-**Options**
-
-- `ignore_system_version`: Whether to ignore the system Node.js version
-- `path`: Custom path to Node.js binary
-- `npm_path`: Custom path to npm binary
+Zed always uses the system Node.js (22 or newer) found on `PATH` and never downloads Node.js. There are no `node` settings.
 
 ## Network Proxy
 

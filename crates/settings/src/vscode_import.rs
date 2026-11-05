@@ -215,7 +215,17 @@ impl VsCodeSettings {
             language_models: None,
             line_indicator_format: None,
             log: None,
-            node: self.node_binary_settings(),
+            package_manager: self.read_enum("npm.packageManager", |name| {
+                match name.split('@').next()? {
+                    "auto" => Some(PackageManager::Auto),
+                    "npm" => Some(PackageManager::Npm),
+                    "pnpm" => Some(PackageManager::Pnpm),
+                    "yarn" => Some(PackageManager::Yarn),
+                    "bun" => Some(PackageManager::Bun),
+                    "vp" | "vite-plus" => Some(PackageManager::Vp),
+                    _ => None,
+                }
+            }),
 
             outline_panel: self.outline_panel_settings_content(),
             preview_tabs: self.preview_tabs_settings_content(),
@@ -720,25 +730,15 @@ impl VsCodeSettings {
         })
     }
 
-    fn node_binary_settings(&self) -> Option<NodeBinarySettings> {
-        // this just sets the binary name instead of a full path so it relies on path lookup
-        // resolving to the one you want
-        skip_default(NodeBinarySettings {
-            npm_path: self.read_enum("npm.packageManager", |s| match s {
-                v @ ("npm" | "yarn" | "bun" | "pnpm") => Some(v.to_owned()),
-                _ => None,
-            }),
-            ..Default::default()
-        })
-    }
-
     fn git_settings_content(&self) -> Option<GitSettings> {
-        let inline_blame = self.read_bool("git.blame.editorDecoration.enabled")?;
         skip_default(GitSettings {
-            inline_blame: Some(InlineBlameSettings {
-                enabled: Some(inline_blame),
-                ..Default::default()
-            }),
+            inline_blame: self
+                .read_bool("git.blame.editorDecoration.enabled")
+                .map(|enabled| InlineBlameSettings {
+                    enabled: Some(enabled),
+                    ..Default::default()
+                }),
+            prune_on_fetch: self.read_bool("git.pruneOnFetch"),
             ..Default::default()
         })
     }

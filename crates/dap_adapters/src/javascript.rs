@@ -64,7 +64,10 @@ impl JsDebugAdapter {
         let js_debug_directory = self.installed_version_directory().await?.join("js-debug");
         let node_runtime = delegate.node_runtime();
         let installed_version = node_runtime
-            .npm_package_installed_version(&js_debug_directory, Self::DWARF_DEBUGGING_PACKAGE_NAME)
+            .package_manager_installed_version(
+                &js_debug_directory,
+                Self::DWARF_DEBUGGING_PACKAGE_NAME,
+            )
             .await?
             .map(|version| version.to_string());
         if installed_version.as_deref() == Some(Self::DWARF_DEBUGGING_PACKAGE_VERSION) {
@@ -76,7 +79,7 @@ impl JsDebugAdapter {
             Self::DWARF_DEBUGGING_PACKAGE_NAME
         ));
         node_runtime
-            .npm_install_packages(
+            .package_manager_install_packages(
                 &js_debug_directory,
                 &[(
                     Self::DWARF_DEBUGGING_PACKAGE_NAME,
@@ -149,6 +152,46 @@ impl JsDebugAdapter {
             configuration
                 .entry("cwd")
                 .or_insert(delegate.worktree_root_path().to_string_lossy().into());
+
+            if configuration
+                .get("runtimeExecutable")
+                .and_then(Value::as_str)
+                == Some(task::PACKAGE_MANAGER_COMMAND)
+            {
+                if delegate.is_headless() {
+                    configuration.insert("runtimeExecutable".to_owned(), "npm".into());
+                } else {
+                    let runtime = delegate.node_runtime();
+                    let preference = runtime.package_manager_preference().await?;
+                    let directory = configuration
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                        .context("Package manager debug task has no working directory")?;
+                    let arguments = configuration
+                        .get("args")
+                        .cloned()
+                        .map(serde_json::from_value::<Vec<String>>)
+                        .transpose()?
+                        .unwrap_or_default();
+                    let mut environment = delegate.shell_env().await;
+                    environment.extend(envs.clone());
+                    let command = runtime
+                        .task_command(
+                            &directory,
+                            &arguments,
+                            environment.into_iter().collect(),
+                            preference,
+                            &[],
+                        )
+                        .await?;
+                    configuration.insert(
+                        "runtimeExecutable".to_owned(),
+                        command.path.to_string_lossy().into_owned().into(),
+                    );
+                    configuration.insert("args".to_owned(), serde_json::to_value(command.args)?);
+                }
+            }
 
             configuration
                 .entry("console")
