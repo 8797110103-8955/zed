@@ -1,10 +1,6 @@
 use gpui::{AnyElement, AnyView, ClickEvent, prelude::*};
 
-use crate::{ButtonLike, CircularProgress, CommonAnimationExt, Tooltip, prelude::*};
-
-const LOAD_CIRCLE_GLYPH_VIEWBOX: f32 = 16.0;
-const LOAD_CIRCLE_GLYPH_STROKE_WIDTH: f32 = 1.2;
-const LOAD_CIRCLE_GLYPH_RADIUS: f32 = 5.0;
+use crate::{ButtonLike, CommonAnimationExt, Tooltip, prelude::*};
 
 /// A button component displayed in the title bar to show auto-update status.
 #[derive(IntoElement, RegisterComponent)]
@@ -16,7 +12,6 @@ pub struct UpdateButton {
     tooltip: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
     disabled: bool,
     show_dismiss: bool,
-    progress: Option<f32>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_dismiss: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
@@ -31,7 +26,6 @@ impl UpdateButton {
             tooltip: None,
             disabled: false,
             show_dismiss: false,
-            progress: None,
             on_click: None,
             on_dismiss: None,
         }
@@ -94,27 +88,9 @@ impl UpdateButton {
         self
     }
 
-    pub fn progress(mut self, progress: impl Into<Option<f32>>) -> Self {
-        self.progress = progress.into();
-        self
-    }
-
     pub fn checking() -> Self {
         Self::new(IconName::LoadCircle, "Checking for Zed Updates…")
             .icon_animate(true)
-            .disabled(true)
-    }
-
-    pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed Update…")
-            .progress(progress)
-            .disabled(true)
-    }
-
-    pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Zed Update…")
-            .icon_animate(true)
-            .tooltip(version)
             .disabled(true)
     }
 
@@ -122,9 +98,9 @@ impl UpdateButton {
         Self::new(IconName::Check, "Up to Date").disabled(true)
     }
 
-    pub fn updated(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::Download, "Restart to Update")
-            .tooltip(version)
+    pub fn available(tooltip: impl Into<SharedString>) -> Self {
+        Self::new(IconName::ArrowUpRight, "Update Available")
+            .tooltip(tooltip)
             .with_dismiss()
     }
 
@@ -136,53 +112,25 @@ impl UpdateButton {
     }
 
     pub fn version_tooltip_message(version: impl std::fmt::Display) -> String {
-        format!("Update to Version: {version}")
-    }
-
-    pub fn downloading_tooltip_message(
-        version: impl std::fmt::Display,
-        progress: Option<f32>,
-    ) -> String {
-        let message = Self::version_tooltip_message(version);
-        match progress {
-            Some(progress) => format!(
-                "{message} ({:.0}% downloaded)",
-                progress.clamp(0.0, 1.0) * 100.0
-            ),
-            None => message,
-        }
+        format!("Zed {version} is available. Merge upstream changes and rebuild to update.")
     }
 }
 
 impl RenderOnce for UpdateButton {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let border_color = if self.disabled {
             cx.theme().colors().border
         } else {
             cx.theme().colors().text.opacity(0.15)
         };
 
-        let icon_element = if let Some(progress) = self.progress {
-            let progress = progress.clamp(0.0, 1.0);
-            let icon_box = IconSize::XSmall.rems().to_pixels(window.rem_size());
-            let progress_color = Color::Default.color(cx);
-            CircularProgress::new(progress, 1.0, icon_box, cx)
-                .stroke_width(
-                    icon_box * (LOAD_CIRCLE_GLYPH_STROKE_WIDTH / LOAD_CIRCLE_GLYPH_VIEWBOX),
-                )
-                .radius(icon_box * (LOAD_CIRCLE_GLYPH_RADIUS / LOAD_CIRCLE_GLYPH_VIEWBOX))
-                .bg_color(progress_color.opacity(0.2))
-                .progress_color(progress_color)
-                .into_any_element()
+        let icon = Icon::new(self.icon)
+            .size(IconSize::XSmall)
+            .when_some(self.icon_color, |this, color| this.color(color));
+        let icon_element = if self.icon_animate {
+            icon.with_rotate_animation(2).into_any_element()
         } else {
-            let icon = Icon::new(self.icon)
-                .size(IconSize::XSmall)
-                .when_some(self.icon_color, |this, color| this.color(color));
-            if self.icon_animate {
-                icon.with_rotate_animation(2).into_any_element()
-            } else {
-                icon.into_any_element()
-            }
+            icon.into_any_element()
         };
 
         let tooltip = self.tooltip;
@@ -232,7 +180,7 @@ impl Component for UpdateButton {
 
     fn description() -> &'static str {
         "A button component displayed in the title bar to \
-        show auto-update status and allow users to restart Zed."
+        show auto-update status and available Zed releases."
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
@@ -245,19 +193,6 @@ impl Component for UpdateButton {
                     "Progress States",
                     vec![
                         single_example("Checking", UpdateButton::checking().into_any_element()),
-                        single_example(
-                            "Downloading",
-                            UpdateButton::downloading(Some(0.45))
-                                .tooltip(UpdateButton::downloading_tooltip_message(
-                                    version,
-                                    Some(0.45),
-                                ))
-                                .into_any_element(),
-                        ),
-                        single_example(
-                            "Installing",
-                            UpdateButton::installing(version).into_any_element(),
-                        ),
                         single_example("Up to Date", UpdateButton::up_to_date().into_any_element()),
                     ],
                 ),
@@ -265,8 +200,11 @@ impl Component for UpdateButton {
                     "Actionable States",
                     vec![
                         single_example(
-                            "Ready to Update",
-                            UpdateButton::updated(version).into_any_element(),
+                            "Update Available",
+                            UpdateButton::available(UpdateButton::version_tooltip_message(
+                                version,
+                            ))
+                            .into_any_element(),
                         ),
                         single_example(
                             "Error",
@@ -311,18 +249,18 @@ mod tests {
                 .size_full()
                 .child(UpdateButton::checking())
                 .child(
-                    UpdateButton::downloading(Some(0.5)).tooltip_fn(move |_, cx| {
+                    UpdateButton::available("").tooltip_fn(move |_, cx| {
                         tooltip_built.set(true);
                         let rendered = tooltip_rendered.clone();
                         cx.new(|_| TestTooltip { rendered }).into()
                     }),
                 )
-                .child(UpdateButton::updated("Update to Version: 1.0.0"))
+                .child(UpdateButton::errored("Network timeout"))
         }
     }
 
     #[gpui::test]
-    async fn test_downloading_tooltip_shows_in_preview_like_layout(cx: &mut TestAppContext) {
+    async fn test_dynamic_tooltip_shows_in_preview_like_layout(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);

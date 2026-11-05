@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use auto_update::{AutoUpdateEvent, AutoUpdateStatus, AutoUpdater, UpdateCheckType};
 use gpui::{Empty, Render, Task};
 use semver::Version;
-use ui::{Tooltip, UpdateButton, prelude::*};
+use ui::{UpdateButton, prelude::*};
 
 const UP_TO_DATE_DISPLAY_DURATION: Duration = Duration::from_secs(4);
 
@@ -75,17 +75,10 @@ impl UpdateVersion {
     pub fn update_simulation(&mut self, cx: &mut Context<Self>) {
         let next_state = match self.status {
             AutoUpdateStatus::Idle => AutoUpdateStatus::Checking,
-            AutoUpdateStatus::Checking => AutoUpdateStatus::Downloading {
-                version: Version::new(1, 99, 0),
-                progress: Some(0.5),
-            },
-            AutoUpdateStatus::Downloading { .. } => AutoUpdateStatus::Installing {
+            AutoUpdateStatus::Checking => AutoUpdateStatus::UpdateAvailable {
                 version: Version::new(1, 99, 0),
             },
-            AutoUpdateStatus::Installing { .. } => AutoUpdateStatus::Updated {
-                version: Version::new(1, 99, 0),
-            },
-            AutoUpdateStatus::Updated { .. } => AutoUpdateStatus::Errored {
+            AutoUpdateStatus::UpdateAvailable { .. } => AutoUpdateStatus::Errored {
                 error: Arc::new(anyhow!("Network timeout")),
             },
             AutoUpdateStatus::Errored { .. } => AutoUpdateStatus::Idle,
@@ -99,7 +92,7 @@ impl UpdateVersion {
     }
 
     pub fn show_update_in_menu_bar(&self) -> bool {
-        self.is_dismissed() && self.status.is_updated()
+        self.is_dismissed() && self.status.is_update_available()
     }
 
     fn is_dismissed(&self) -> bool {
@@ -134,31 +127,13 @@ impl Render for UpdateVersion {
             AutoUpdateStatus::Checking if self.update_check_type.is_manual() => {
                 UpdateButton::checking().into_any_element()
             }
-            AutoUpdateStatus::Downloading { version, progress } => {
-                let rendered_version = version.clone();
-                let tooltip = Tooltip::element(move |_, cx| {
-                    let status = AutoUpdater::get(cx).map(|updater| updater.read(cx).status());
-                    let message = match &status {
-                        Some(AutoUpdateStatus::Downloading { version, progress }) => {
-                            UpdateButton::downloading_tooltip_message(version, *progress)
-                        }
-                        _ => Self::version_tooltip_message(&rendered_version),
-                    };
-                    Label::new(message).into_any_element()
-                });
-                UpdateButton::downloading(*progress)
-                    .tooltip_fn(tooltip)
-                    .into_any_element()
-            }
-            AutoUpdateStatus::Installing { version } => {
+            AutoUpdateStatus::UpdateAvailable { version } => {
                 let version = Self::version_tooltip_message(version);
-                UpdateButton::installing(version).into_any_element()
-            }
-            AutoUpdateStatus::Updated { version } => {
-                let version = Self::version_tooltip_message(version);
-                UpdateButton::updated(version)
+                UpdateButton::available(version)
                     .on_click(|_, _, cx| {
-                        workspace::reload(cx);
+                        if let Some(url) = auto_update::available_update_url(cx) {
+                            cx.open_url(&url);
+                        }
                     })
                     .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss(cx)))
                     .into_any_element()
@@ -186,7 +161,10 @@ mod tests {
     fn test_version_tooltip_message() {
         let message = UpdateVersion::version_tooltip_message(&Version::new(1, 0, 0));
 
-        assert_eq!(message, "Update to Version: 1.0.0");
+        assert_eq!(
+            message,
+            "Zed 1.0.0 is available. Merge upstream changes and rebuild to update."
+        );
 
         let message = UpdateVersion::version_tooltip_message(
             &"1.0.0+nightly.14d9a4189f058d8736339b06ff2340101eaea5af"
@@ -196,21 +174,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "Update to Version: 1.0.0+nightly.14d9a4189f058d8736339b06ff2340101eaea5af"
+            "Zed 1.0.0+nightly.14d9a4189f058d8736339b06ff2340101eaea5af is available. Merge upstream changes and rebuild to update."
         );
-    }
-
-    #[test]
-    fn test_downloading_tooltip_message() {
-        let version = Version::new(1, 0, 0);
-
-        let message = UpdateButton::downloading_tooltip_message(&version, None);
-        assert_eq!(message, "Update to Version: 1.0.0");
-
-        let message = UpdateButton::downloading_tooltip_message(&version, Some(0.454));
-        assert_eq!(message, "Update to Version: 1.0.0 (45% downloaded)");
-
-        let message = UpdateButton::downloading_tooltip_message(&version, Some(1.5));
-        assert_eq!(message, "Update to Version: 1.0.0 (100% downloaded)");
     }
 }

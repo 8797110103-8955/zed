@@ -1153,11 +1153,9 @@ impl TitleBar {
             client::Status::UpgradeRequired => {
                 let auto_updater = auto_update::AutoUpdater::get(cx);
                 let label = match auto_updater.map(|auto_update| auto_update.read(cx).status()) {
-                    Some(AutoUpdateStatus::Updated { .. }) => "Please restart Zed to Collaborate",
-                    Some(AutoUpdateStatus::Installing { .. })
-                    | Some(AutoUpdateStatus::Downloading { .. })
-                    | Some(AutoUpdateStatus::Checking) => "Updating...",
+                    Some(AutoUpdateStatus::Checking) => "Checking for Updates...",
                     Some(AutoUpdateStatus::Idle)
+                    | Some(AutoUpdateStatus::UpdateAvailable { .. })
                     | Some(AutoUpdateStatus::Errored { .. })
                     | None => "Please update Zed to Collaborate",
                 };
@@ -1166,10 +1164,8 @@ impl TitleBar {
                     Button::new("connection-status", label)
                         .label_size(LabelSize::Small)
                         .on_click(|_, window, cx| {
-                            if let Some(auto_updater) = auto_update::AutoUpdater::get(cx)
-                                && auto_updater.read(cx).status().is_updated()
-                            {
-                                workspace::reload(cx);
+                            if let Some(url) = auto_update::available_update_url(cx) {
+                                cx.open_url(&url);
                                 return;
                             }
                             auto_update::check(&Default::default(), window, cx);
@@ -1303,16 +1299,18 @@ impl TitleBar {
                                     .w_full()
                                     .gap_1()
                                     .justify_between()
-                                    .child(Label::new("Restart to update Zed").color(Color::Accent))
+                                    .child(Label::new("Zed update available").color(Color::Accent))
                                     .child(
-                                        Icon::new(IconName::Download)
+                                        Icon::new(IconName::ArrowUpRight)
                                             .size(IconSize::Small)
                                             .color(Color::Accent),
                                     )
                                     .into_any_element()
                             },
                             move |_, cx| {
-                                workspace::reload(cx);
+                                if let Some(url) = auto_update::available_update_url(cx) {
+                                    cx.open_url(&url);
+                                }
                             },
                         )
                         .separator()
