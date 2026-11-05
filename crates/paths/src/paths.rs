@@ -508,6 +508,13 @@ pub fn local_vscode_tasks_file_relative_path() -> &'static RelPath {
     *CACHED
 }
 
+/// Returns the relative path to a `.vscode/settings.json` file within a project.
+pub fn local_vscode_settings_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".vscode/settings.json").unwrap());
+    *CACHED
+}
+
 pub fn debug_task_file_name() -> &'static str {
     "debug.json"
 }

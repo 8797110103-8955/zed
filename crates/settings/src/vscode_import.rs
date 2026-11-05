@@ -34,6 +34,18 @@ pub struct VsCodeSettings {
 }
 
 impl VsCodeSettings {
+    pub fn from_json(path: Arc<Path>, content: Value) -> Result<Self> {
+        let content = content
+            .as_object()
+            .context("VS Code settings must be a JSON object")?
+            .clone();
+        Ok(Self {
+            source: VsCodeSettingsSource::VsCode,
+            path,
+            content,
+        })
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn from_str(content: &str, source: VsCodeSettingsSource) -> Result<Self> {
         Ok(Self {
@@ -541,7 +553,7 @@ impl VsCodeSettings {
         })
     }
 
-    fn project_settings_content(&self) -> ProjectSettingsContent {
+    pub fn project_settings_content(&self) -> ProjectSettingsContent {
         ProjectSettingsContent {
             all_languages: AllLanguageSettingsContent {
                 edit_predictions: self.edit_predictions_settings_content(),

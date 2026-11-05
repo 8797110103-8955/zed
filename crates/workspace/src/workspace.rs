@@ -1,4 +1,5 @@
 pub mod active_file_name;
+mod code_workspace;
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -1612,6 +1613,8 @@ pub struct Workspace {
     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
     database_id: Option<WorkspaceId>,
+    code_workspace: Option<code_workspace::CodeWorkspaceState>,
+    code_workspace_watcher: Option<Task<()>>,
     app_state: Arc<AppState>,
     dispatching_keystrokes: Rc<RefCell<DispatchingKeystrokes>>,
     _subscriptions: Vec<Subscription>,
@@ -2119,6 +2122,8 @@ impl Workspace {
             dirty_items: Default::default(),
             active_call,
             database_id: workspace_id,
+            code_workspace: None,
+            code_workspace_watcher: None,
             app_state,
             _observe_current_user,
             _apply_leader_updates,
@@ -2194,6 +2199,28 @@ impl Workspace {
             if let Some(paths) = serialized_workspace.as_ref().map(|ws| &ws.paths) {
                 paths_to_open = paths.ordered_paths().cloned().collect();
             }
+
+            let mut code_configuration = None;
+            let mut expanded_paths = Vec::new();
+            for path in paths_to_open {
+                if code_workspace::is_workspace_file(&path) {
+                    anyhow::ensure!(
+                        code_configuration.is_none(),
+                        "Open one .code-workspace file at a time"
+                    );
+                    let configuration =
+                        code_workspace::read_workspace(path, app_state.fs.as_ref()).await?;
+                    for folder in &configuration.folders {
+                        if app_state.fs.is_dir(&folder.path).await {
+                            expanded_paths.push(folder.path.clone());
+                        }
+                    }
+                    code_configuration = Some(configuration);
+                } else {
+                    expanded_paths.push(path);
+                }
+            }
+            let paths_to_open = expanded_paths;
 
             // Get project paths for all of the abs_paths
             let mut project_paths: Vec<(PathBuf, Option<ProjectPath>)> =
@@ -2361,6 +2388,21 @@ impl Workspace {
                 };
 
             notify_if_database_failed(window, cx);
+            if let Some(configuration) = code_configuration {
+                let path = configuration.path.clone();
+                window
+                    .update(cx, |_, window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.apply_code_workspace(configuration, window, cx)
+                        })
+                    })?
+                    .await?;
+                window.update(cx, |_, window, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.watch_code_workspace(path, window, cx)
+                    });
+                })?;
+            }
             // Check if this is an empty workspace (no paths to open)
             // An empty workspace is one where project_paths is empty
             let is_empty_workspace = project_paths.is_empty();
@@ -4122,6 +4164,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Vec<Option<anyhow::Result<Box<dyn ItemHandle>>>>> {
+        if abs_paths
+            .iter()
+            .any(|path| code_workspace::is_workspace_file(path))
+        {
+            let task = open_paths(
+                &abs_paths,
+                self.app_state.clone(),
+                OpenOptions {
+                    requesting_window: window.window_handle().downcast::<MultiWorkspace>(),
+                    ..options
+                },
+                cx,
+            );
+            return cx.spawn(async move |_, _| match task.await {
+                Ok(result) => result.opened_items,
+                Err(error) => vec![Some(Err(error))],
+            });
+        }
         let fs = self.app_state.fs.clone();
 
         let caller_ordered_abs_paths = abs_paths.clone();
@@ -7951,7 +8011,11 @@ impl Workspace {
                     && location == SerializedWorkspaceLocation::Local)
                     .then(|| docks.clone());
                 let window_bounds = Some(SerializedWindowBounds(window.window_bounds()));
-                let identity_paths_hint = self.project_group_key(cx).path_list().clone();
+                let identity_paths_hint = self
+                    .code_workspace
+                    .as_ref()
+                    .map(|workspace| PathList::new(std::slice::from_ref(&workspace.path)))
+                    .unwrap_or_else(|| self.project_group_key(cx).path_list().clone());
                 let recent_navigation_history = self.persisted_recent_navigation_history.clone();
 
                 let serialized_workspace = SerializedWorkspace {
@@ -7997,7 +8061,23 @@ impl Workspace {
     }
 
     fn workspace_location(&self, cx: &App) -> WorkspaceLocation {
-        let paths = PathList::new(&self.root_paths(cx));
+        let paths = if let Some(workspace) = &self.code_workspace {
+            let mut paths = vec![workspace.path.clone()];
+            paths.extend(
+                self.root_paths(cx)
+                    .into_iter()
+                    .filter(|path| {
+                        !workspace
+                            .folders
+                            .iter()
+                            .any(|folder| folder == path.as_ref())
+                    })
+                    .map(|path| path.to_path_buf()),
+            );
+            PathList::new(&paths)
+        } else {
+            PathList::new(&self.root_paths(cx))
+        };
         if let Some(connection) = self.project.read(cx).remote_connection_options(cx).cloned() {
             WorkspaceLocation::Location(SerializedWorkspaceLocation::Remote(connection), paths)
         } else if self.project.read(cx).is_local() {
@@ -8015,7 +8095,10 @@ impl Workspace {
             return;
         }
         if let Some(manager) = HistoryManager::global(cx) {
-            let paths = PathList::new(&self.root_paths(cx));
+            let paths = match self.workspace_location(cx) {
+                WorkspaceLocation::Location(_, paths) => paths,
+                WorkspaceLocation::None => return,
+            };
             manager.update(cx, |this, cx| {
                 this.update_history(id, HistoryManagerEntry::new(id, &paths), cx);
             });
@@ -11446,14 +11529,45 @@ pub fn open_paths(
         .find_map(|p| util::paths::WslPath::from_path(p));
 
     cx.spawn(async move |cx| {
-        let mut reuse_target =
-            find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx);
+        let original_paths = abs_paths.clone();
+        let mut code_configuration = None;
+        let mut expanded_paths = Vec::new();
+        for path in abs_paths {
+            if code_workspace::is_workspace_file(&path) {
+                anyhow::ensure!(code_configuration.is_none(), "Open one .code-workspace file at a time");
+                let path = app_state.fs.canonicalize(&path).await?;
+                let configuration = code_workspace::read_workspace(path, app_state.fs.as_ref()).await?;
+                for folder in &configuration.folders {
+                    if app_state.fs.is_dir(&folder.path).await {
+                        expanded_paths.push(folder.path.clone());
+                    }
+                }
+                code_configuration = Some(configuration);
+            } else {
+                expanded_paths.push(path);
+            }
+        }
+        let abs_paths = expanded_paths;
+        let mut reuse_target = if let Some(configuration) = &code_configuration {
+            cx.update(|cx| {
+                if open_options.open_mode == OpenMode::NewWindow { return None; }
+                cx.windows().into_iter().filter_map(|window| window.downcast::<MultiWorkspace>())
+                    .find_map(|window| {
+                        let workspace = window.read(cx).ok()?.workspaces().find(|workspace| {
+                            workspace.read(cx).code_workspace.as_ref().is_some_and(|workspace| workspace.path == configuration.path)
+                        })?.clone();
+                        Some(WorkspaceOpenTarget { window, workspace, visible: OpenVisible::All })
+                    })
+            })
+        } else {
+            find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx)
+        };
 
         let mut creation_window = open_options.requesting_window;
 
         // Fallback: if no workspace contains the paths and all paths are files,
         // prefer an existing local workspace window (active window first).
-        if open_options.should_reuse_existing_window() && reuse_target.is_none() {
+        if code_configuration.is_none() && open_options.should_reuse_existing_window() && reuse_target.is_none() {
             let all_paths = abs_paths.iter().map(|path| app_state.fs.metadata(path));
             let all_metadatas = futures::future::join_all(all_paths)
                 .await
@@ -11513,6 +11627,7 @@ pub fn open_paths(
         }
 
         let open_in_dev_container = open_options.open_in_dev_container;
+        let reusing_workspace = reuse_target.is_some();
 
         let result = if let Some(WorkspaceOpenTarget {
             window: target_window,
@@ -11561,10 +11676,11 @@ pub fn open_paths(
             } else {
                 None
             };
+            let paths_for_new_workspace = if code_configuration.is_some() { original_paths } else { abs_paths };
             let result = cx
                 .update(move |cx| {
                     Workspace::new_local(
-                        abs_paths,
+                        paths_for_new_workspace,
                         app_state.clone(),
                         creation_window,
                         open_options.env,
@@ -11617,6 +11733,15 @@ pub fn open_paths(
                 })
                 .unwrap();
         };
+        if let (true, Some(configuration), Ok(result)) = (reusing_workspace, code_configuration, &result) {
+            let path = configuration.path.clone();
+            result.window.update(cx, |_, window, cx| {
+                result.workspace.update(cx, |workspace, cx| workspace.apply_code_workspace(configuration, window, cx))
+            })?.await?;
+            result.window.update(cx, |_, window, cx| {
+                result.workspace.update(cx, |workspace, cx| workspace.watch_code_workspace(path, window, cx));
+            })?;
+        }
         result
     })
 }

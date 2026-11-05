@@ -21,6 +21,7 @@ pub mod telemetry_snapshot;
 pub mod terminals;
 pub mod toolchain_store;
 pub mod trusted_worktrees;
+pub mod vscode_workspace;
 pub mod worktree_store;
 
 mod environment;
@@ -5454,6 +5455,24 @@ impl Project {
         self.worktree_store.update(cx, |worktree_store, cx| {
             worktree_store.remove_worktree(id_to_remove, cx);
         });
+    }
+
+    pub fn set_vscode_workspace(
+        &mut self,
+        workspace: Option<vscode_workspace::VsCodeWorkspace>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_observer.update(cx, |observer, cx| {
+            observer.set_vscode_workspace(workspace, cx)
+        });
+        cx.notify();
+    }
+
+    pub fn vscode_worktree_name(&self, worktree_id: WorktreeId, cx: &App) -> Option<String> {
+        let worktree = self.worktree_for_id(worktree_id, cx)?;
+        self.settings_observer
+            .read(cx)
+            .vscode_worktree_name(worktree.read(cx).abs_path().as_ref())
     }
 
     pub fn remove_worktree_for_main_worktree_path(

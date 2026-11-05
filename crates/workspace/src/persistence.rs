@@ -2033,7 +2033,7 @@ impl WorkspaceDb {
             match fs.metadata(path).await.ok().flatten() {
                 None => return false,
                 Some(meta) => {
-                    if meta.is_dir {
+                    if meta.is_dir || crate::code_workspace::is_workspace_file(path) {
                         any_dir = true;
                     }
                 }

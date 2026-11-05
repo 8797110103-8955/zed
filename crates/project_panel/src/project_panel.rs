@@ -7146,7 +7146,11 @@ impl ProjectPanel {
         let (depth, difference) =
             ProjectPanel::calculate_depth_and_difference(entry, entries_paths);
 
-        let filename = if difference > 1 {
+        let filename = if entry.path.is_empty()
+            && let Some(name) = self.project.read(cx).vscode_worktree_name(worktree_id, cx)
+        {
+            name
+        } else if difference > 1 {
             entry
                 .path
                 .last_n_components(difference)

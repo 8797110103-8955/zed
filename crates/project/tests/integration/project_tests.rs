@@ -1506,6 +1506,84 @@ async fn test_invalid_local_tasks_shows_toast_with_doc_link(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
+async fn test_invalid_vscode_settings_toast_names_vscode_file(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            ".vscode": { "settings.json": r#"{ "editor.tabSize": 4 }"# },
+            ".zed": { "settings.json": r#"{ "tab_size": 8 }"# },
+            "file.rs": ""
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    cx.run_until_parked();
+    let shown_toasts = Rc::new(RefCell::new(Vec::new()));
+    let hidden_toasts = Rc::new(RefCell::new(Vec::new()));
+    project.update(cx, |_, cx| {
+        let shown_toasts = shown_toasts.clone();
+        let hidden_toasts = hidden_toasts.clone();
+        cx.subscribe(&project, move |_, _, event: &Event, _| match event {
+            Event::Toast {
+                notification_id,
+                message,
+                ..
+            } => shown_toasts
+                .borrow_mut()
+                .push((notification_id.to_string(), message.clone())),
+            Event::HideToast { notification_id } => {
+                hidden_toasts.borrow_mut().push(notification_id.to_string())
+            }
+            _ => {}
+        })
+        .detach();
+    });
+
+    fs.save(
+        path!("/dir/.vscode/settings.json").as_ref(),
+        &"<<<<<<< HEAD\n{}".into(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+
+    let (notification_id, message) = shown_toasts
+        .borrow()
+        .last()
+        .cloned()
+        .expect("invalid VS Code settings should show a toast");
+    assert!(
+        notification_id.contains(".vscode") && notification_id.contains("settings.json"),
+        "toast should name the VS Code settings file, got {notification_id}"
+    );
+    assert!(
+        !notification_id.contains(".zed"),
+        "toast should not blame .zed/settings.json, got {notification_id}"
+    );
+    assert!(message.contains(".vscode"), "unexpected message: {message}");
+
+    fs.save(
+        path!("/dir/.vscode/settings.json").as_ref(),
+        &r#"{ "editor.tabSize": 4 }"#.into(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+
+    assert!(
+        hidden_toasts.borrow().contains(&notification_id),
+        "fixing the VS Code settings should hide {notification_id}, hidden: {:?}",
+        hidden_toasts.borrow()
+    );
+}
+
+#[gpui::test]
 async fn test_fallback_to_single_worktree_tasks(cx: &mut gpui::TestAppContext) {
     init_test(cx);
     TaskStore::init(None);
