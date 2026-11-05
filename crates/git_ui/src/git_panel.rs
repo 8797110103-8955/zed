@@ -1419,6 +1419,14 @@ impl GitPanel {
         cx.new(|cx| {
             let focus_handle = cx.focus_handle();
             cx.on_focus(&focus_handle, window, Self::focus_in).detach();
+            cx.on_focus_in(&focus_handle, window, |this, _, cx| {
+                this.project
+                    .read(cx)
+                    .git_store()
+                    .clone()
+                    .update(cx, |git_store, cx| git_store.refresh(cx));
+            })
+            .detach();
 
             cx.subscribe(&workspace_entity, |this, _, event, cx| {
                 if let workspace::Event::ActiveItemChanged = event {
@@ -4803,6 +4811,17 @@ impl GitPanel {
             action,
             RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom
         ) {
+            if matches!(action, RepositoryMenuAction::Sync)
+                && repository
+                    .read(cx)
+                    .branch
+                    .as_ref()
+                    .and_then(Branch::tracking_status)
+                    .is_none()
+            {
+                self.push_repository(repository, false, false, window, cx);
+                return;
+            }
             self.pull_from_or_sync(
                 repository,
                 matches!(action, RepositoryMenuAction::Sync),
@@ -4894,7 +4913,7 @@ impl GitPanel {
         if !self.has_write_access(cx) {
             return;
         }
-        self.pull_from_or_sync(repository, true, window, cx);
+        self.repository_menu_action(repository, RepositoryMenuAction::Sync, window, cx);
     }
 
     fn pull_from_or_sync(
@@ -5309,12 +5328,23 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_push_and_pull(cx) {
-            return;
-        }
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        self.push_repository(repo, force_push, select_remote, window, cx);
+    }
+
+    fn push_repository(
+        &mut self,
+        repo: Entity<Repository>,
+        force_push: bool,
+        select_remote: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_push_and_pull(cx) {
+            return;
+        }
         let Some(branch) = repo.read(cx).branch.clone() else {
             return;
         };
@@ -5336,13 +5366,7 @@ impl GitPanel {
                 _ => None,
             }
         };
-        let remote = self.get_remote(
-            self.active_repository.clone(),
-            select_remote,
-            true,
-            window,
-            cx,
-        );
+        let remote = self.get_remote(Some(repo.clone()), select_remote, true, window, cx);
 
         cx.spawn_in(window, async move |this, cx| {
             let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
@@ -7374,8 +7398,7 @@ impl GitPanel {
             let tracking = repository_state
                 .branch
                 .as_ref()
-                .and_then(|branch| branch.upstream.as_ref())
-                .and_then(|upstream| upstream.tracking.status());
+                .and_then(Branch::tracking_status);
             let sync_disabled = self.pending_remote_operation.is_some()
                 || !self.has_write_access(cx)
                 || !self.can_push_and_pull(cx)
@@ -7569,11 +7592,19 @@ impl GitPanel {
                     .child(
                         IconButton::new(
                             ("sync-repository", repository_id.0),
-                            IconName::ArrowCircle,
+                            if tracking.is_some() {
+                                IconName::ArrowCircle
+                            } else {
+                                IconName::CloudUpload
+                            },
                         )
                         .icon_size(IconSize::Small)
                         .disabled(sync_disabled)
-                        .tooltip(Tooltip::text("Sync Changes (Pull then Push)"))
+                        .tooltip(Tooltip::text(if tracking.is_some() {
+                            "Sync Changes (Pull then Push)"
+                        } else {
+                            "Create Tracking Branch on Remote"
+                        }))
                         .on_click(cx.listener({
                             let repository = repository.clone();
                             move |this, _, window, cx| {
@@ -10271,6 +10302,13 @@ impl Render for GitPanel {
             .id("git_panel")
             .key_context(self.dispatch_context(window, cx))
             .track_focus(&self.focus_handle)
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.project
+                    .read(cx)
+                    .git_store()
+                    .clone()
+                    .update(cx, |git_store, cx| git_store.refresh(cx));
+            }))
             .when(has_write_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(Self::toggle_staged_for_selected))
                     .on_action(cx.listener(Self::stage_range))

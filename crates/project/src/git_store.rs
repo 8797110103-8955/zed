@@ -117,6 +117,7 @@ pub struct GitStore {
     buffer_ids_by_index_text_buffer_id: HashMap<BufferId, BufferId>,
     shared_diffs: HashMap<proto::PeerId, HashMap<BufferId, SharedDiffs>>,
     object_read_limiter: Arc<Semaphore>,
+    refresh_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1045,7 +1046,33 @@ impl GitStore {
             object_read_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_OBJECT_READS)),
             diffs: HashMap::default(),
             buffer_ids_by_index_text_buffer_id: HashMap::default(),
+            refresh_task: None,
         }
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.state, GitStoreState::Local { .. }) {
+            return;
+        }
+
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            this.update(cx, |this, cx| {
+                let GitStoreState::Local { downstream, .. } = &this.state else {
+                    return;
+                };
+                let updates_tx = downstream.as_ref().map(|state| state.updates_tx.clone());
+                for repository in this.repositories.values() {
+                    repository.update(cx, |repository, cx| {
+                        repository.schedule_scan(updates_tx.clone(), cx);
+                        repository.reload_buffer_diff_bases(cx);
+                    });
+                }
+            })
+            .log_err();
+        }));
     }
 
     pub(crate) fn set_project(&mut self, project: WeakEntity<Project>) {
