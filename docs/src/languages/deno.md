@@ -30,27 +30,21 @@ Configure language servers and formatters in Settings ({#kb zed::OpenSettings}) 
     "JavaScript": {
       "language_servers": [
         "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint"
+        "!typescript-ls"
       ],
       "formatter": "language_server"
     },
     "TypeScript": {
       "language_servers": [
         "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint"
+        "!typescript-ls"
       ],
       "formatter": "language_server"
     },
     "TSX": {
       "language_servers": [
         "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint"
+        "!typescript-ls"
       ],
       "formatter": "language_server"
     }

@@ -19,7 +19,11 @@ use postage::{barrier, prelude::Stream};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json, value::RawValue};
-use util::command::{Child, Stdio};
+#[cfg(not(windows))]
+use util::command::Child;
+use util::command::Stdio;
+#[cfg(windows)]
+use util::process::Child;
 
 use gpui_util::{ResultExt, TryFutureExt};
 use std::path::Path;
@@ -537,19 +541,26 @@ impl LanguageServer {
             working_dir,
             binary.arguments
         );
+        #[cfg(not(windows))]
         let mut command = util::command::new_command(&binary.path);
+        #[cfg(windows)]
+        let mut command = util::command::new_std_command(&binary.path);
         command
             .current_dir(working_dir)
             .args(&binary.arguments)
-            .envs(binary.env.clone().unwrap_or_default())
+            .envs(binary.env.clone().unwrap_or_default());
+
+        #[cfg(not(windows))]
+        let mut server = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut server = command
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn command {command:?}",))?;
+
+        #[cfg(windows)]
+        let mut server = Child::spawn(command, Stdio::piped(), Stdio::piped(), Stdio::piped())?;
 
         let stdin = server.stdin.take().unwrap();
         let stdout = server.stdout.take().unwrap();

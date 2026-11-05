@@ -293,6 +293,9 @@ impl LanguageServerTree {
                 )
                 .cloned()
                 .unwrap_or_default();
+                if adapter_settings.enabled == Some(false) {
+                    return None;
+                }
                 Some((adapter.name(), (adapter_settings, adapter)))
             })
             .collect::<IndexMap<_, _>>();

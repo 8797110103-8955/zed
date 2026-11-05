@@ -3721,6 +3721,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                         let items: Box<[SettingsPageItem]> = concat_sections!(
                             language_settings_data(),
                             non_editor_language_settings_data(),
+                            typescript_language_server_section(),
                             edit_prediction_language_settings_section()
                         );
                         this.render_sub_page_items(
@@ -11041,6 +11042,64 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             miscellaneous_section(),
         )
     }
+}
+
+/// Documents what Zed configures for `typescript-ls`, since those defaults live in
+/// the language server adapter rather than in `default.json`.
+fn typescript_language_server_section() -> Box<[SettingsPageItem]> {
+    let is_typescript_language = active_language().is_some_and(|language| {
+        matches!(language.as_ref(), "TypeScript" | "TSX" | "JavaScript")
+    });
+    if !is_typescript_language {
+        return Box::new([]);
+    }
+
+    fn open_settings_file(
+        settings_window: &mut crate::SettingsWindow,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        let Some(original_window) = settings_window.original_window else {
+            return;
+        };
+        original_window
+            .update(cx, |_workspace, original_window, cx| {
+                original_window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx);
+                original_window.activate_window();
+            })
+            .ok();
+        window.remove_window();
+    }
+
+    Box::new([
+        SettingsPageItem::SectionHeader("TypeScript Language Server (typescript-ls)"),
+        SettingsPageItem::ActionLink(ActionLink {
+            title: "Zed Defaults".into(),
+            description: Some(
+                "Zed enables these for both `typescript` and `javascript`: all inlay hint kinds, \
+                references and implementations code lenses, and completing function calls with \
+                their arguments. Override them under `lsp.typescript-ls.settings`. Inlay hints \
+                and code lenses are only shown when `inlay_hints.enabled` and `code_lens` are on."
+                    .into(),
+            ),
+            button_text: "Open Settings File".into(),
+            on_click: Arc::new(open_settings_file),
+            files: USER,
+        }),
+        SettingsPageItem::ActionLink(ActionLink {
+            title: "Zed-Specific Handling".into(),
+            description: Some(
+                "Zed uses the project's own TypeScript 7 or newer from the nearest \
+                `node_modules/typescript`. Projects with an older TypeScript get a one-time \
+                notification and use Zed's bundled TypeScript 7. Quoted types in diagnostic \
+                messages are rendered as code. tsserver plugins (such as Vue) are not supported."
+                    .into(),
+            ),
+            button_text: "Open Settings File".into(),
+            on_click: Arc::new(open_settings_file),
+            files: USER,
+        }),
+    ])
 }
 
 /// LanguageSettings items that should be included in the "Languages & Tools" page

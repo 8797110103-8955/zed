@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use futures::future::join_all;
 use gpui::{App, AppContext, AsyncApp, Entity, Task};
 use itertools::Itertools as _;
@@ -10,7 +10,8 @@ use language::{
     LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain,
 };
 use lsp::{CodeActionKind, LanguageServerBinary, LanguageServerName, Uri};
-use node_runtime::{NodeRuntime, VersionStrategy};
+use node_runtime::{PackageManagerRuntime, VersionStrategy};
+use parking_lot::Mutex;
 use project::{Fs, lsp_store::language_server_settings};
 use semver::{Version, VersionReq};
 use serde_json::{Value, json};
@@ -24,13 +25,14 @@ use std::{
 };
 use task::{TaskTemplate, TaskTemplates, VariableName};
 use util::rel_path::RelPath;
-use util::{ResultExt, maybe};
+use util::{ResultExt, merge_json_value_into};
 
 use crate::{PackageJson, PackageJsonData};
 
 pub(crate) struct TypeScriptContextProvider {
     fs: Arc<dyn Fs>,
     last_package_json: PackageJsonContents,
+    defer_package_manager_detection: bool,
 }
 
 const TYPESCRIPT_RUNNER_VARIABLE: VariableName =
@@ -320,10 +322,11 @@ impl PackageJsonData {
 }
 
 impl TypeScriptContextProvider {
-    pub fn new(fs: Arc<dyn Fs>) -> Self {
+    pub fn new(fs: Arc<dyn Fs>, defer_package_manager_detection: bool) -> Self {
         Self {
             fs,
             last_package_json: PackageJsonContents::default(),
+            defer_package_manager_detection,
         }
     }
 
@@ -360,6 +363,7 @@ impl TypeScriptContextProvider {
     ) -> Task<anyhow::Result<PackageJsonData>> {
         let package_json_path = directory_path.join("package.json");
         let metadata_check_fs = fs.clone();
+        let detect_package_manager = !self.defer_package_manager_detection;
         cx.background_spawn(async move {
             let metadata = metadata_check_fs
                 .metadata(&package_json_path)
@@ -385,8 +389,11 @@ impl TypeScriptContextProvider {
                         serde_json_lenient::from_str(&package_json_string).with_context(|| {
                             format!("parsing package.json from {package_json_path:?}")
                         })?;
-                    let new_data =
-                        PackageJsonData::new(package_json_path.as_path().into(), package_json);
+                    let new_data = PackageJsonData::new(
+                        package_json_path.as_path().into(),
+                        package_json,
+                        detect_package_manager,
+                    );
                     {
                         let mut contents = existing_package_json.0.write().await;
                         contents.insert(
@@ -514,15 +521,16 @@ impl ContextProvider for TypeScriptContextProvider {
                 )
             },
         );
+        let defer_package_manager_detection = self.defer_package_manager_detection;
         cx.background_spawn(async move {
             if let Some((task, worktree_root, fs)) = args {
                 let package_json_data = task.await.log_err();
-                vars.insert(
-                    TYPESCRIPT_RUNNER_VARIABLE,
-                    detect_package_manager(worktree_root, fs, package_json_data.clone())
-                        .await
-                        .to_owned(),
-                );
+                let runner = if defer_package_manager_detection {
+                    task::PACKAGE_MANAGER_COMMAND
+                } else {
+                    detect_package_manager(worktree_root, fs, package_json_data.clone()).await
+                };
+                vars.insert(TYPESCRIPT_RUNNER_VARIABLE, runner.to_owned());
 
                 if let Some(package_json_data) = package_json_data {
                     if let Some(path) = package_json_data.jest_package_path {
@@ -591,8 +599,27 @@ impl ContextProvider for TypeScriptContextProvider {
     }
 }
 
-fn typescript_server_binary_arguments(server_path: &Path) -> Vec<OsString> {
-    vec![server_path.into(), "--stdio".into()]
+fn typescript_server_binary_arguments() -> Vec<OsString> {
+    vec!["--lsp".into(), "--stdio".into()]
+}
+
+fn native_typescript_binary(node_modules: &Path) -> Result<PathBuf> {
+    let platform = match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        "linux" => "linux",
+        platform => anyhow::bail!("TypeScript Native does not support {platform}"),
+    };
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        architecture => anyhow::bail!("TypeScript Native does not support {architecture}"),
+    };
+    let executable = if cfg!(windows) { "tsc.exe" } else { "tsc" };
+    Ok(node_modules
+        .join(format!("@typescript/typescript-{platform}-{architecture}"))
+        .join("lib")
+        .join(executable))
 }
 
 fn replace_test_name_parameters(test_name: &str) -> String {
@@ -601,88 +628,164 @@ fn replace_test_name_parameters(test_name: &str) -> String {
     PATTERN.split(test_name).map(regex::escape).join("(.+?)")
 }
 
-static TYPESCRIPT_VERSION_REQ: LazyLock<VersionReq> =
-    LazyLock::new(|| VersionReq::parse("^6").expect("Failed to parse TypeScript version req"));
+static TYPESCRIPT_VERSION_REQ: LazyLock<VersionReq> = LazyLock::new(|| {
+    VersionReq::parse("^7").expect("Failed to create TypeScript version requirement")
+});
 
+/// Older releases only ship `tsserver.js`, which needs a separate LSP wrapper.
+const MINIMUM_TYPESCRIPT_MAJOR_VERSION: u64 = 7;
+
+#[derive(Clone)]
 pub struct TypeScriptLspAdapter {
     fs: Arc<dyn Fs>,
-    node: NodeRuntime,
+    node: PackageManagerRuntime,
+    warned_project_directories: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl TypeScriptLspAdapter {
-    const OLD_SERVER_PATH: &str = "node_modules/typescript-language-server/lib/cli.js";
-    const NEW_SERVER_PATH: &str = "node_modules/typescript-language-server/lib/cli.mjs";
-
     const PACKAGE_NAME: &str = "typescript";
-    const SERVER_PACKAGE_NAME: &str = "typescript-language-server";
+    const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("typescript-ls");
 
-    const SERVER_NAME: LanguageServerName =
-        LanguageServerName::new_static(Self::SERVER_PACKAGE_NAME);
-
-    pub fn new(node: NodeRuntime, fs: Arc<dyn Fs>) -> Self {
-        TypeScriptLspAdapter { fs, node }
-    }
-
-    async fn tsdk_path(&self, adapter: &Arc<dyn LspAdapterDelegate>) -> Option<&'static str> {
-        let is_yarn = adapter
-            .read_text_file(
-                RelPath::from_unix_str(".yarn/sdks/typescript/lib/typescript.js").unwrap(),
-            )
-            .await
-            .is_ok();
-
-        let tsdk_path = if is_yarn {
-            ".yarn/sdks/typescript/lib"
-        } else {
-            "node_modules/typescript/lib"
-        };
-
-        // typescript-language-server doesn't support TypeScript 7+, which no longer
-        // ships `tsserver.js`.
-        if self
-            .fs
-            .is_file(
-                &adapter
-                    .worktree_root_path()
-                    .join(tsdk_path)
-                    .join("tsserver.js"),
-            )
-            .await
-        {
-            Some(tsdk_path)
-        } else {
-            None
+    pub fn new(node: PackageManagerRuntime, fs: Arc<dyn Fs>) -> Self {
+        Self {
+            fs,
+            node,
+            warned_project_directories: Arc::default(),
         }
     }
-}
 
-pub struct TypeScriptVersions {
-    typescript_version: Version,
-    server_version: Version,
+    pub fn enhance_diagnostic_message(message: &str) -> Option<String> {
+        static SINGLE_WORD_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"'([^\s']*)'").expect("Failed to create REGEX")
+        });
+
+        static MULTI_WORD_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"'([^']+\s+[^']*)'").expect("Failed to create REGEX")
+        });
+
+        let first = SINGLE_WORD_REGEX.replace_all(message, "`$1`").to_string();
+        let second = MULTI_WORD_REGEX
+            .replace_all(&first, "\n```typescript\n$1\n```\n")
+            .to_string();
+        Some(second)
+    }
+
+    async fn installed_typescript_version(&self, directory: &Path) -> Option<Version> {
+        let manifest_path = directory.join("node_modules/typescript/package.json");
+        if !self.fs.is_file(&manifest_path).await {
+            return None;
+        }
+        let manifest = self.fs.load(&manifest_path).await.log_err()?;
+        let manifest: Value = serde_json::from_str(&manifest).log_err()?;
+        Version::parse(manifest.get("version")?.as_str()?).log_err()
+    }
+
+    async fn installed_binary(&self, directory: &Path) -> Option<LanguageServerBinary> {
+        let version = self.installed_typescript_version(directory).await?;
+        if version.major < MINIMUM_TYPESCRIPT_MAJOR_VERSION {
+            return None;
+        }
+        self.native_binary(directory).await
+    }
+
+    fn warn_unsupported_project_version(
+        &self,
+        directory: &Path,
+        version: &Version,
+        delegate: &Arc<dyn LspAdapterDelegate>,
+        cx: &AsyncApp,
+    ) {
+        if !self
+            .warned_project_directories
+            .lock()
+            .insert(directory.to_path_buf())
+        {
+            return;
+        }
+        let message = format!(
+            "{} uses TypeScript {version}. Zed only supports TypeScript {MINIMUM_TYPESCRIPT_MAJOR_VERSION} and newer, \
+            so some syntax and diagnostics may differ from your build. Using Zed's bundled TypeScript \
+            {MINIMUM_TYPESCRIPT_MAJOR_VERSION} instead; upgrade the project to typescript@{MINIMUM_TYPESCRIPT_MAJOR_VERSION}.",
+            directory.display()
+        );
+        cx.update(|cx| delegate.show_notification(&message, cx));
+    }
+
+    async fn native_binary(&self, directory: &Path) -> Option<LanguageServerBinary> {
+        let typescript_directory = self
+            .fs
+            .canonicalize(&directory.join("node_modules/typescript"))
+            .await
+            .log_err()?;
+        for node_modules in [
+            typescript_directory.parent()?,
+            &directory.join("node_modules"),
+        ] {
+            let path = native_typescript_binary(node_modules).log_err()?;
+            if self.fs.is_file(&path).await {
+                return Some(LanguageServerBinary {
+                    path,
+                    arguments: typescript_server_binary_arguments(),
+                    env: None,
+                });
+            }
+        }
+        None
+    }
 }
 
 impl LspInstaller for TypeScriptLspAdapter {
-    type BinaryVersion = TypeScriptVersions;
+    type BinaryVersion = Version;
 
     async fn fetch_latest_server_version(
         &self,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<Self::BinaryVersion> {
-        Ok(TypeScriptVersions {
-            typescript_version: self
-                .node
-                .npm_package_latest_version_with_requirement(
-                    Self::PACKAGE_NAME,
-                    Some(&TYPESCRIPT_VERSION_REQ),
-                )
-                .await?,
-            server_version: self
-                .node
-                .npm_package_latest_version(Self::SERVER_PACKAGE_NAME)
-                .await?,
-        })
+        self.node
+            .for_project(delegate.worktree_root_path())
+            .package_manager_latest_version_with_requirement(
+                Self::PACKAGE_NAME,
+                Some(&TYPESCRIPT_VERSION_REQ),
+            )
+            .await
+    }
+
+    async fn check_if_user_installed(
+        &self,
+        delegate: &Arc<dyn LspAdapterDelegate>,
+        _: Option<Toolchain>,
+        cx: &AsyncApp,
+    ) -> Option<LanguageServerBinary> {
+        // Mirror Node's resolution: the nearest `node_modules/typescript` is the
+        // project's compiler. Parent directories are only searched up to the
+        // repository root (monorepos hoist dependencies there); outside a
+        // repository only the worktree itself is trusted, so an unrelated
+        // installation such as `~/node_modules` is never picked up.
+        let worktree_root = delegate.worktree_root_path();
+        let mut search_root = worktree_root;
+        for directory in worktree_root.ancestors() {
+            if matches!(self.fs.metadata(&directory.join(".git")).await, Ok(Some(_))) {
+                search_root = directory;
+                break;
+            }
+        }
+        for directory in worktree_root.ancestors() {
+            if let Some(version) = self.installed_typescript_version(directory).await {
+                if version.major < MINIMUM_TYPESCRIPT_MAJOR_VERSION {
+                    self.warn_unsupported_project_version(directory, &version, delegate, cx);
+                    return None;
+                }
+                let mut binary = self.native_binary(directory).await?;
+                binary.env = Some(delegate.shell_env().await);
+                return Some(binary);
+            }
+            if directory == search_root {
+                break;
+            }
+        }
+        None
     }
 
     fn check_if_version_installed(
@@ -691,44 +794,24 @@ impl LspInstaller for TypeScriptLspAdapter {
         container_dir: &PathBuf,
         _: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Option<LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
-        let typescript_version = version.typescript_version.clone();
-        let server_version = version.server_version.clone();
+        let adapter = self.clone();
+        let version = version.clone();
         let container_dir = container_dir.clone();
-
         async move {
-            let server_path = container_dir.join(Self::NEW_SERVER_PATH);
-
-            // Pin rather than Latest so an unusable TypeScript 7.x install gets downgraded.
-            if node
-                .should_install_npm_package(
+            let binary = adapter.installed_binary(&container_dir).await?;
+            if adapter
+                .node
+                .should_install_package(
                     Self::PACKAGE_NAME,
-                    &server_path,
+                    &binary.path,
                     &container_dir,
-                    VersionStrategy::Pin(&typescript_version),
+                    VersionStrategy::Latest(&version),
                 )
                 .await
             {
                 return None;
             }
-
-            if node
-                .should_install_npm_package(
-                    Self::SERVER_PACKAGE_NAME,
-                    &server_path,
-                    &container_dir,
-                    VersionStrategy::Latest(&server_version),
-                )
-                .await
-            {
-                return None;
-            }
-
-            Some(LanguageServerBinary {
-                path: node.binary_path().await.ok()?,
-                env: None,
-                arguments: typescript_server_binary_arguments(&server_path),
-            })
+            Some(binary)
         }
     }
 
@@ -736,28 +819,21 @@ impl LspInstaller for TypeScriptLspAdapter {
         &self,
         latest_version: Self::BinaryVersion,
         container_dir: PathBuf,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
-
+        let adapter = self.clone();
+        let package_manager = self.node.for_project(delegate.worktree_root_path());
         async move {
-            let server_path = container_dir.join(Self::NEW_SERVER_PATH);
-            let typescript_version = latest_version.typescript_version.to_string();
-
-            node.npm_install_packages(
-                &container_dir,
-                &[
-                    (Self::PACKAGE_NAME, typescript_version.as_str()),
-                    (Self::SERVER_PACKAGE_NAME, "latest"),
-                ],
-            )
-            .await?;
-
-            Ok(LanguageServerBinary {
-                path: node.binary_path().await?,
-                env: None,
-                arguments: typescript_server_binary_arguments(&server_path),
-            })
+            package_manager
+                .package_manager_install_packages(
+                    &container_dir,
+                    &[(Self::PACKAGE_NAME, &latest_version.to_string())],
+                )
+                .await?;
+            adapter
+                .installed_binary(&container_dir)
+                .await
+                .context("TypeScript Native installation is missing a supported native executable")
         }
     }
 
@@ -766,7 +842,7 @@ impl LspInstaller for TypeScriptLspAdapter {
         container_dir: PathBuf,
         _: &dyn LspAdapterDelegate,
     ) -> Option<LanguageServerBinary> {
-        get_cached_ts_server_binary(container_dir, &self.node).await
+        self.installed_binary(&container_dir).await
     }
 }
 
@@ -824,26 +900,11 @@ impl LspAdapter for TypeScriptLspAdapter {
 
     async fn initialization_options(
         self: Arc<Self>,
-        adapter: &Arc<dyn LspAdapterDelegate>,
+        _: &Arc<dyn LspAdapterDelegate>,
         _: &mut AsyncApp,
-    ) -> Result<Option<serde_json::Value>> {
-        let tsdk_path = self.tsdk_path(adapter).await;
+    ) -> Result<Option<Value>> {
         Ok(Some(json!({
-            "provideFormatter": true,
-            "hostInfo": "zed",
-            "tsserver": {
-                "path": tsdk_path,
-            },
-            "preferences": {
-                "includeInlayParameterNameHints": "all",
-                "includeInlayParameterNameHintsWhenArgumentMatchesName": true,
-                "includeInlayFunctionParameterTypeHints": true,
-                "includeInlayVariableTypeHints": true,
-                "includeInlayVariableTypeHintsWhenTypeMatchesName": true,
-                "includeInlayPropertyDeclarationTypeHints": true,
-                "includeInlayFunctionLikeReturnTypeHints": true,
-                "includeInlayEnumMemberValueHints": true,
-            }
+            "codeLensShowLocationsCommandName": "editor.action.showReferences"
         })))
     }
 
@@ -854,18 +915,57 @@ impl LspAdapter for TypeScriptLspAdapter {
         _: Option<Uri>,
         cx: &mut AsyncApp,
     ) -> Result<Value> {
-        let override_options = cx.update(|cx| {
-            language_server_settings(delegate.as_ref(), &Self::SERVER_NAME, cx)
-                .and_then(|s| s.settings.clone())
-        });
-        if let Some(options) = override_options {
-            return Ok(options);
-        }
-        Ok(json!({
-            "completions": {
-              "completeFunctionCalls": true
+        let defaults = json!({
+            "suggest": {
+                "completeFunctionCalls": true
+            },
+            "inlayHints": {
+                "parameterNames": {
+                    "enabled": "all",
+                    "suppressWhenArgumentMatchesName": false
+                },
+                "parameterTypes": {
+                    "enabled": true
+                },
+                "variableTypes": {
+                    "enabled": true,
+                    "suppressWhenTypeMatchesName": false
+                },
+                "propertyDeclarationTypes": {
+                    "enabled": true
+                },
+                "functionLikeReturnTypes": {
+                    "enabled": true
+                },
+                "enumMemberValues": {
+                    "enabled": true
+                }
+            },
+            "implementationsCodeLens": {
+                "enabled": true,
+                "showOnAllClassMethods": true,
+                "showOnInterfaceMethods": true
+            },
+            "referencesCodeLens": {
+                "enabled": true,
+                "showOnAllFunctions": true
             }
-        }))
+        });
+        let mut configuration = json!({
+            "typescript": defaults,
+            "javascript": defaults
+        });
+        if let Some(settings) = cx.update(|cx| {
+            language_server_settings(delegate.as_ref(), &Self::SERVER_NAME, cx)
+                .and_then(|settings| settings.settings.clone())
+        }) {
+            merge_json_value_into(settings, &mut configuration);
+        }
+        Ok(configuration)
+    }
+
+    fn diagnostic_message_to_markdown(&self, message: &str) -> Option<String> {
+        Self::enhance_diagnostic_message(message)
     }
 
     fn language_ids(&self) -> HashMap<LanguageName, String> {
@@ -875,37 +975,6 @@ impl LspAdapter for TypeScriptLspAdapter {
             (LanguageName::new_static("TSX"), "typescriptreact".into()),
         ])
     }
-
-    fn is_opt_in_for(&self, language: &LanguageName) -> bool {
-        matches!(language.as_ref(), "TypeScript" | "JavaScript" | "TSX")
-    }
-}
-
-async fn get_cached_ts_server_binary(
-    container_dir: PathBuf,
-    node: &NodeRuntime,
-) -> Option<LanguageServerBinary> {
-    maybe!(async {
-        let old_server_path = container_dir.join(TypeScriptLspAdapter::OLD_SERVER_PATH);
-        let new_server_path = container_dir.join(TypeScriptLspAdapter::NEW_SERVER_PATH);
-        if new_server_path.exists() {
-            Ok(LanguageServerBinary {
-                path: node.binary_path().await?,
-                env: None,
-                arguments: typescript_server_binary_arguments(&new_server_path),
-            })
-        } else if old_server_path.exists() {
-            Ok(LanguageServerBinary {
-                path: node.binary_path().await?,
-                env: None,
-                arguments: typescript_server_binary_arguments(&old_server_path),
-            })
-        } else {
-            anyhow::bail!("missing executable in directory {container_dir:?}")
-        }
-    })
-    .await
-    .log_err()
 }
 
 #[cfg(test)]
@@ -922,8 +991,191 @@ mod tests {
     use util::{path, rel_path::rel_path};
 
     use crate::typescript::{
-        PackageJsonData, TypeScriptContextProvider, replace_test_name_parameters,
+        PackageJsonData, TypeScriptContextProvider, TypeScriptLspAdapter,
+        native_typescript_binary, replace_test_name_parameters,
     };
+
+    struct FakeTypeScriptDelegate {
+        root: std::path::PathBuf,
+        executor: BackgroundExecutor,
+        notifications: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl language::LspAdapterDelegate for FakeTypeScriptDelegate {
+        fn show_notification(&self, message: &str, _: &mut gpui::App) {
+            self.notifications.lock().push(message.to_owned());
+        }
+
+        fn http_client(&self) -> std::sync::Arc<dyn http_client::HttpClient> {
+            std::sync::Arc::new(http_client::BlockedHttpClient)
+        }
+
+        fn background_executor(&self) -> &BackgroundExecutor {
+            &self.executor
+        }
+
+        fn worktree_id(&self) -> settings::WorktreeId {
+            settings::WorktreeId::from_usize(0)
+        }
+
+        fn worktree_root_path(&self) -> &Path {
+            &self.root
+        }
+
+        fn resolve_relative_path(&self, path: std::path::PathBuf) -> std::path::PathBuf {
+            self.root.join(path)
+        }
+
+        fn status_source_id(&self) -> gpui::EntityId {
+            gpui::EntityId::from(0u64)
+        }
+
+        fn update_status(&self, _: lsp::LanguageServerName, _: language::BinaryStatus) {}
+
+        fn registered_lsp_adapters(&self) -> Vec<std::sync::Arc<dyn language::LspAdapter>> {
+            Vec::new()
+        }
+
+        async fn language_server_download_dir(
+            &self,
+            _: &lsp::LanguageServerName,
+        ) -> Option<std::sync::Arc<Path>> {
+            None
+        }
+
+        async fn package_manager_installed_version(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<Option<(std::path::PathBuf, semver::Version)>> {
+            Ok(None)
+        }
+
+        async fn which(&self, _: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        async fn shell_env(&self) -> collections::HashMap<String, String> {
+            collections::HashMap::default()
+        }
+
+        async fn read_text_file(&self, _: &util::rel_path::RelPath) -> anyhow::Result<String> {
+            anyhow::bail!("reading worktree files is not supported in this test")
+        }
+
+        async fn try_exec(&self, _: lsp::LanguageServerBinary) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[gpui::test]
+    async fn test_typescript_project_version_gate(cx: &mut TestAppContext) {
+        use language::LspInstaller as _;
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/outer"),
+            json!({
+                "node_modules": {"typescript": {"package.json": r#"{"version":"7.0.2"}"#}},
+                "repo": {
+                    ".git": {},
+                    "legacy": {"node_modules": {"typescript": {"package.json": r#"{"version":"6.0.3"}"#}}},
+                    "native": {"node_modules": {"typescript": {"package.json": r#"{"version":"7.0.2"}"#}}},
+                    "plain": {}
+                }
+            }),
+        )
+        .await;
+        let native_binary = native_typescript_binary(Path::new(path!("/outer/repo/native/node_modules")))
+            .expect("supported test platform");
+        fs::Fs::create_dir(
+            fs.as_ref(),
+            native_binary.parent().expect("binary directory"),
+        )
+        .await
+        .expect("create native binary directory");
+        fs.insert_file(&native_binary, Vec::new()).await;
+
+        let adapter = TypeScriptLspAdapter::new(
+            node_runtime::PackageManagerRuntime::unavailable(),
+            fs.clone(),
+        );
+        let notifications = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let delegate_for = |root: &str| -> std::sync::Arc<dyn language::LspAdapterDelegate> {
+            std::sync::Arc::new(FakeTypeScriptDelegate {
+                root: root.into(),
+                executor: cx.executor(),
+                notifications: notifications.clone(),
+            })
+        };
+        let async_cx = cx.to_async();
+
+        let binary = adapter
+            .check_if_user_installed(&delegate_for(path!("/outer/repo/native")), None, &async_cx)
+            .await
+            .expect("project TypeScript 7 binary");
+        assert_eq!(binary.path, native_binary);
+        assert!(notifications.lock().is_empty());
+
+        let legacy = delegate_for(path!("/outer/repo/legacy"));
+        for _ in 0..2 {
+            assert!(
+                adapter
+                    .check_if_user_installed(&legacy, None, &async_cx)
+                    .await
+                    .is_none()
+            );
+        }
+        let warnings = notifications.lock().clone();
+        assert_eq!(warnings.len(), 1, "warn once per project: {warnings:?}");
+        assert!(warnings[0].contains("6.0.3"));
+
+        assert!(
+            adapter
+                .check_if_user_installed(&delegate_for(path!("/outer/repo/plain")), None, &async_cx)
+                .await
+                .is_none(),
+            "TypeScript outside the repository must be ignored"
+        );
+
+        fs.insert_tree(
+            path!("/loose"),
+            json!({
+                "node_modules": {"typescript": {"package.json": r#"{"version":"7.0.2"}"#}},
+                "project": {}
+            }),
+        )
+        .await;
+        let loose_binary = native_typescript_binary(Path::new(path!("/loose/node_modules")))
+            .expect("supported test platform");
+        fs::Fs::create_dir(fs.as_ref(), loose_binary.parent().expect("binary directory"))
+            .await
+            .expect("create native binary directory");
+        fs.insert_file(&loose_binary, Vec::new()).await;
+        assert!(
+            adapter
+                .check_if_user_installed(&delegate_for(path!("/loose/project")), None, &async_cx)
+                .await
+                .is_none(),
+            "TypeScript above a worktree that is not in a repository must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_message_to_markdown() {
+        let message = "The expected type comes from the return type of this signature.";
+        assert_eq!(
+            TypeScriptLspAdapter::enhance_diagnostic_message(message).as_deref(),
+            Some(message)
+        );
+
+        let message = "Type '() => { foo: string; bar: string; }' is not assignable to type 'GetUserFunction'.\n  Property 'baz' is missing in type '{ foo: string; bar: string; }' but required in type 'User'.";
+        let expected = "Type \n```typescript\n() => { foo: string; bar: string; }\n```\n is not assignable to type `GetUserFunction`.\n  Property `baz` is missing in type \n```typescript\n{ foo: string; bar: string; }\n```\n but required in type `User`.";
+        assert_eq!(
+            TypeScriptLspAdapter::enhance_diagnostic_message(message).as_deref(),
+            Some(expected)
+        );
+    }
 
     #[test]
     fn test_class_instantiation_highlighting() {
@@ -1707,7 +1959,7 @@ mod tests {
         )
         .await;
 
-        let provider = TypeScriptContextProvider::new(fs.clone());
+        let provider = TypeScriptContextProvider::new(fs.clone(), false);
         let package_json_data = cx
             .update(|cx| {
                 provider.combined_package_json_data(
@@ -1858,7 +2110,7 @@ mod tests {
         )
         .await;
 
-        let provider = TypeScriptContextProvider::new(fs.clone());
+        let provider = TypeScriptContextProvider::new(fs.clone(), false);
 
         let package_json_data = cx
             .update(|cx| {

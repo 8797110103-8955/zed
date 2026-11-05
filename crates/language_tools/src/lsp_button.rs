@@ -13,7 +13,7 @@ use language::language_settings::{EditPredictionProvider, all_language_settings}
 use client::proto;
 use collections::HashSet;
 use editor::{Editor, EditorEvent};
-use gpui::{Action as _, Anchor, App, Entity, Subscription, Task, TaskExt, WeakEntity, actions};
+use gpui::{Action as _, Anchor, App, Entity, Subscription, Task, WeakEntity, actions};
 use language::{BinaryStatus, BufferId, ServerHealth};
 use lsp::{LanguageServerId, LanguageServerName, LanguageServerSelector};
 use path::PathStyle;
@@ -27,7 +27,9 @@ use ui::{
 };
 
 use util::{ResultExt, paths::PathExt, rel_path::RelPath};
-use workspace::{StatusItemView, ToggleWorktreeSecurity, Workspace};
+use workspace::{
+    StatusItemView, ToggleWorktreeSecurity, Workspace, notifications::DetachAndPromptErr,
+};
 
 use crate::lsp_log_view;
 
@@ -200,12 +202,6 @@ impl ServerInfo {
     fn server_selector(&self) -> LanguageServerSelector {
         LanguageServerSelector::Id(self.id)
     }
-
-    fn can_stop(&self) -> bool {
-        self.binary_status.as_ref().is_none_or(|status| {
-            matches!(status.status, BinaryStatus::None | BinaryStatus::Starting)
-        })
-    }
 }
 
 impl LanguageServerHealthStatus {
@@ -221,6 +217,21 @@ impl LanguageServerHealthStatus {
 }
 
 impl LanguageServerState {
+    fn disabled_language_servers(&self, cx: &App) -> Vec<LanguageServerName> {
+        self.workspace
+            .upgrade()
+            .map(|workspace| {
+                workspace
+                    .read(cx)
+                    .project()
+                    .read(cx)
+                    .disabled_language_servers(cx)
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn fill_menu(&self, mut menu: ContextMenu, cx: &mut Context<Self>) -> ContextMenu {
         let lsp_logs = cx
             .try_global::<GlobalLogStore>()
@@ -264,6 +275,34 @@ impl LanguageServerState {
                 },
                 move |window, cx| {
                     window.dispatch_action(ToggleWorktreeSecurity.boxed_clone(), cx);
+                },
+            );
+        }
+
+        let disabled_servers = self.disabled_language_servers(cx);
+        for server_name in &disabled_servers {
+            let workspace = self.workspace.clone();
+            let server_name = server_name.clone();
+            menu = menu.entry(
+                format!("Enable {} for This Project", server_name.0),
+                None,
+                move |window, cx| {
+                    let workspace = workspace.clone();
+                    let server_name = server_name.clone();
+                    cx.spawn(async move |cx| {
+                        let task = workspace.update(cx, |workspace, cx| {
+                            workspace.project().update(cx, |project, cx| {
+                                project.set_language_server_enabled(server_name, true, cx)
+                            })
+                        })?;
+                        task.await
+                    })
+                    .detach_and_prompt_err(
+                        "Failed to enable language server",
+                        window,
+                        cx,
+                        |_, _, _| None,
+                    );
                 },
             );
         }
@@ -396,7 +435,7 @@ impl LanguageServerState {
             let server_message = message.clone();
 
             let submenu_server_name = server_info.name.clone();
-            let submenu_server_info = server_info.clone();
+            let can_stop = !disabled_servers.contains(&server_info.name);
 
             menu = menu.submenu_with_colored_icon(
                 server_info.name.0.clone(),
@@ -409,7 +448,6 @@ impl LanguageServerState {
                     let workspace = self.workspace.clone();
                     let lsp_store = self.lsp_store.clone();
                     let state = cx.entity().downgrade();
-                    let can_stop = submenu_server_info.can_stop();
                     let process_memory_cache = process_memory_cache.clone();
 
                     move |menu, _window, _cx| {
@@ -580,24 +618,34 @@ impl LanguageServerState {
                         });
 
                         if can_stop {
-                            let lsp_store_for_stop = lsp_store.clone();
-                            let server_selector_for_stop = server_selector.clone();
-
-                            submenu = submenu.entry("Stop Server", None, move |_window, cx| {
-                                lsp_store_for_stop
-                                    .update(cx, |lsp_store, cx| {
-                                        lsp_store
-                                            .stop_language_servers_for_buffers(
-                                                Vec::new(),
-                                                HashSet::from_iter([
-                                                    server_selector_for_stop.clone()
-                                                ]),
-                                                cx,
-                                            )
-                                            .detach_and_log_err(cx);
+                            let workspace = workspace.clone();
+                            let server_name = submenu_server_name.clone();
+                            submenu = submenu.entry(
+                                "Stop Server for This Project",
+                                None,
+                                move |window, cx| {
+                                    let workspace = workspace.clone();
+                                    let server_name = server_name.clone();
+                                    cx.spawn(async move |cx| {
+                                        let task = workspace.update(cx, |workspace, cx| {
+                                            workspace.project().update(cx, |project, cx| {
+                                                project.set_language_server_enabled(
+                                                    server_name,
+                                                    false,
+                                                    cx,
+                                                )
+                                            })
+                                        })?;
+                                        task.await
                                     })
-                                    .ok();
-                            });
+                                    .detach_and_prompt_err(
+                                        "Failed to stop language server",
+                                        window,
+                                        cx,
+                                        |_, _, _| None,
+                                    );
+                                },
+                            );
                         }
 
                         submenu = submenu.separator().custom_row({
@@ -895,9 +943,7 @@ impl LspButton {
         let settings_subscription =
             cx.observe_global_in::<SettingsStore>(window, move |lsp_button, window, cx| {
                 if ProjectSettings::get_global(cx).global_lsp_settings.button {
-                    if lsp_button.lsp_menu.is_none() {
-                        lsp_button.refresh_lsp_menu(true, window, cx);
-                    }
+                    lsp_button.refresh_lsp_menu(true, window, cx);
                 } else if lsp_button.lsp_menu.take().is_some() {
                     cx.notify();
                 }
@@ -936,12 +982,12 @@ impl LspButton {
             lsp_menu_refresh: Task::ready(()),
             _subscriptions: vec![settings_subscription, lsp_store_subscription],
         };
-        let is_restricted = TrustedWorktrees::has_restricted_worktrees(
-            &workspace.project().read(cx).worktree_store(),
-            cx,
-        );
+        let project = workspace.project().read(cx);
+        let is_restricted =
+            TrustedWorktrees::has_restricted_worktrees(&project.worktree_store(), cx);
 
         if is_restricted
+            || !project.disabled_language_servers(cx).is_empty()
             || !lsp_button
                 .server_state
                 .read(cx)
@@ -1386,7 +1432,13 @@ impl Render for LspButton {
             .unwrap_or(false);
 
         if !is_restricted
-            && (self.server_state.read(cx).language_servers.is_empty() || self.lsp_menu.is_none())
+            && ((self.server_state.read(cx).language_servers.is_empty()
+                && self
+                    .server_state
+                    .read(cx)
+                    .disabled_language_servers(cx)
+                    .is_empty())
+                || self.lsp_menu.is_none())
         {
             return div().hidden();
         }

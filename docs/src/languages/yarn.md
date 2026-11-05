@@ -9,7 +9,9 @@ description: "Configure Yarn language support in Zed, including language servers
 
 ## Setup
 
-1. Run `yarn dlx @yarnpkg/sdks base` to generate a `.yarn/sdks` directory.
-2. Set your language server (e.g. VTSLS) to use TypeScript SDK from `.yarn/sdks/typescript/lib` directory in [LSP initialization options](../reference/all-settings.md#lsp). The actual setting depends on your language server; for example, for VTSLS set [`typescript.tsdk`](https://github.com/yioneko/vtsls/blob/6adfb5d3889ad4b82c5e238446b27ae3ee1e3767/packages/service/configuration.schema.json#L5).
+Zed's TypeScript language server (`typescript-ls`) only looks for the project's compiler in `node_modules/typescript`; Yarn Plug'n'Play SDKs in `.yarn/sdks` are not used.
+
+1. Set `nodeLinker: node-modules` in `.yarnrc.yml` and run `yarn install`, so TypeScript is installed under `node_modules`.
+2. Install TypeScript 7 or newer (`yarn add -D typescript@7`); older versions fall back to Zed's bundled TypeScript 7. See [TypeScript](./typescript.md#language-server).
 
 After configuration, language server features (Go to Definition, completions, hover documentation) should work correctly.

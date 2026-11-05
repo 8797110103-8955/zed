@@ -158,10 +158,7 @@ WebStorm has its own JavaScript and TypeScript analysis engine built by JetBrain
 
 Zed uses the Language Server Protocol (LSP) for code intelligence. For JavaScript and TypeScript, Zed supports:
 
-- **vtsls** (default) — Fast TypeScript language server with excellent performance
-- **typescript-language-server** — The standard TypeScript LSP implementation
-- **ESLint** — Linting integration
-- **Prettier** — Code formatting (built-in)
+- **typescript-ls** — The TypeScript 7 native language server (`tsc --lsp`)
 
 The TypeScript LSP experience is well-supported. You get accurate completions, type checking, go-to-definition, and find-references. The experience is comparable to VS Code, which uses the same underlying TypeScript services.
 

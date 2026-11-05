@@ -446,6 +446,31 @@ impl LocalLspStore {
         start_mode: LanguageServerStartMode,
         cx: &mut App,
     ) -> Option<LanguageServerId> {
+        if disposition.settings.enabled == Some(false) {
+            return None;
+        }
+        if !worktree_handle.read(cx).is_visible() {
+            let mut visible_worktrees = self
+                .worktree_store
+                .read(cx)
+                .visible_worktrees(cx)
+                .peekable();
+            if visible_worktrees.peek().is_some()
+                && visible_worktrees.all(|worktree| {
+                    language_server_settings_for(
+                        SettingsLocation {
+                            worktree_id: worktree.read(cx).id(),
+                            path: RelPath::empty(),
+                        },
+                        &disposition.server_name,
+                        cx,
+                    )
+                    .is_some_and(|settings| settings.enabled == Some(false))
+                })
+            {
+                return None;
+            }
+        }
         let key = LanguageServerSeed {
             worktree_id: worktree_handle.read(cx).id(),
             name: disposition.server_name.clone(),

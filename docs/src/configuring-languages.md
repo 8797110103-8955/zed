@@ -128,7 +128,7 @@ In this example:
 
 The `"..."` entry acts as a wildcard that includes any registered language server you haven't explicitly mentioned. Servers you list by name keep their position, and `"..."` fills in the remaining ones at that point in the list. Servers prefixed with `!` are excluded entirely. This means that if a new language server extension is installed or a new server is registered for a language, `"..."` will automatically include it. If you want full control over which servers are enabled, omit `"..."` — only the servers you list by name will be used.
 
-Some language servers are disabled by default for some of their languages, e.g. `typescript-language-server` for TypeScript, or `ty` for Python. Extensions can also mark their language servers as [disabled by default](./extensions/languages.md#opt-in-language-servers). Such servers are never included by `"..."`, regardless of your configuration, and only start when you list them by name, e.g. `["my-alternative-server", "..."]`.
+Some language servers are disabled by default for some of their languages, e.g. `ty` for Python. Extensions can also mark their language servers as [disabled by default](./extensions/languages.md#opt-in-language-servers). Such servers are never included by `"..."`, regardless of your configuration, and only start when you list them by name, e.g. `["my-alternative-server", "..."]`.
 
 #### Examples
 
@@ -199,26 +199,23 @@ This example configures the Rust Analyzer to use Clippy for additional linting w
 
 When configuring language server options in Zed, it's important to use nested objects rather than dot-delimited strings. This is particularly relevant when working with more complex configurations. Let's look at a real-world example using the TypeScript language server:
 
-Suppose you want to configure the following settings for TypeScript:
+Suppose you want to show parameter name inlay hints only for literal arguments.
 
-- Enable strict null checks
-- Set the target ECMAScript version to ES2020
-
-Here's how you would structure these settings in Zed's `settings.json`:
+Here's how you would structure this setting in Zed's `settings.json`:
 
 ```json [settings]
 "lsp": {
-  "typescript-language-server": {
-    "initialization_options": {
-      // These are not supported (VSCode dotted style):
-      // "preferences.strictNullChecks": true,
-      // "preferences.target": "ES2020"
+  "typescript-ls": {
+    "settings": {
+      // This is not supported (VSCode dotted style):
+      // "typescript.inlayHints.parameterNames.enabled": "literals"
       //
-      // These is correct (nested notation):
-      "preferences": {
-        "strictNullChecks": true,
-        "target": "ES2020"
-      },
+      // This is correct (nested notation):
+      "typescript": {
+        "inlayHints": {
+          "parameterNames": { "enabled": "literals" }
+        }
+      }
     }
   }
 }

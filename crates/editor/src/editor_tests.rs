@@ -29217,6 +29217,7 @@ async fn test_language_server_restart_due_to_settings_change(cx: &mut TestAppCon
         project_settings.lsp.0.insert(
             "Some other server name".into(),
             LspSettings {
+                enabled: None,
                 binary: None,
                 settings: None,
                 initialization_options: Some(json!({
@@ -29238,6 +29239,7 @@ async fn test_language_server_restart_due_to_settings_change(cx: &mut TestAppCon
         project_settings.lsp.0.insert(
             language_server_name.into(),
             LspSettings {
+                enabled: None,
                 binary: None,
                 settings: None,
                 initialization_options: Some(json!({
@@ -29259,6 +29261,7 @@ async fn test_language_server_restart_due_to_settings_change(cx: &mut TestAppCon
         project_settings.lsp.0.insert(
             language_server_name.into(),
             LspSettings {
+                enabled: None,
                 binary: None,
                 settings: None,
                 initialization_options: Some(json!({
@@ -29280,6 +29283,7 @@ async fn test_language_server_restart_due_to_settings_change(cx: &mut TestAppCon
         project_settings.lsp.0.insert(
             language_server_name.into(),
             LspSettings {
+                enabled: None,
                 binary: None,
                 settings: None,
                 initialization_options: None,

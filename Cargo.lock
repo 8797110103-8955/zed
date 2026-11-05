@@ -9753,6 +9753,7 @@ dependencies = [
  "globset",
  "gpui",
  "grammars",
+ "http_client",
  "itertools 0.14.0",
  "json_schema_store",
  "language",

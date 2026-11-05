@@ -8,179 +8,52 @@ description: "Configure TypeScript language support in Zed, including language s
 TypeScript and TSX support are available natively in Zed.
 
 - Tree-sitter: [tree-sitter/tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript)
-- Language Server: [yioneko/vtsls](https://github.com/yioneko/vtsls)
-- Alternate Language Server: [typescript-language-server/typescript-language-server](https://github.com/typescript-language-server/typescript-language-server)
+- Language Server: TypeScript 7 native language server (`typescript-ls`, runs `tsc --lsp --stdio`)
 - Debug Adapter: [vscode-js-debug](https://github.com/microsoft/vscode-js-debug)
 
-<!--
-TBD: Document the difference between Language servers
--->
+## Language server
 
-## Language servers
+Zed uses the TypeScript 7 native language server, `typescript-ls`, for TypeScript, TSX, and JavaScript files.
 
-By default Zed uses [vtsls](https://github.com/yioneko/vtsls) for TypeScript, TSX, and JavaScript files.
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript/TSX/JavaScript, or add to your settings file:
+- If the project has `typescript` 7 or newer installed (the nearest `node_modules/typescript`, up to the repository root), Zed runs the project's own compiler.
+- If the project has an older TypeScript, Zed shows a one-time notification and uses its bundled TypeScript 7. TypeScript 6 and older are not supported; upgrade the project to `typescript@7` so diagnostics match your build.
+- Otherwise Zed installs and uses its bundled TypeScript 7.
 
-```json [settings]
-{
-  "languages": {
-    "TypeScript": {
-      "language_servers": ["typescript-language-server", "!vtsls", "..."]
-    },
-    "TSX": {
-      "language_servers": ["typescript-language-server", "!vtsls", "..."]
-    },
-    "JavaScript": {
-      "language_servers": ["typescript-language-server", "!vtsls", "..."]
-    }
-  }
-}
-```
+TypeScript 7 does not load tsserver plugins, so language servers that depend on them (such as Vue's hybrid mode) are not supported.
 
-Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript, or add to your settings file:
+## Default settings
 
-```json [settings]
-{
-  "languages": {
-    "TypeScript": {
-      "prettier": { "allowed": false }
-    }
-    //...
-  }
-}
-```
-
-## Using the Tailwind CSS Language Server with TypeScript
-
-To get all the features (autocomplete, linting, etc.) from the [Tailwind CSS language server](https://github.com/tailwindlabs/tailwindcss-intellisense/tree/HEAD/packages/tailwindcss-language-server#readme) in vanilla TypeScript files (`.ts`), you can customize the `classRegex` field under it in your `settings.json`:
+Zed sends the following settings to `typescript-ls` for both `typescript` and `javascript`. Override any of them under `lsp.typescript-ls.settings`; your values are merged over these defaults:
 
 ```json [settings]
 {
   "lsp": {
-    "tailwindcss-language-server": {
+    "typescript-ls": {
       "settings": {
-        "experimental": {
-          "classRegex": [
-            "\\.className\\s*[+]?=\\s*['\"]([^'\"]*)['\"]",
-            "\\.setAttributeNS\\(.*,\\s*['\"]class['\"],\\s*['\"]([^'\"]*)['\"]",
-            "\\.setAttribute\\(['\"]class['\"],\\s*['\"]([^'\"]*)['\"]",
-            "\\.classList\\.add\\(['\"]([^'\"]*)['\"]",
-            "\\.classList\\.remove\\(['\"]([^'\"]*)['\"]",
-            "\\.classList\\.toggle\\(['\"]([^'\"]*)['\"]",
-            "\\.classList\\.contains\\(['\"]([^'\"]*)['\"]",
-            "\\.classList\\.replace\\(\\s*['\"]([^'\"]*)['\"]",
-            "\\.classList\\.replace\\([^,)]+,\\s*['\"]([^'\"]*)['\"]"
-          ]
-        }
-      }
-    }
-  }
-}
-```
-
-## Large projects
-
-`vtsls` may run out of memory on very large projects. We default the limit to 8192 (8 GiB) vs. the default of 3072 but this may not be sufficient for you:
-
-```json [settings]
-{
-  "lsp": {
-    "vtsls": {
-      "settings": {
-        // For TypeScript:
-        "typescript": { "tsserver": { "maxTsServerMemory": 16384 } },
-        // For JavaScript:
-        "javascript": { "tsserver": { "maxTsServerMemory": 16384 } }
-      }
-    }
-  }
-}
-```
-
-## Inlay Hints
-
-Zed sets the following initialization options to make the language server send back inlay hints (that is, when Zed has inlay hints enabled in the settings).
-
-You can override these settings in your Zed `settings.json` when using `typescript-language-server`:
-
-```json [settings]
-{
-  "lsp": {
-    "typescript-language-server": {
-      "initialization_options": {
-        "preferences": {
-          "includeInlayParameterNameHints": "all",
-          "includeInlayParameterNameHintsWhenArgumentMatchesName": true,
-          "includeInlayFunctionParameterTypeHints": true,
-          "includeInlayVariableTypeHints": true,
-          "includeInlayVariableTypeHintsWhenTypeMatchesName": true,
-          "includeInlayPropertyDeclarationTypeHints": true,
-          "includeInlayFunctionLikeReturnTypeHints": true,
-          "includeInlayEnumMemberValueHints": true
-        }
-      }
-    }
-  }
-}
-```
-
-See [typescript-language-server inlayhints documentation](https://github.com/typescript-language-server/typescript-language-server?tab=readme-ov-file#inlay-hints-textdocumentinlayhint) for more information.
-
-When using `vtsls`:
-
-```json [settings]
-{
-  "lsp": {
-    "vtsls": {
-      "settings": {
-        // For JavaScript:
-        "javascript": {
-          "inlayHints": {
-            "parameterNames": {
-              "enabled": "all",
-              "suppressWhenArgumentMatchesName": false
-            },
-            "parameterTypes": {
-              "enabled": true
-            },
-            "variableTypes": {
-              "enabled": true,
-              "suppressWhenTypeMatchesName": true
-            },
-            "propertyDeclarationTypes": {
-              "enabled": true
-            },
-            "functionLikeReturnTypes": {
-              "enabled": true
-            },
-            "enumMemberValues": {
-              "enabled": true
-            }
-          }
-        },
-        // For TypeScript:
         "typescript": {
+          "suggest": { "completeFunctionCalls": true },
           "inlayHints": {
             "parameterNames": {
               "enabled": "all",
               "suppressWhenArgumentMatchesName": false
             },
-            "parameterTypes": {
-              "enabled": true
-            },
+            "parameterTypes": { "enabled": true },
             "variableTypes": {
               "enabled": true,
-              "suppressWhenTypeMatchesName": true
+              "suppressWhenTypeMatchesName": false
             },
-            "propertyDeclarationTypes": {
-              "enabled": true
-            },
-            "functionLikeReturnTypes": {
-              "enabled": true
-            },
-            "enumMemberValues": {
-              "enabled": true
-            }
+            "propertyDeclarationTypes": { "enabled": true },
+            "functionLikeReturnTypes": { "enabled": true },
+            "enumMemberValues": { "enabled": true }
+          },
+          "implementationsCodeLens": {
+            "enabled": true,
+            "showOnAllClassMethods": true,
+            "showOnInterfaceMethods": true
+          },
+          "referencesCodeLens": {
+            "enabled": true,
+            "showOnAllFunctions": true
           }
         }
       }
@@ -189,50 +62,16 @@ When using `vtsls`:
 }
 ```
 
-## Code Lens
-
-Zed enables references and implementations code lenses for `vtsls` by default. These show reference counts and implementation counts above functions, classes, and interfaces. To use them, enable the `code_lens` setting:
+The server only computes inlay hints and code lenses; Zed still decides whether to show them with the `inlay_hints.enabled` and `code_lens` settings:
 
 ```json [settings]
 {
+  "inlay_hints": { "enabled": true },
   "code_lens": "on"
 }
 ```
 
-You can override the default code lens settings in your `settings.json`:
-
-```json [settings]
-{
-  "lsp": {
-    "vtsls": {
-      "settings": {
-        "typescript": {
-          "implementationsCodeLens": {
-            "enabled": true,
-            "showOnAllClassMethods": true,
-            "showOnInterfaceMethods": true
-          },
-          "referencesCodeLens": {
-            "enabled": true,
-            "showOnAllFunctions": true
-          }
-        },
-        "javascript": {
-          "implementationsCodeLens": {
-            "enabled": true,
-            "showOnAllClassMethods": true,
-            "showOnInterfaceMethods": true
-          },
-          "referencesCodeLens": {
-            "enabled": true,
-            "showOnAllFunctions": true
-          }
-        }
-      }
-    }
-  }
-}
-```
+Zed also formats TypeScript diagnostic messages, rendering quoted types as inline code or code blocks.
 
 ## Debugging
 

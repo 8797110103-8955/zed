@@ -302,6 +302,7 @@ pub struct WorktreeSettingsContent {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom, Hash)]
 #[serde(rename_all = "snake_case")]
 pub struct LspSettings {
+    pub enabled: Option<bool>,
     pub binary: Option<BinarySettings>,
     /// Options passed to the language server at startup.
     ///
@@ -326,6 +327,7 @@ pub struct LspSettings {
 impl Default for LspSettings {
     fn default() -> Self {
         Self {
+            enabled: None,
             binary: None,
             initialization_options: None,
             settings: None,

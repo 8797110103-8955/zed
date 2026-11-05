@@ -4656,6 +4656,73 @@ impl Project {
         })
     }
 
+    pub fn disabled_language_servers(&self, cx: &App) -> BTreeSet<LanguageServerName> {
+        self.visible_worktrees(cx)
+            .flat_map(|worktree| {
+                let location = SettingsLocation {
+                    worktree_id: worktree.read(cx).id(),
+                    path: RelPath::empty(),
+                };
+                ProjectSettings::get(Some(location), cx)
+                    .lsp
+                    .iter()
+                    .filter(|(_, settings)| settings.enabled == Some(false))
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn set_language_server_enabled(
+        &mut self,
+        name: LanguageServerName,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let worktree_ids = self
+            .visible_worktrees(cx)
+            .filter(|worktree| !worktree.read(cx).is_single_file())
+            .map(|worktree| worktree.read(cx).id())
+            .collect::<Vec<_>>();
+        cx.spawn(async move |project, cx| {
+            anyhow::ensure!(
+                !worktree_ids.is_empty(),
+                "Open a project folder to save language server settings"
+            );
+            for worktree_id in worktree_ids {
+                let path: Arc<RelPath> = paths::local_settings_file_relative_path().into();
+                let buffer = project
+                    .update(cx, |project, cx| {
+                        project.open_buffer(ProjectPath { worktree_id, path }, cx)
+                    })?
+                    .await?;
+                buffer.update(cx, |buffer, cx| {
+                    anyhow::ensure!(
+                        buffer.capability() == Capability::ReadWrite,
+                        "The project settings file is read-only"
+                    );
+                    anyhow::ensure!(
+                        !buffer.has_conflict(),
+                        "The project settings file has conflicting changes; resolve them before changing language server settings"
+                    );
+                    let new_text = cx.global::<SettingsStore>().new_text_for_update(
+                        buffer.text(),
+                        |settings| {
+                            settings.project.lsp.0.entry(name.0.clone().into())
+                                .or_default().enabled = Some(enabled);
+                        },
+                    )?;
+                    buffer.edit([(0..buffer.len(), new_text)], None, cx);
+                    anyhow::Ok(())
+                })?;
+                project
+                    .update(cx, |project, cx| project.save_buffer(buffer, cx))?
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn open_server_settings(&mut self, cx: &mut Context<Self>) -> Task<Result<Entity<Buffer>>> {
         let guard = self.retain_remotely_created_models(cx);
         let Some(remote) = self.remote_client.as_ref() else {
