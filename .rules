@@ -132,12 +132,18 @@ While updating an entity (`cx: Context<T>`), it can emit an event using `cx.emit
 
 Other entities can then register a callback to handle these events by doing `cx.subscribe(other_entity, |this, other_entity, event, cx| ...)`. This will return a `Subscription` which deregisters the callback when dropped.  Typically `cx.subscribe` happens when creating a new entity and the subscriptions are stored in a `_subscriptions: Vec<Subscription>` field.
 
-## Build guidelines
+# Workspace files
+
+- Keep temporary agent-run files, including logs, helper scripts, and reports, under `target/.agentic`.
+
+# Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
-- Run the `target/build.*` script (for example `target/build.ps1`) in a visible terminal instead of the default build command when both of the following hold; otherwise build as usual:
+- Run builds and other long-running commands in a discoverable terminal. A PTY is sufficient; do not use a fully detached background process that the user cannot easily find.
+- Run the `target/build.*` script (for example `target/build.ps1`) instead of the default build command when both of the following hold; otherwise build as usual:
   - The script exists.
   - The changes are controlled (for example, additional testing is unnecessary, relevant tests have passed, or changes only affect the GUI), regardless of change size.
+- For WebRTC and similar dependencies, check for a local cache matching the dependency version and target configuration before downloading. When available, pass it through the dependency's supported cache option (for example, `LK_CUSTOM_WEBRTC`).
 
 # Pull request hygiene
 
@@ -165,6 +171,8 @@ Release Notes:
 Fork commit messages exist so that, when merging upstream, fork changes can be found quickly and read alongside their diffs to decide which side to keep.
 
 - When committing, keep the message short: an imperative title plus one bullet per feature or fix, describing what changed in searchable terms. Leave code details (functions, files, keys) to the diff.
+- For merge commits, start the title with `Merge <source> into <target>`, followed by a concise summary of the changes.
+- When merging, leave `README.md` changes unstaged, including the required review reminder.
 - When merging upstream, search the fork's commit messages (for example `git log --grep`) for the conflicting area, and read the matching commits together with their diffs before choosing a side.
 
 # Crash Investigation
