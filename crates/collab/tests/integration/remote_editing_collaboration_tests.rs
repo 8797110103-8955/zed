@@ -15,7 +15,7 @@ use http_client::BlockedHttpClient;
 use language::{
     FakeLspAdapter, LanguageRegistry,
     language_settings::{ConfiguredLanguageServer, LanguageSettings, all_language_settings},
-    rust_lang, tree_sitter_typescript,
+    rust_lang,
 };
 use node_runtime::PackageManagerRuntime;
 use project::{

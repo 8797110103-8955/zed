@@ -124,6 +124,7 @@ pub fn select_popover(
             repository,
             BranchListStyle::Popover,
             rems(20.),
+            false,
             selected_branch,
             on_select,
             window,
@@ -147,12 +148,44 @@ pub fn select_modal(
         repository,
         BranchListStyle::Modal,
         rems(34.),
+        false,
         selected_branch,
         on_select,
         window,
         cx,
     );
     list.focus_handle(cx).focus(window, cx);
+    list
+}
+
+/// A branch selector for hosts that draw their own surface and handle
+/// dismissal, such as a context menu's submenu.
+pub fn select_embedded(
+    workspace: WeakEntity<Workspace>,
+    repository: Option<Entity<Repository>>,
+    selected_branch: Option<SharedString>,
+    on_select: SelectBranchCallback,
+    window: &mut Window,
+    cx: &mut Context<BranchList>,
+) -> BranchList {
+    let list = BranchList::new_select(
+        workspace,
+        repository,
+        BranchListStyle::Popover,
+        rems(20.),
+        true,
+        selected_branch,
+        on_select,
+        window,
+        cx,
+    );
+    // A popover opened from a submenu draws beneath it, so the filter gets no
+    // menu here. Without one, a saved filter couldn't be seen or changed.
+    list.picker.update(cx, |picker, cx| {
+        picker.delegate.has_filter_menu = false;
+        picker.delegate.branch_filter = BranchFilter::All;
+        picker.refresh(window, cx);
+    });
     list
 }
 
@@ -275,6 +308,7 @@ impl BranchList {
         repository: Option<Entity<Repository>>,
         style: BranchListStyle,
         width: Rems,
+        embedded: bool,
         selected_branch: Option<SharedString>,
         on_select: SelectBranchCallback,
         window: &mut Window,
@@ -285,7 +319,7 @@ impl BranchList {
             repository,
             style,
             width,
-            false,
+            embedded,
             BranchSelectionBehavior::Select {
                 selected_branch,
                 on_select,
@@ -504,14 +538,7 @@ impl BranchList {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .picker
-            .read(cx)
-            .delegate
-            .branch_selection_behavior
-            .remote_name()
-            .is_some()
-        {
+        if !self.picker.read(cx).delegate.has_filter_menu {
             return;
         }
         cx.set_global(GlobalBranchFilter(branch_filter));
@@ -577,12 +604,11 @@ impl Render for BranchList {
             )
             .on_action(
                 cx.listener(|this, _: &branch_picker::ToggleFilterMenu, window, cx| {
-                    let menu_handle = this
-                        .picker
-                        .read(cx)
-                        .delegate
-                        .branch_filter_menu_handle
-                        .clone();
+                    let delegate = &this.picker.read(cx).delegate;
+                    if !delegate.has_filter_menu {
+                        return;
+                    }
+                    let menu_handle = delegate.branch_filter_menu_handle.clone();
                     menu_handle.toggle(window, cx);
                 }),
             )
@@ -728,6 +754,7 @@ pub struct BranchListDelegate {
     modifiers: Modifiers,
     branch_filter: BranchFilter,
     branch_filter_menu_handle: PopoverMenuHandle<ContextMenu>,
+    has_filter_menu: bool,
     state: PickerState,
     branch_selection_behavior: BranchSelectionBehavior,
     focus_handle: FocusHandle,
@@ -1091,6 +1118,7 @@ impl BranchListDelegate {
             modifiers: Default::default(),
             branch_filter,
             branch_filter_menu_handle: PopoverMenuHandle::default(),
+            has_filter_menu: branch_selection_behavior.remote_name().is_none(),
             state: PickerState::List,
             branch_selection_behavior,
             focus_handle: cx.focus_handle(),
@@ -1328,6 +1356,7 @@ impl PickerDelegate for BranchListDelegate {
             return "Pull which remote branch?".into();
         }
         match self.state {
+            PickerState::List if self.is_select_only() => "Select a branch…",
             PickerState::List | PickerState::NewRemote | PickerState::NewBranch => {
                 "Switch or type to create a branch…"
             }
@@ -1381,10 +1410,7 @@ impl PickerDelegate for BranchListDelegate {
                         .flex_none()
                         .overflow_hidden()
                         .child(editor.clone())
-                        .map(|this| {
-                            if self.branch_selection_behavior.remote_name().is_some() {
-                                return this;
-                            }
+                        .when(self.has_filter_menu, |this| {
                             let branch_filter = self.branch_filter;
                             let focus_handle = self.focus_handle.clone();
 
@@ -2554,8 +2580,10 @@ mod tests {
         });
         modal.update_in(cx, |modal, window, cx| {
             modal.set_branch_filter(BranchFilter::Local, window, cx);
+            modal.cycle_branch_filter(window, cx);
             assert!(cx.global::<GlobalBranchFilter>().0 == BranchFilter::Local);
             modal.picker.update(cx, |picker, cx| {
+                assert!(!picker.delegate.has_filter_menu);
                 assert_eq!(
                     picker
                         .delegate
@@ -3318,6 +3346,7 @@ mod tests {
                         Some(repository.clone()),
                         BranchListStyle::Modal,
                         rems(34.),
+                        false,
                         Some("main".into()),
                         Arc::new(|_: Branch, _: &mut Window, _: &mut App| {}),
                         window,
@@ -3327,8 +3356,33 @@ mod tests {
             })
             .unwrap();
 
+        cx.update(|cx| cx.set_global(GlobalBranchFilter(BranchFilter::Local)));
+        let embedded_list = window_handle
+            .update(cx, |_, window, cx| {
+                cx.new(|cx| {
+                    select_embedded(
+                        workspace.downgrade(),
+                        Some(repository.clone()),
+                        Some("main".into()),
+                        Arc::new(|_: Branch, _: &mut Window, _: &mut App| {}),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("embedded branch picker");
+
         let mut ctx = VisualTestContext::from_window(window_handle.into(), cx);
         let cx = &mut ctx;
+        embedded_list.update_in(cx, |list, window, cx| {
+            list.set_branch_filter(BranchFilter::Remote, window, cx);
+            list.cycle_branch_filter(window, cx);
+            assert!(cx.global::<GlobalBranchFilter>().0 == BranchFilter::Local);
+            list.picker.read_with(cx, |picker, _| {
+                assert!(!picker.delegate.has_filter_menu);
+                assert!(picker.delegate.branch_filter == BranchFilter::All);
+            });
+        });
 
         update_branch_list_matches_with_empty_query(&checkout_list, cx).await;
         checkout_list.update(cx, |branch_list, cx| {

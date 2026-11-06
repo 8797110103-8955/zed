@@ -21,11 +21,12 @@ use gpui::{
     App, BackgroundExecutor, Entity, Modifiers, MouseButton, MouseDownEvent, TestAppContext,
     UpdateGlobal, px, size,
 };
+#[cfg(not(target_os = "windows"))]
+use language::language_settings::{Formatter, FormatterList};
 use language::{
     Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSourceKind, FakeLspAdapter, Language,
-    LanguageConfig, LanguageMatcher, LineEnding, OffsetRangeExt, Point, Rope,
-    language_settings::{Formatter, FormatterList},
-    rust_lang, tree_sitter_rust, tree_sitter_typescript,
+    LanguageConfig, LanguageMatcher, LineEnding, OffsetRangeExt, Point, Rope, rust_lang,
+    tree_sitter_rust,
 };
 use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT, LanguageServerId, OneOf};
 use parking_lot::Mutex;

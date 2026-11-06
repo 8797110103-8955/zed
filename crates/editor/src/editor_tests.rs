@@ -21168,7 +21168,7 @@ async fn test_document_format_manual_trigger(cx: &mut TestAppContext) {
         },
         Some(tree_sitter_rust::LANGUAGE.into()),
     )));
-    update_test_language_settings(cx, &|settings| {});
+    update_test_language_settings(cx, &|_| {});
     let mut fake_servers = language_registry.register_fake_lsp(
         "Rust",
         FakeLspAdapter {
@@ -21616,7 +21616,7 @@ async fn test_organize_imports_manual_trigger(cx: &mut TestAppContext) {
         },
         Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
     )));
-    update_test_language_settings(cx, &|settings| {});
+    update_test_language_settings(cx, &|_| {});
     let mut fake_servers = language_registry.register_fake_lsp(
         "TypeScript",
         FakeLspAdapter {

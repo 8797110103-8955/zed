@@ -117,7 +117,6 @@ pub struct GitStore {
     buffer_ids_by_index_text_buffer_id: HashMap<BufferId, BufferId>,
     shared_diffs: HashMap<proto::PeerId, HashMap<BufferId, SharedDiffs>>,
     object_read_limiter: Arc<Semaphore>,
-    refresh_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1050,33 +1049,7 @@ impl GitStore {
             object_read_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_OBJECT_READS)),
             diffs: HashMap::default(),
             buffer_ids_by_index_text_buffer_id: HashMap::default(),
-            refresh_task: None,
         }
-    }
-
-    pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.state, GitStoreState::Local { .. }) {
-            return;
-        }
-
-        self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            this.update(cx, |this, cx| {
-                let GitStoreState::Local { downstream, .. } = &this.state else {
-                    return;
-                };
-                let updates_tx = downstream.as_ref().map(|state| state.updates_tx.clone());
-                for repository in this.repositories.values() {
-                    repository.update(cx, |repository, cx| {
-                        repository.schedule_scan(updates_tx.clone(), cx);
-                        repository.reload_buffer_diff_bases(cx);
-                    });
-                }
-            })
-            .log_err();
-        }));
     }
 
     pub(crate) fn set_project(&mut self, project: WeakEntity<Project>) {
@@ -8622,7 +8595,7 @@ impl Repository {
         let branch_list_error = branches_scan.error;
         let branch_list: Arc<[Branch]> = branches_scan.branches.into();
         let branch = branch_list.iter().find(|branch| branch.is_head).cloned();
-        log::info!("head branch after scan is {branch:?}");
+        log::debug!("head branch after scan is {branch:?}");
         let snapshot = this.update(cx, |this, cx| {
             let head_changed = branch != this.snapshot.branch;
             let branch_list_changed = *branch_list != *this.snapshot.branch_list;
@@ -12081,6 +12054,71 @@ mod tests {
                 "regular file should have a git diff base"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_merge_base_list_announces_a_repeated_reload_failure_once(
+        cx: &mut TestAppContext,
+    ) {
+        use diff_buffer_list::{BranchDiffEvent, DiffBase, DiffBufferList};
+        use std::{cell::Cell, rc::Rc};
+        use util::path;
+
+        init_test(cx);
+
+        let project_root = Path::new(path!("/project"));
+        let dot_git = project_root.join(".git");
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(project_root, json!({ ".git": {}, "file.txt": "head\n" }))
+            .await;
+        fs.set_head_and_index_for_repo(&dot_git, &[("file.txt", "head\n".into())]);
+        // A merge base blob that can't be read makes every tree diff fail.
+        fs.with_git_state(&dot_git, false, |state| {
+            state
+                .merge_base_contents
+                .insert(repo_path("file.txt"), Oid::from_bytes(&[1; 20]).unwrap());
+        })
+        .unwrap();
+
+        let project = Project::test(fs.clone(), [project_root], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        let git_store = project.read_with(cx, |project, _| project.git_store().clone());
+        let list = cx.new(|cx| {
+            DiffBufferList::new(
+                DiffBase::Merge {
+                    base_ref: "origin/main".into(),
+                },
+                git_store,
+                None,
+                cx,
+            )
+        });
+        let file_list_changes = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let file_list_changes = file_list_changes.clone();
+            cx.subscribe(&list, move |_, event, _| {
+                if matches!(event, BranchDiffEvent::FileListChanged) {
+                    file_list_changes.set(file_list_changes.get() + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        list.read_with(cx, |list, _| assert!(list.tree_diff_error().is_some()));
+        assert_eq!(file_list_changes.get(), 1);
+
+        for index_contents in ["staged\n", "head\n"] {
+            fs.set_index_for_repo(&dot_git, &[("file.txt", index_contents.into())]);
+            cx.run_until_parked();
+        }
+        list.read_with(cx, |list, _| assert!(list.tree_diff_error().is_some()));
+        assert_eq!(
+            file_list_changes.get(),
+            1,
+            "reloads that fail the same way again must not announce a new file list"
+        );
     }
 
     #[gpui::test]

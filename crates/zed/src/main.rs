@@ -707,7 +707,10 @@ fn main() {
                             });
                             let selected = match prompt {
                                 Ok(prompt) => prompt.await.and_then(|index| node_runtime::PackageManager::INSTALLABLE.get(index).copied()),
-                                Err(error) => { log::error!("{error:#}"); None }
+                                Err(error) => {
+                                    log::error!("failed to show package manager picker: {error:#}");
+                                    None
+                                }
                             };
                             if response.send(selected).is_err() {
                                 log::debug!("package manager request was cancelled before selection");

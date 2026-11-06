@@ -7698,11 +7698,6 @@ impl Workspace {
 
     pub fn on_window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.is_window_active() {
-            self.project
-                .read(cx)
-                .git_store()
-                .clone()
-                .update(cx, |git_store, cx| git_store.refresh(cx));
             if let Some(database_id) = self.database_id {
                 let db = WorkspaceDb::global(cx);
                 cx.background_spawn(async move { db.update_timestamp(database_id).await })
