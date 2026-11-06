@@ -135,6 +135,9 @@ Other entities can then register a callback to handle these events by doing `cx.
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
+- Run the `target/build.*` script (for example `target/build.ps1`) in a visible terminal instead of the default build command when both of the following hold; otherwise build as usual:
+  - The script exists.
+  - The changes are controlled (for example, additional testing is unnecessary, relevant tests have passed, or changes only affect the GUI), regardless of change size.
 
 # Pull request hygiene
 
@@ -156,6 +159,13 @@ Release Notes:
 
 - N/A
 ```
+
+# Suggested actions when committing and merging fork changes
+
+Fork commit messages exist so that, when merging upstream, fork changes can be found quickly and read alongside their diffs to decide which side to keep.
+
+- When committing, keep the message short: an imperative title plus one bullet per feature or fix, describing what changed in searchable terms. Leave code details (functions, files, keys) to the diff.
+- When merging upstream, search the fork's commit messages (for example `git log --grep`) for the conflicting area, and read the matching commits together with their diffs before choosing a side.
 
 # Crash Investigation
 
