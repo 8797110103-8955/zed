@@ -42,7 +42,7 @@ To see all available settings with their default values, run {#action zed::OpenD
 
 ### Project Settings
 
-Override user settings for a specific project by creating a `.zed/settings.json` file in your project root. Run {#action zed::OpenProjectSettings} to create this file.
+Override user settings for a specific project by creating a `.zed/settings.json` file in your project root. Run {#action zed::OpenSettingsFile} to open or create the file of the current folder.
 
 Project settings take precedence over user settings for that project only.
 

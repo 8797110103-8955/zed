@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
-use settings::{VsCodeSettings, parse_json_with_comments};
+use settings::{ProjectSettingsContent, VsCodeSettings, parse_json_with_comments};
 use std::path::{Path, PathBuf};
 use task::{DebugTaskFile, TaskTemplates, VsCodeDebugTaskFile, VsCodeTaskFile};
 use util::paths::SanitizedPath;
@@ -10,7 +10,7 @@ use util::paths::SanitizedPath;
 pub struct VsCodeWorkspace {
     pub path: PathBuf,
     pub folders: Vec<VsCodeWorkspaceFolder>,
-    pub settings: Value,
+    pub settings: ProjectSettingsContent,
     pub tasks: Option<Value>,
     pub launch: Option<Value>,
 }
@@ -28,6 +28,7 @@ impl VsCodeWorkspace {
             folders: Vec<Folder>,
             #[serde(default = "empty_object")]
             settings: Value,
+            fork_zed: Option<Value>,
             tasks: Option<Value>,
             launch: Option<Value>,
         }
@@ -44,15 +45,7 @@ impl VsCodeWorkspace {
             .context("Workspace file has no parent directory")?;
         let mut folders = Vec::new();
         for folder in file.folders {
-            let folder_path = match (folder.path, folder.uri) {
-                (Some(folder_path), None) => parent.join(folder_path),
-                (None, Some(uri)) => url::Url::parse(&uri)?
-                    .to_file_path()
-                    .map_err(|_| anyhow::anyhow!("Unsupported workspace folder URI: {uri}"))?,
-                _ => bail!("Each workspace folder must specify either path or a local file URI"),
-            };
-            let folder_path =
-                util::paths::normalize_path(SanitizedPath::new(&folder_path).as_path());
+            let folder_path = resolve_folder_path(parent, folder.path, folder.uri)?;
             if !folders
                 .iter()
                 .any(|folder: &VsCodeWorkspaceFolder| folder.path == folder_path)
@@ -63,7 +56,8 @@ impl VsCodeWorkspace {
                 });
             }
         }
-        let settings = convert_settings(&path, file.settings)?;
+        let settings =
+            settings::workspace_project_settings(&path, &file.settings, file.fork_zed.as_ref())?;
         Ok(Self {
             path,
             folders,
@@ -139,6 +133,87 @@ impl VsCodeWorkspace {
     }
 }
 
+fn resolve_folder_path(
+    parent: &Path,
+    path: Option<String>,
+    uri: Option<String>,
+) -> Result<PathBuf> {
+    let folder_path = match (path, uri) {
+        (Some(folder_path), None) => parent.join(folder_path),
+        (None, Some(uri)) => url::Url::parse(&uri)?
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("Unsupported workspace folder URI: {uri}"))?,
+        _ => bail!("Each workspace folder must specify either path or a local file URI"),
+    };
+    Ok(util::paths::normalize_path(
+        SanitizedPath::new(&folder_path).as_path(),
+    ))
+}
+
+/// Rewrites the `folders` list of the workspace file at `path` to contain exactly
+/// `folders`, keeping the existing entries (and their names) of folders that remain.
+pub fn folders_text_for_update(path: &Path, text: &str, folders: &[PathBuf]) -> Result<String> {
+    let document: Value = parse_json_with_comments(text)
+        .with_context(|| format!("Invalid workspace file {}", path.display()))?;
+    let parent = path
+        .parent()
+        .context("Workspace file has no parent directory")?;
+    let existing = document
+        .get("folders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let field = |name: &str| entry.get(name).and_then(Value::as_str).map(str::to_owned);
+            let folder_path = resolve_folder_path(parent, field("path"), field("uri")).ok()?;
+            Some((folder_path, entry))
+        })
+        .collect::<Vec<_>>();
+    let entries = folders
+        .iter()
+        .map(|folder| {
+            let folder =
+                util::paths::normalize_path(SanitizedPath::new(folder.as_path()).as_path());
+            existing
+                .iter()
+                .find(|(existing_path, _)| *existing_path == folder)
+                .map(|(_, entry)| entry.clone())
+                .unwrap_or_else(|| {
+                    let folder_path = match folder.strip_prefix(parent) {
+                        Ok(relative) if !relative.as_os_str().is_empty() => relative
+                            .components()
+                            .map(|component| component.as_os_str().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                        Ok(_) => ".".to_string(),
+                        Err(_) => folder.to_string_lossy().into_owned(),
+                    };
+                    serde_json::json!({ "path": folder_path })
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut text = text.to_string();
+    let (range, replacement) = settings::replace_value_in_json_text(
+        &text,
+        &["folders"],
+        settings::infer_json_indent_size(&text),
+        Some(&Value::Array(entries)),
+        None,
+    );
+    text.replace_range(range, &replacement);
+    Ok(text)
+}
+
+/// The contents of a new workspace file listing `folders`.
+pub fn new_workspace_file_contents(path: &Path, folders: &[PathBuf]) -> Result<String> {
+    folders_text_for_update(
+        path,
+        "{\n  \"folders\": [],\n  \"settings\": {}\n}\n",
+        folders,
+    )
+}
+
 pub(crate) fn empty_object() -> Value {
     Value::Object(Default::default())
 }
@@ -177,8 +252,10 @@ mod tests {
                 .and_then(|folder| folder.name.as_deref()),
             Some("Server")
         );
-        assert_eq!(workspace.settings.get("tab_size"), Some(&json!(3)));
-        assert!(workspace.settings.get("base_keymap").is_none());
+        assert_eq!(
+            workspace.settings.all_languages.defaults.tab_size,
+            std::num::NonZeroU32::new(3)
+        );
         Ok(())
     }
 
@@ -228,6 +305,69 @@ mod tests {
         assert!(!launch.contains("${workspaceFileDirname}"));
         let launch: Value = serde_json::from_str(&launch)?;
         assert_eq!(launch.as_array().map(Vec::len), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn test_folders_text_for_update_keeps_existing_entries() -> Result<()> {
+        let path = Path::new(path!("/projects/demo.code-workspace"));
+        let text = r#"{
+    // folders
+    "folders": [
+        { "path": "a", "name": "Backend" },
+        { "path": "b" }
+    ],
+    "settings": { "editor.tabSize": 2 }
+}"#;
+        let new_text = folders_text_for_update(
+            path,
+            text,
+            &[
+                PathBuf::from(path!("/projects/a")),
+                PathBuf::from(path!("/projects/nested/c")),
+                PathBuf::from(path!("/elsewhere/d")),
+            ],
+        )?;
+        let document: Value = parse_json_with_comments(&new_text)?;
+        assert_eq!(
+            document["folders"],
+            json!([
+                { "path": "a", "name": "Backend" },
+                { "path": "nested/c" },
+                { "path": path!("/elsewhere/d") }
+            ])
+        );
+        assert_eq!(document["settings"], json!({ "editor.tabSize": 2 }));
+        assert!(new_text.contains("// folders"));
+
+        let workspace = VsCodeWorkspace::parse(path.into(), &new_text)?;
+        assert_eq!(workspace.folders.len(), 3);
+        assert_eq!(workspace.folders[0].name.as_deref(), Some("Backend"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_workspace_file_contents() -> Result<()> {
+        let path = Path::new(path!("/projects/demo.code-workspace"));
+        let text = new_workspace_file_contents(
+            path,
+            &[
+                PathBuf::from(path!("/projects/a")),
+                PathBuf::from(path!("/projects/b")),
+            ],
+        )?;
+        let workspace = VsCodeWorkspace::parse(path.into(), &text)?;
+        assert_eq!(
+            workspace
+                .folders
+                .iter()
+                .map(|folder| folder.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from(path!("/projects/a")),
+                PathBuf::from(path!("/projects/b"))
+            ]
+        );
         Ok(())
     }
 

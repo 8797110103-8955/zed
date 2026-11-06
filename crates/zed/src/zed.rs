@@ -131,8 +131,6 @@ actions!(
         Minimize,
         /// Opens the default settings file.
         OpenDefaultSettings,
-        /// Opens project-specific settings file.
-        OpenProjectSettingsFile,
         /// Opens the tasks panel.
         OpenTasks,
         /// Opens debug tasks configuration.
@@ -257,16 +255,7 @@ pub fn init(cx: &mut App) {
             );
         });
     })
-    .on_action(|_: &OpenSettingsFile, cx| {
-        with_active_or_new_workspace(cx, |_, window, cx| {
-            open_settings_file(
-                paths::settings_file(),
-                || settings::initial_user_settings_content().as_ref().into(),
-                window,
-                cx,
-            );
-        });
-    })
+    .on_action(|_: &OpenSettingsFile, cx| open_user_settings_file(cx))
     .on_action(|_: &OpenAccountSettings, cx| {
         with_active_or_new_workspace(cx, |_, _, cx| {
             cx.open_url(&zed_urls::account_url(cx));
@@ -1940,11 +1929,8 @@ fn notify_settings_errors(result: settings::SettingsParseResult, is_user: bool, 
                         MessageNotification::new(format!("Invalid user settings file\n{error}"), cx)
                             .primary_message("Open Settings File")
                             .primary_icon(IconName::Settings)
-                            .primary_on_click(|window, cx| {
-                                window.dispatch_action(
-                                    zed_actions::OpenSettingsFile.boxed_clone(),
-                                    cx,
-                                );
+                            .primary_on_click(|_, cx| {
+                                open_user_settings_file(cx);
                                 cx.emit(DismissEvent);
                             })
                     })
@@ -1976,8 +1962,8 @@ fn notify_settings_errors(result: settings::SettingsParseResult, is_user: bool, 
                         )
                         .primary_message("Open Settings File")
                         .primary_icon(IconName::Settings)
-                        .primary_on_click(|window, cx| {
-                            window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx);
+                        .primary_on_click(|_, cx| {
+                            open_user_settings_file(cx);
                             cx.emit(DismissEvent);
                         })
                     })
@@ -2469,9 +2455,22 @@ pub fn open_new_ssh_project_from_project(
     })
 }
 
+fn open_user_settings_file(cx: &mut App) {
+    with_active_or_new_workspace(cx, |_, window, cx| {
+        open_settings_file(
+            paths::settings_file(),
+            || settings::initial_user_settings_content().as_ref().into(),
+            window,
+            cx,
+        );
+    });
+}
+
+/// Opens the settings file of the current folder, falling back to the user
+/// settings file when the project has no folder.
 fn open_project_settings_file(
     workspace: &mut Workspace,
-    _: &OpenProjectSettingsFile,
+    _: &OpenSettingsFile,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -2483,6 +2482,8 @@ fn open_project_settings_file(
         cx,
     ) {
         task.detach_and_log_err(cx);
+    } else {
+        open_user_settings_file(cx);
     }
 }
 
@@ -2577,10 +2578,15 @@ fn open_local_file(
     cx: &mut Context<Workspace>,
 ) -> Option<gpui::Task<anyhow::Result<Entity<Editor>>>> {
     let project = workspace.project().clone();
-    let worktree = project
-        .read(cx)
-        .visible_worktrees(cx)
-        .find_map(|tree| tree.read(cx).root_entry()?.is_dir().then_some(tree));
+    let worktree = workspace
+        .active_folder_worktree_id(cx)
+        .and_then(|worktree_id| project.read(cx).worktree_for_id(worktree_id, cx))
+        .or_else(|| {
+            project
+                .read(cx)
+                .visible_worktrees(cx)
+                .find_map(|tree| tree.read(cx).root_entry()?.is_dir().then_some(tree))
+        });
     if let Some(worktree) = worktree {
         let tree_id = worktree.read(cx).id();
         Some(cx.spawn_in(window, async move |workspace, cx| {
@@ -6668,7 +6674,7 @@ mod tests {
                 workspace.update(cx, |workspace, cx| {
                     // Call the exact function that contains the bug
                     eprintln!("About to call open_project_settings_file");
-                    open_project_settings_file(workspace, &OpenProjectSettingsFile, window, cx);
+                    open_project_settings_file(workspace, &OpenSettingsFile, window, cx);
                 });
             })
             .unwrap();

@@ -167,6 +167,9 @@ pub struct SettingsStore {
     last_user_settings_content: Option<String>,
     last_global_settings_content: Option<String>,
     local_settings: BTreeMap<(WorktreeId, Arc<RelPath>), SettingsContent>,
+    /// Settings shared by every folder of a multi-folder workspace. All member
+    /// worktrees point at the same `Rc`, which is how the group is identified.
+    workspace_settings: BTreeMap<WorktreeId, Rc<SettingsContent>>,
     pub editorconfig_store: Entity<EditorconfigStore>,
 
     _settings_files_watcher: Option<Task<()>>,
@@ -182,6 +185,9 @@ pub enum SettingsFile {
     Global,
     User,
     Server,
+    /// Settings shared by all folders of a workspace, identified by the
+    /// lowest worktree id of the workspace.
+    Workspace(WorktreeId),
     /// Represents project settings in ssh projects as well as local projects
     Project((WorktreeId, Arc<RelPath>)),
 }
@@ -206,6 +212,9 @@ impl Ord for SettingsFile {
                 .then_with(|| rel_path1.cmp(rel_path2).reverse()),
             (Project(_), _) => Ordering::Less,
             (_, Project(_)) => Ordering::Greater,
+            (Workspace(id1), Workspace(id2)) => id1.cmp(id2),
+            (Workspace(_), _) => Ordering::Less,
+            (_, Workspace(_)) => Ordering::Greater,
             (Server, _) => Ordering::Less,
             (_, Server) => Ordering::Greater,
             (User, _) => Ordering::Less,
@@ -328,6 +337,7 @@ impl SettingsStore {
             last_user_settings_content: None,
             last_global_settings_content: None,
             local_settings: BTreeMap::default(),
+            workspace_settings: BTreeMap::default(),
             editorconfig_store: cx.new(|_| EditorconfigStore::default()),
             _settings_files_watcher: None,
             setting_file_updates_tx,
@@ -672,6 +682,7 @@ impl SettingsStore {
                 .cloned()
                 .map(SettingsFile::Project),
         );
+        files.extend(self.workspace_anchors().map(SettingsFile::Workspace));
 
         if self.server_settings.is_some() {
             files.push(SettingsFile::Server);
@@ -698,6 +709,9 @@ impl SettingsStore {
             SettingsFile::Default => Some(self.default_settings.as_ref()),
             SettingsFile::Server => self.server_settings.as_deref(),
             SettingsFile::Project(ref key) => self.local_settings.get(key),
+            SettingsFile::Workspace(worktree_id) => {
+                self.workspace_settings.get(&worktree_id).map(Rc::as_ref)
+            }
             SettingsFile::Global => self.global_settings.as_deref(),
         }
     }
@@ -722,6 +736,12 @@ impl SettingsStore {
                 && (wt_id != target_wt_id || !target_path.starts_with(path))
             {
                 // if requesting value from a local file, don't return values from local files in different worktrees
+                continue;
+            }
+            if let SettingsFile::Project((wt_id, _)) = file
+                && let SettingsFile::Workspace(target_wt_id) = target_file
+                && !self.same_workspace(wt_id, target_wt_id)
+            {
                 continue;
             }
 
@@ -787,6 +807,13 @@ impl SettingsStore {
                 && (worktree_id != target_worktree_id || !target_path.starts_with(&path))
             {
                 // if requesting value from a local file, don't return values from local files in different worktrees
+                continue;
+            }
+            if let SettingsFile::Workspace(worktree_id) = file
+                && let SettingsFile::Project((target_worktree_id, _))
+                | SettingsFile::Workspace(target_worktree_id) = target_file
+                && !self.same_workspace(worktree_id, target_worktree_id)
+            {
                 continue;
             }
 
@@ -1184,6 +1211,7 @@ impl SettingsStore {
     pub fn clear_local_settings(&mut self, root_id: WorktreeId, cx: &mut App) -> Result<()> {
         self.local_settings
             .retain(|(worktree_id, _), _| worktree_id != &root_id);
+        self.workspace_settings.remove(&root_id);
 
         self.editorconfig_store
             .update(cx, |store, _cx| store.remove_for_worktree(root_id));
@@ -1208,6 +1236,76 @@ impl SettingsStore {
                     ),
             )
             .map(|((_, path), content)| (path.clone(), &content.project))
+    }
+
+    /// Replaces the settings shared by the given worktrees. Worktrees that
+    /// previously shared settings with any of them are detached as well.
+    pub fn set_workspace_settings(
+        &mut self,
+        worktree_ids: &[WorktreeId],
+        settings: Option<ProjectSettingsContent>,
+        cx: &mut App,
+    ) {
+        let previous_groups = worktree_ids
+            .iter()
+            .filter_map(|worktree_id| self.workspace_settings.get(worktree_id).cloned())
+            .collect::<Vec<_>>();
+        let mut affected_worktrees = worktree_ids.to_vec();
+        self.workspace_settings.retain(|worktree_id, content| {
+            let detached = previous_groups
+                .iter()
+                .any(|previous| Rc::ptr_eq(previous, content));
+            if detached {
+                affected_worktrees.push(*worktree_id);
+            }
+            !detached
+        });
+        if let Some(settings) = settings {
+            let content = Rc::new(SettingsContent {
+                project: settings,
+                ..Default::default()
+            });
+            for worktree_id in worktree_ids {
+                self.workspace_settings
+                    .insert(*worktree_id, content.clone());
+            }
+        }
+        for setting_value in self.setting_values.values_mut() {
+            for worktree_id in &affected_worktrees {
+                setting_value.clear_local_values(*worktree_id);
+            }
+        }
+        self.recompute_values(None, cx);
+    }
+
+    /// The settings file shared by the workspace that contains the given worktree.
+    pub fn workspace_settings_file(&self, worktree_id: WorktreeId) -> Option<SettingsFile> {
+        let content = self.workspace_settings.get(&worktree_id)?;
+        self.workspace_settings
+            .iter()
+            .find(|(_, other)| Rc::ptr_eq(content, other))
+            .map(|(anchor, _)| SettingsFile::Workspace(*anchor))
+    }
+
+    fn workspace_anchors(&self) -> impl '_ + Iterator<Item = WorktreeId> {
+        self.workspace_settings
+            .iter()
+            .filter(|(worktree_id, content)| {
+                self.workspace_settings
+                    .iter()
+                    .find(|(_, other)| Rc::ptr_eq(content, other))
+                    .is_some_and(|(anchor, _)| anchor == *worktree_id)
+            })
+            .map(|(worktree_id, _)| *worktree_id)
+    }
+
+    fn same_workspace(&self, left: WorktreeId, right: WorktreeId) -> bool {
+        left == right
+            || self
+                .workspace_settings
+                .get(&left)
+                .zip(self.workspace_settings.get(&right))
+                .is_some_and(|(left, right)| Rc::ptr_eq(left, right))
     }
 
     /// Configures common schema replacements shared between user and project
@@ -1451,7 +1549,21 @@ impl SettingsStore {
             }
         }
 
-        for ((root_id, directory_path), local_settings) in &self.local_settings {
+        let empty_path = RelPath::empty_arc();
+        let mut local_entries = self
+            .workspace_settings
+            .iter()
+            .map(|(root_id, content)| ((root_id, &empty_path), content.as_ref()))
+            .chain(
+                self.local_settings
+                    .iter()
+                    .map(|((root_id, path), content)| ((root_id, path), content)),
+            )
+            .collect::<Vec<_>>();
+        // The stable sort keeps a workspace entry ahead of the folder's own root
+        // settings, so that folder settings are layered on top of it.
+        local_entries.sort_by_key(|(key, _)| *key);
+        for ((root_id, directory_path), local_settings) in local_entries {
             // Build a stack of all of the local values for that setting.
             while let Some(prev_entry) = paths_stack.last() {
                 if let Some((prev_root_id, prev_path)) = prev_entry

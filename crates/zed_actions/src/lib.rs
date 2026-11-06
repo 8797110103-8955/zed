@@ -38,15 +38,17 @@ pub struct ChangeKeybinding {
 actions!(
     zed,
     [
-        /// Opens the settings editor.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettingsEditor"])]
+        /// Opens the settings editor, showing the settings of the current folder.
+        #[action(deprecated_aliases = [
+            "zed_actions::OpenSettingsEditor",
+            "zed::OpenProjectSettings",
+            "zed_actions::OpenProjectSettings"
+        ])]
         OpenSettings,
-        /// Opens the settings JSON file.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettings"])]
+        /// Opens the settings JSON file of the current folder, or the user settings
+        /// file when no folder is open.
+        #[action(deprecated_aliases = ["zed_actions::OpenSettings", "zed::OpenProjectSettingsFile"])]
         OpenSettingsFile,
-        /// Opens project-specific settings.
-        #[action(deprecated_aliases = ["zed_actions::OpenProjectSettings"])]
-        OpenProjectSettings,
         /// Opens the project tasks configuration.
         OpenProjectTasks,
         /// Opens the project tasks configuration with worktree setup guidance.

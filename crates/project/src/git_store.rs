@@ -11799,7 +11799,7 @@ mod tests {
             (vec![("origin", initial_url)], 2, true),
             (vec![], 2, true),
         ] {
-            let mut events = cx.events(&repository);
+            let mut events = cx.events::<RepositoryEvent, _>(&repository);
             fs.with_git_state(&git_directory, true, |state| {
                 state.remotes = remotes
                     .iter()
@@ -11807,6 +11807,8 @@ mod tests {
                     .collect();
             })
             .expect("repository exists");
+            // Deliver the fake `.git` event so the repository rescans before waiting on it.
+            cx.run_until_parked();
             project
                 .update(cx, |project, cx| project.git_scans_complete(cx))
                 .await;
@@ -11844,7 +11846,7 @@ mod tests {
         let remote_url = "https://gitlab.remote.example/team/repo.git";
         assert!(parse_git_remote_url(registry.clone(), remote_url).is_none());
         for origin in [Some(remote_url), None] {
-            let mut events = cx.events(&repository);
+            let mut events = cx.events::<RepositoryEvent, _>(&repository);
             repository
                 .update(cx, |repository, cx| {
                     repository.apply_remote_update(

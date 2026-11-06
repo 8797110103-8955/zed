@@ -838,7 +838,7 @@ impl EventEmitter<SettingsObserverEvent> for SettingsObserver {}
 
 pub struct SettingsObserver {
     vscode_workspace: Option<VsCodeWorkspace>,
-    folder_settings: HashMap<(WorktreeId, Arc<RelPath>), String>,
+    workspace_worktrees: Vec<WorktreeId>,
     mode: SettingsObserverMode,
     downstream_client: Option<AnyProtoClient>,
     worktree_store: Entity<WorktreeStore>,
@@ -914,6 +914,7 @@ impl SettingsObserver {
                                     }
                                 }
                             }
+                            settings_observer.apply_workspace_settings(cx);
                         }
                         TrustedWorktreesEvent::Restricted(..) => {}
                     },
@@ -952,7 +953,7 @@ impl SettingsObserver {
 
         Self {
             vscode_workspace: None,
-            folder_settings: HashMap::default(),
+            workspace_worktrees: Vec::new(),
             worktree_store,
             task_store,
             mode: SettingsObserverMode::Local(fs.clone()),
@@ -1017,7 +1018,7 @@ impl SettingsObserver {
 
         Self {
             vscode_workspace: None,
-            folder_settings: HashMap::default(),
+            workspace_worktrees: Vec::new(),
             worktree_store,
             task_store,
             mode: SettingsObserverMode::Remote { via_collab },
@@ -1159,15 +1160,19 @@ impl SettingsObserver {
         cx: &mut Context<Self>,
     ) {
         match event {
-            WorktreeStoreEvent::WorktreeAdded(worktree) => cx
-                .subscribe(worktree, |this, worktree, event, cx| {
+            WorktreeStoreEvent::WorktreeAdded(worktree) => {
+                cx.subscribe(worktree, |this, worktree, event, cx| {
                     if let worktree::Event::UpdatedEntries(changes) = event {
                         this.update_local_worktree_settings(&worktree, changes, cx)
                     }
                 })
-                .detach(),
+                .detach();
+                if self.vscode_workspace.is_some() {
+                    self.apply_workspace_settings(cx);
+                }
+            }
             WorktreeStoreEvent::WorktreeRemoved(_, worktree_id) => {
-                self.folder_settings.retain(|(id, _), _| id != worktree_id);
+                self.workspace_worktrees.retain(|id| id != worktree_id);
                 cx.update_global::<SettingsStore, _>(|store, cx| {
                     store.clear_local_settings(*worktree_id, cx).log_err();
                 });
@@ -1370,21 +1375,13 @@ impl SettingsObserver {
                                 .join(local_vscode_settings_file_relative_path())
                                 .as_std_path()
                                 .to_path_buf())));
-                            let key = (worktree.read(cx).id(), path.clone());
-                            if let Some(content) = content {
-                                this.folder_settings.insert(key, content);
-                            } else {
-                                this.folder_settings.remove(&key);
-                            }
-                            this.refresh_folder_settings(worktree.clone(), path, cx);
-                        } else {
-                            this.update_settings(
-                                worktree.clone(),
-                                [(LocalSettingsPath::InWorktree(path), kind, content)],
-                                false,
-                                cx,
-                            );
                         }
+                        this.update_settings(
+                            worktree.clone(),
+                            [(LocalSettingsPath::InWorktree(path), kind, content)],
+                            false,
+                            cx,
+                        );
                     }
                 })
             })
@@ -1414,9 +1411,9 @@ impl SettingsObserver {
         cx: &mut Context<Self>,
     ) {
         self.vscode_workspace = workspace;
+        self.apply_workspace_settings(cx);
         let worktrees = self.worktree_store.read(cx).worktrees().collect::<Vec<_>>();
         for worktree in worktrees {
-            self.refresh_folder_settings(worktree.clone(), RelPath::empty_arc(), cx);
             let path = worktree.read(cx).abs_path();
             let configuration = self.vscode_workspace.as_ref().filter(|workspace| {
                 workspace
@@ -1473,44 +1470,51 @@ impl SettingsObserver {
         }
     }
 
-    fn refresh_folder_settings(
-        &mut self,
-        worktree: Entity<Worktree>,
-        directory: Arc<RelPath>,
-        cx: &mut Context<Self>,
-    ) {
-        let id = worktree.read(cx).id();
-        let mut settings = empty_object();
-        if directory.is_empty() {
-            let path = worktree.read(cx).abs_path();
-            if let Some(workspace) = self.vscode_workspace.as_ref().filter(|workspace| {
-                workspace
+    /// Shares the workspace file's settings with every trusted folder of the workspace.
+    fn apply_workspace_settings(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.mode, SettingsObserverMode::Local(_)) {
+            return;
+        }
+        let worktrees = self.worktree_store.read(cx).worktrees().collect::<Vec<_>>();
+        let mut members = Vec::new();
+        if let Some(workspace) = &self.vscode_workspace {
+            for worktree in worktrees {
+                let worktree_id = worktree.read(cx).id();
+                let path = worktree.read(cx).abs_path();
+                if !workspace
                     .folders
                     .iter()
                     .any(|folder| folder.path == path.as_ref())
-            }) {
-                merge_non_null_json_value_into(workspace.settings.clone(), &mut settings);
+                {
+                    continue;
+                }
+                let trusted = TrustedWorktrees::try_get_global(cx).is_none_or(|trusted| {
+                    trusted.update(cx, |trusted, cx| {
+                        trusted.can_trust(&self.worktree_store, worktree_id, cx)
+                    })
+                });
+                if trusted {
+                    members.push(worktree_id);
+                }
             }
         }
-        let result = (|| -> anyhow::Result<_> {
-            if let Some(content) = self.folder_settings.get(&(id, directory.clone())) {
-                merge_non_null_json_value_into(serde_json::from_str(content)?, &mut settings);
+        let detached = std::mem::take(&mut self.workspace_worktrees)
+            .into_iter()
+            .filter(|worktree_id| !members.contains(worktree_id))
+            .collect::<Vec<_>>();
+        let settings = self
+            .vscode_workspace
+            .as_ref()
+            .map(|workspace| workspace.settings.clone());
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            if !detached.is_empty() {
+                store.set_workspace_settings(&detached, None, cx);
             }
-            Ok(Some(serde_json::to_string(&settings)?))
-        })();
-        match result {
-            Ok(content) => self.update_settings(
-                worktree,
-                [(
-                    LocalSettingsPath::InWorktree(directory),
-                    LocalSettingsKind::Settings,
-                    content,
-                )],
-                false,
-                cx,
-            ),
-            Err(error) => log::error!("Failed to merge workspace settings: {error:#}"),
-        }
+            if !members.is_empty() {
+                store.set_workspace_settings(&members, settings, cx);
+            }
+        });
+        self.workspace_worktrees = members;
     }
 
     fn update_settings(

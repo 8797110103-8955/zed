@@ -1,5 +1,8 @@
 pub mod active_file_name;
 mod code_workspace;
+pub use code_workspace::{
+    code_workspace_display_name, code_workspace_file_name, code_workspace_for_folders,
+};
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -992,6 +995,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
+    code_workspace::init(cx);
 
     cx.on_app_quit(flush_windows_serialization_on_quit).detach();
 
@@ -1613,8 +1617,7 @@ pub struct Workspace {
     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
     database_id: Option<WorkspaceId>,
-    code_workspace: Option<code_workspace::CodeWorkspaceState>,
-    code_workspace_watcher: Option<Task<()>>,
+    code_workspace: Option<code_workspace::CodeWorkspace>,
     app_state: Arc<AppState>,
     dispatching_keystrokes: Rc<RefCell<DispatchingKeystrokes>>,
     _subscriptions: Vec<Subscription>,
@@ -1760,6 +1763,7 @@ impl Workspace {
                     this.update_window_title(window, cx);
                     this.serialize_workspace(window, cx);
                     this.update_history(cx);
+                    this.code_workspace_folders_changed(window, cx);
                 }
 
                 &project::Event::WorktreeAdded(id) => {
@@ -1772,6 +1776,7 @@ impl Workspace {
                     {
                         this.serialize_workspace(window, cx);
                         this.update_history(cx);
+                        this.code_workspace_folders_changed(window, cx);
                     }
                 }
                 project::Event::WorktreeUpdatedEntries(worktree_id, changes) => {
@@ -2123,7 +2128,6 @@ impl Workspace {
             active_call,
             database_id: workspace_id,
             code_workspace: None,
-            code_workspace_watcher: None,
             app_state,
             _observe_current_user,
             _apply_leader_updates,
@@ -2200,27 +2204,9 @@ impl Workspace {
                 paths_to_open = paths.ordered_paths().cloned().collect();
             }
 
-            let mut code_configuration = None;
-            let mut expanded_paths = Vec::new();
-            for path in paths_to_open {
-                if code_workspace::is_workspace_file(&path) {
-                    anyhow::ensure!(
-                        code_configuration.is_none(),
-                        "Open one .code-workspace file at a time"
-                    );
-                    let configuration =
-                        code_workspace::read_workspace(path, app_state.fs.as_ref()).await?;
-                    for folder in &configuration.folders {
-                        if app_state.fs.is_dir(&folder.path).await {
-                            expanded_paths.push(folder.path.clone());
-                        }
-                    }
-                    code_configuration = Some(configuration);
-                } else {
-                    expanded_paths.push(path);
-                }
-            }
-            let paths_to_open = expanded_paths;
+            let (paths_to_open, code_configuration) =
+                code_workspace::expand_workspace_paths(paths_to_open, app_state.fs.as_ref())
+                    .await?;
 
             // Get project paths for all of the abs_paths
             let mut project_paths: Vec<(PathBuf, Option<ProjectPath>)> =
@@ -2388,21 +2374,16 @@ impl Workspace {
                 };
 
             notify_if_database_failed(window, cx);
-            if let Some(configuration) = code_configuration {
-                let path = configuration.path.clone();
-                window
-                    .update(cx, |_, window, cx| {
-                        workspace.update(cx, |workspace, cx| {
-                            workspace.apply_code_workspace(configuration, window, cx)
-                        })
-                    })?
-                    .await?;
-                window.update(cx, |_, window, cx| {
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.watch_code_workspace(path, window, cx)
-                    });
-                })?;
-            }
+            window
+                .update(cx, |_, window, cx| {
+                    workspace.update(cx, |workspace, cx| match code_configuration {
+                        Some(configuration) => {
+                            workspace.attach_code_workspace(configuration, window, cx)
+                        }
+                        None => workspace.attach_matching_code_workspace(window, cx),
+                    })
+                })?
+                .await?;
             // Check if this is an empty workspace (no paths to open)
             // An empty workspace is one where project_paths is empty
             let is_empty_workspace = project_paths.is_empty();
@@ -8018,11 +7999,7 @@ impl Workspace {
                     && location == SerializedWorkspaceLocation::Local)
                     .then(|| docks.clone());
                 let window_bounds = Some(SerializedWindowBounds(window.window_bounds()));
-                let identity_paths_hint = self
-                    .code_workspace
-                    .as_ref()
-                    .map(|workspace| PathList::new(std::slice::from_ref(&workspace.path)))
-                    .unwrap_or_else(|| self.project_group_key(cx).path_list().clone());
+                let identity_paths_hint = self.project_group_key(cx).path_list().clone();
                 let recent_navigation_history = self.persisted_recent_navigation_history.clone();
 
                 let serialized_workspace = SerializedWorkspace {
@@ -8068,23 +8045,7 @@ impl Workspace {
     }
 
     fn workspace_location(&self, cx: &App) -> WorkspaceLocation {
-        let paths = if let Some(workspace) = &self.code_workspace {
-            let mut paths = vec![workspace.path.clone()];
-            paths.extend(
-                self.root_paths(cx)
-                    .into_iter()
-                    .filter(|path| {
-                        !workspace
-                            .folders
-                            .iter()
-                            .any(|folder| folder == path.as_ref())
-                    })
-                    .map(|path| path.to_path_buf()),
-            );
-            PathList::new(&paths)
-        } else {
-            PathList::new(&self.root_paths(cx))
-        };
+        let paths = PathList::new(&self.root_paths(cx));
         if let Some(connection) = self.project.read(cx).remote_connection_options(cx).cloned() {
             WorkspaceLocation::Location(SerializedWorkspaceLocation::Remote(connection), paths)
         } else if self.project.read(cx).is_local() {
@@ -8102,10 +8063,7 @@ impl Workspace {
             return;
         }
         if let Some(manager) = HistoryManager::global(cx) {
-            let paths = match self.workspace_location(cx) {
-                WorkspaceLocation::Location(_, paths) => paths,
-                WorkspaceLocation::None => return,
-            };
+            let paths = PathList::new(&self.root_paths(cx));
             manager.update(cx, |this, cx| {
                 this.update_history(id, HistoryManagerEntry::new(id, &paths), cx);
             });
@@ -11537,42 +11495,10 @@ pub fn open_paths(
 
     cx.spawn(async move |cx| {
         let original_paths = abs_paths.clone();
-        let mut code_configuration = None;
-        let mut expanded_paths = Vec::new();
-        for path in abs_paths {
-            if code_workspace::is_workspace_file(&path) {
-                anyhow::ensure!(code_configuration.is_none(), "Open one .code-workspace file at a time");
-                let path = app_state.fs.canonicalize(&path).await?;
-                let configuration = code_workspace::read_workspace(path, app_state.fs.as_ref()).await?;
-                for folder in &configuration.folders {
-                    if app_state.fs.is_dir(&folder.path).await {
-                        expanded_paths.push(folder.path.clone());
-                    }
-                }
-                code_configuration = Some(configuration);
-            } else {
-                expanded_paths.push(path);
-            }
-        }
-        let abs_paths = expanded_paths;
-        let mut reuse_target = if let Some(configuration) = &code_configuration {
-            cx.update(|cx| {
-                if open_options.open_mode == OpenMode::NewWindow
-                    || open_options.workspace_matching == WorkspaceMatching::None
-                {
-                    return None;
-                }
-                cx.windows().into_iter().filter_map(|window| window.downcast::<MultiWorkspace>())
-                    .find_map(|window| {
-                        let workspace = window.read(cx).ok()?.workspaces().find(|workspace| {
-                            workspace.read(cx).code_workspace.as_ref().is_some_and(|workspace| workspace.path == configuration.path)
-                        })?.clone();
-                        Some(WorkspaceOpenTarget { window, workspace, visible: OpenVisible::All })
-                    })
-            })
-        } else {
-            find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx)
-        };
+        let (abs_paths, code_configuration) =
+            code_workspace::expand_workspace_paths(abs_paths, app_state.fs.as_ref()).await?;
+        let mut reuse_target =
+            find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx);
 
         let mut creation_window = open_options.requesting_window;
 
@@ -11744,14 +11670,17 @@ pub fn open_paths(
                 })
                 .unwrap();
         };
-        if let (true, Some(configuration), Ok(result)) = (reusing_workspace, code_configuration, &result) {
-            let path = configuration.path.clone();
-            result.window.update(cx, |_, window, cx| {
-                result.workspace.update(cx, |workspace, cx| workspace.apply_code_workspace(configuration, window, cx))
-            })?.await?;
-            result.window.update(cx, |_, window, cx| {
-                result.workspace.update(cx, |workspace, cx| workspace.watch_code_workspace(path, window, cx));
-            })?;
+        if let (true, Some(configuration), Ok(result)) =
+            (reusing_workspace, code_configuration, &result)
+        {
+            result
+                .window
+                .update(cx, |_, window, cx| {
+                    result.workspace.update(cx, |workspace, cx| {
+                        workspace.attach_code_workspace(configuration, window, cx)
+                    })
+                })?
+                .await?;
         }
         result
     })

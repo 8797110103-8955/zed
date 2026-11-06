@@ -1,3 +1,4 @@
+mod code_workspace_tab;
 mod components;
 mod page_data;
 pub mod pages;
@@ -49,8 +50,8 @@ use workspace::{
     client_side_decorations,
 };
 use zed_actions::{
-    AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
-    OpenSettingsAtTarget, OpenSettingsPage,
+    AGENT_SKILLS_SETTINGS_PATH, OpenSettings, OpenSettingsAt, OpenSettingsAtTarget,
+    OpenSettingsPage,
 };
 
 use crate::components::{
@@ -484,22 +485,9 @@ pub fn init(cx: &mut App) {
                     cx,
                 );
             })
-            .register_action(|_, _: &OpenSettings, window, cx| {
+            .register_action(|workspace, _: &OpenSettings, window, cx| {
                 let window_handle = window.window_handle().downcast::<MultiWorkspace>();
-                open_settings_editor(None, None, window_handle, cx);
-            })
-            .register_action(|workspace, _: &OpenProjectSettings, window, cx| {
-                let window_handle = window.window_handle().downcast::<MultiWorkspace>();
-                let target_worktree_id = workspace
-                    .project()
-                    .read(cx)
-                    .visible_worktrees(cx)
-                    .find_map(|tree| {
-                        tree.read(cx)
-                            .root_entry()?
-                            .is_dir()
-                            .then_some(tree.read(cx).id())
-                    });
+                let target_worktree_id = workspace.active_folder_worktree_id(cx);
                 open_settings_editor(None, target_worktree_id, window_handle, cx);
             })
             .register_action(
@@ -1727,7 +1715,9 @@ fn all_language_names(cx: &App) -> Vec<SharedString> {
 #[allow(unused)]
 #[derive(Clone, PartialEq, Debug)]
 enum SettingsUiFile {
-    User,                                // Uses all settings.
+    User, // Uses all settings.
+    /// Settings shared by all folders of a project, anchored at one of its worktrees.
+    Workspace((WorktreeId, code_workspace_tab::WorkspaceTabLabel)),
     Project((WorktreeId, Arc<RelPath>)), // Has a special name, and special set of settings
     Server(&'static str),                // Uses a special name, and the user settings
 }
@@ -1736,6 +1726,7 @@ impl SettingsUiFile {
     fn setting_type(&self) -> &'static str {
         match self {
             SettingsUiFile::User => "User",
+            SettingsUiFile::Workspace(_) => "Workspace",
             SettingsUiFile::Project(_) => "Project",
             SettingsUiFile::Server(_) => "Server",
         }
@@ -1747,7 +1738,7 @@ impl SettingsUiFile {
 
     fn worktree_id(&self) -> Option<WorktreeId> {
         match self {
-            SettingsUiFile::User => None,
+            SettingsUiFile::User | SettingsUiFile::Workspace(_) => None,
             SettingsUiFile::Project((worktree_id, _)) => Some(*worktree_id),
             SettingsUiFile::Server(_) => None,
         }
@@ -1757,6 +1748,9 @@ impl SettingsUiFile {
         Some(match file {
             settings::SettingsFile::User => SettingsUiFile::User,
             settings::SettingsFile::Project(location) => SettingsUiFile::Project(location),
+            settings::SettingsFile::Workspace(anchor) => {
+                SettingsUiFile::Workspace((anchor, Default::default()))
+            }
             settings::SettingsFile::Server => SettingsUiFile::Server("todo: server name"),
             settings::SettingsFile::Default => return None,
             settings::SettingsFile::Global => return None,
@@ -1767,6 +1761,7 @@ impl SettingsUiFile {
         match self {
             SettingsUiFile::User => settings::SettingsFile::User,
             SettingsUiFile::Project(location) => settings::SettingsFile::Project(location.clone()),
+            SettingsUiFile::Workspace((anchor, _)) => settings::SettingsFile::Workspace(*anchor),
             SettingsUiFile::Server(_) => settings::SettingsFile::Server,
         }
     }
@@ -1774,7 +1769,7 @@ impl SettingsUiFile {
     fn mask(&self) -> FileMask {
         match self {
             SettingsUiFile::User => USER,
-            SettingsUiFile::Project(_) => PROJECT,
+            SettingsUiFile::Workspace(_) | SettingsUiFile::Project(_) => PROJECT,
             SettingsUiFile::Server(_) => SERVER,
         }
     }
@@ -2575,7 +2570,9 @@ impl SettingsWindow {
             let Some(settings_ui_file) = SettingsUiFile::from_settings(file) else {
                 continue;
             };
-            if settings_ui_file.is_server() {
+            if settings_ui_file.is_server()
+                || matches!(settings_ui_file, SettingsUiFile::Workspace(_))
+            {
                 continue;
             }
 
@@ -2606,6 +2603,18 @@ impl SettingsWindow {
         }
 
         ui_files.reverse();
+
+        if let Some(workspace_tab) =
+            code_workspace_tab::workspace_tab(self.original_window.as_ref(), cx)
+        {
+            let focus_handle = prev_files
+                .iter()
+                .find_map(|(prev_file, handle)| {
+                    (prev_file == &workspace_tab).then(|| handle.clone())
+                })
+                .unwrap_or_else(|| cx.focus_handle().tab_index(0).tab_stop(true));
+            ui_files.insert(ui_files.len().min(1), (workspace_tab, focus_handle));
+        }
 
         if self.original_window.is_some() {
             let mut missing_worktrees = Vec::new();
@@ -2744,6 +2753,11 @@ impl SettingsWindow {
         if self.files[ix].0 == self.current_file {
             return;
         }
+        if let SettingsUiFile::Workspace((_, label)) = &self.files[ix].0
+            && !label.is_saved()
+        {
+            return;
+        }
         self.current_file = self.files[ix].0.clone();
 
         if let SettingsUiFile::Project((_, _)) = &self.current_file {
@@ -2773,6 +2787,11 @@ impl SettingsWindow {
         cx: &mut Context<SettingsWindow>,
     ) {
         if ix >= self.files.len() || self.files[ix].0 == self.current_file {
+            return;
+        }
+        if let SettingsUiFile::Workspace((_, label)) = &self.files[ix].0
+            && !label.is_saved()
+        {
             return;
         }
         self.current_file = self.files[ix].0.clone();
@@ -2835,11 +2854,17 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> impl IntoElement {
-        static OVERFLOW_LIMIT: usize = 1;
+        // The user tab and the tab of settings shared by all folders are always visible.
+        let overflow_limit = if matches!(self.files.get(1), Some((SettingsUiFile::Workspace(_), _)))
+        {
+            2
+        } else {
+            1
+        };
 
         let file_button =
             |ix, file: &SettingsUiFile, focus_handle, cx: &mut Context<SettingsWindow>| {
-                Button::new(
+                let button = Button::new(
                     ix,
                     self.display_name(&file)
                         .expect("Files should always have a name"),
@@ -2853,7 +2878,17 @@ impl SettingsWindow {
                         this.change_file(ix, window, cx);
                         focus_handle.focus(window, cx);
                     }
-                }))
+                }));
+                match file {
+                    SettingsUiFile::Workspace((_, label)) if !label.is_saved() => {
+                        code_workspace_tab::with_create_workspace_popover(
+                            "unsaved-workspace-tab",
+                            button.disabled(true).into_any_element(),
+                            self.original_window,
+                        )
+                    }
+                    _ => button.into_any_element(),
+                }
             };
 
         let this = cx.entity();
@@ -2862,7 +2897,7 @@ impl SettingsWindow {
             .files
             .iter()
             .enumerate()
-            .skip(OVERFLOW_LIMIT)
+            .skip(overflow_limit)
             .find_map(|(ix, (file, _))| {
                 if file == &self.current_file {
                     Some(ix)
@@ -2870,7 +2905,7 @@ impl SettingsWindow {
                     None
                 }
             })
-            .unwrap_or(OVERFLOW_LIMIT);
+            .unwrap_or(overflow_limit);
         let edit_in_json_id = SharedString::new(format!("edit-in-json-{}", selected_file_ix));
 
         h_flex()
@@ -2887,29 +2922,29 @@ impl SettingsWindow {
                 h_flex()
                     .gap_1()
                     .children(
-                        self.files.iter().enumerate().take(OVERFLOW_LIMIT).map(
+                        self.files.iter().enumerate().take(overflow_limit).map(
                             |(ix, (file, focus_handle))| file_button(ix, file, focus_handle, cx),
                         ),
                     )
-                    .when(self.files.len() > OVERFLOW_LIMIT, |div| {
+                    .when(self.files.len() > overflow_limit, |div| {
                         let (file, focus_handle) = &self.files[selected_file_ix];
 
                         div.child(file_button(selected_file_ix, file, focus_handle, cx))
-                            .when(self.files.len() > OVERFLOW_LIMIT + 1, |div| {
+                            .when(self.files.len() > overflow_limit + 1, |div| {
                                 div.child(
                                     DropdownMenu::new(
                                         "more-files",
-                                        format!("+{}", self.files.len() - (OVERFLOW_LIMIT + 1)),
+                                        format!("+{}", self.files.len() - (overflow_limit + 1)),
                                         ContextMenu::build(window, cx, move |mut menu, _, _| {
                                             for (mut ix, (file, focus_handle)) in self
                                                 .files
                                                 .iter()
                                                 .enumerate()
-                                                .skip(OVERFLOW_LIMIT + 1)
+                                                .skip(overflow_limit + 1)
                                             {
                                                 let (display_name, focus_handle) =
                                                     if selected_file_ix == ix {
-                                                        ix = OVERFLOW_LIMIT;
+                                                        ix = overflow_limit;
                                                         (
                                                             self.display_name(&self.files[ix].0),
                                                             self.files[ix].1.clone(),
@@ -2953,24 +2988,56 @@ impl SettingsWindow {
                             })
                     }),
             )
-            .child(
-                Button::new(edit_in_json_id, "Edit in settings.json")
+            .child({
+                let (edit_label, unsaved_workspace) = match &self.current_file {
+                    SettingsUiFile::Workspace((_, label)) => (
+                        code_workspace_tab::edit_button_label(label),
+                        !label.is_saved(),
+                    ),
+                    _ => ("Edit in settings.json".to_string(), false),
+                };
+                let button = Button::new(edit_in_json_id, edit_label.clone())
                     .tab_index(0_isize)
                     .style(ButtonStyle::OutlinedGhost)
-                    .tooltip(Tooltip::for_action_title_in(
-                        "Edit in settings.json",
-                        &OpenCurrentFile,
-                        &self.focus_handle,
-                    ))
+                    .disabled(unsaved_workspace)
+                    .when(!unsaved_workspace, |button| {
+                        button.tooltip(Tooltip::for_action_title_in(
+                            edit_label,
+                            &OpenCurrentFile,
+                            &self.focus_handle,
+                        ))
+                    })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_current_settings_file(window, cx);
-                    })),
-            )
+                    }));
+                if unsaved_workspace {
+                    code_workspace_tab::with_create_workspace_popover(
+                        "unsaved-workspace-edit",
+                        button.into_any_element(),
+                        self.original_window,
+                    )
+                } else {
+                    button.into_any_element()
+                }
+            })
     }
 
     pub(crate) fn display_name(&self, file: &SettingsUiFile) -> Option<String> {
         match file {
             SettingsUiFile::User => Some("User".to_string()),
+            SettingsUiFile::Workspace((anchor, label)) => Some(
+                self.files
+                    .iter()
+                    .find_map(|(file, _)| match file {
+                        SettingsUiFile::Workspace((tab_anchor, tab_label))
+                            if tab_anchor == anchor =>
+                        {
+                            Some(tab_label.display_name())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| label.display_name()),
+            ),
             SettingsUiFile::Project((worktree_id, path)) => self
                 .worktree_root_dirs
                 .get(&worktree_id)
@@ -3955,7 +4022,7 @@ impl SettingsWindow {
                         "Your settings are out of date, and need to be updated.",
                         match &self.current_file {
                             SettingsUiFile::User => "They can be automatically migrated to the latest version.",
-                            SettingsUiFile::Server(_) | SettingsUiFile::Project(_)  => "They must be manually migrated to the latest version."
+                            SettingsUiFile::Server(_) | SettingsUiFile::Workspace(_) | SettingsUiFile::Project(_)  => "They must be manually migrated to the latest version."
                         }.to_string(),
                         &mut self.shown_errors,
                         cx,
@@ -4268,6 +4335,13 @@ impl SettingsWindow {
                     })
                     .ok();
 
+                window.remove_window();
+            }
+            SettingsUiFile::Workspace((_, label)) => {
+                if !label.is_saved() {
+                    return;
+                }
+                code_workspace_tab::open_workspace_file(self.original_window, cx);
                 window.remove_window();
             }
             SettingsUiFile::Server(_) => {
@@ -4840,6 +4914,13 @@ fn update_settings_file_inner(
             // todo(settings_ui) error?
             SettingsStore::global(cx).update_settings_file(<dyn fs::Fs>::global(cx), update());
             Ok(())
+        }
+        SettingsUiFile::Workspace(_) => {
+            let Some(settings_window) = window.root::<SettingsWindow>().flatten() else {
+                anyhow::bail!("No settings window found");
+            };
+            let original_window = settings_window.read(cx).original_window;
+            code_workspace_tab::update_workspace_settings(original_window, update(), cx)
         }
         SettingsUiFile::Server(_) => unimplemented!(),
     }

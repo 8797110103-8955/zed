@@ -255,6 +255,16 @@ fn get_open_folders(workspace: &Workspace, cx: &App) -> Vec<OpenFolderEntry> {
     entries
 }
 
+/// Shows a project by the name of the workspace file last used with its folders.
+fn code_workspace_label(paths: &[PathBuf], cx: &App) -> Option<HighlightedMatch> {
+    let name = workspace::code_workspace_display_name(paths, cx)?;
+    Some(HighlightedMatch {
+        text: name.to_string(),
+        highlight_positions: Vec::new(),
+        color: Color::Default,
+    })
+}
+
 fn get_branch_for_worktree(
     worktree: &Worktree,
     repositories: &[Entity<Repository>],
@@ -995,12 +1005,17 @@ impl PickerDelegate for RecentProjectsDelegate {
             .iter()
             .enumerate()
             .map(|(id, key)| {
-                let combined_string = key
+                let mut combined_string = key
                     .path_list()
                     .ordered_paths()
                     .map(|path| path.compact().to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
                     .concat();
+                if let Some(name) =
+                    workspace::code_workspace_display_name(key.path_list().paths(), cx)
+                {
+                    combined_string.push_str(&name);
+                }
                 StringMatchCandidate::new(id, &combined_string)
             })
             .collect();
@@ -1014,18 +1029,26 @@ impl PickerDelegate for RecentProjectsDelegate {
         );
 
         // Build candidates for recent projects (not current, not sibling, not open folder)
+        let workspace_names = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace::code_workspace_display_name(workspace.paths.paths(), cx))
+            .collect::<Vec<_>>();
         let recent_candidates: Vec<_> = self
             .workspaces
             .iter()
             .enumerate()
             .filter(|(_, workspace)| self.is_valid_recent_candidate(workspace, cx))
             .map(|(id, workspace)| {
-                let combined_string = workspace
+                let mut combined_string = workspace
                     .identity_paths
                     .ordered_paths()
                     .map(|path| path.compact().to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
                     .concat();
+                if let Some(Some(name)) = workspace_names.get(id) {
+                    combined_string.push_str(name);
+                }
                 StringMatchCandidate::new(id, &combined_string)
             })
             .collect();
@@ -1376,7 +1399,9 @@ impl PickerDelegate for RecentProjectsDelegate {
 
                 let highlighted_match = HighlightedMatchWithPaths {
                     prefix: None,
-                    match_label: HighlightedMatch::join(match_labels.into_iter().flatten(), ", "),
+                    match_label: code_workspace_label(paths.paths(), cx).unwrap_or_else(|| {
+                        HighlightedMatch::join(match_labels.into_iter().flatten(), ", ")
+                    }),
                     paths: path_highlights,
                     active: is_active,
                 };
@@ -1524,7 +1549,9 @@ impl PickerDelegate for RecentProjectsDelegate {
 
                 let highlighted_match = HighlightedMatchWithPaths {
                     prefix,
-                    match_label: HighlightedMatch::join(match_labels.into_iter().flatten(), ", "),
+                    match_label: code_workspace_label(raw_paths.paths(), cx).unwrap_or_else(|| {
+                        HighlightedMatch::join(match_labels.into_iter().flatten(), ", ")
+                    }),
                     paths,
                     active: false,
                 };
