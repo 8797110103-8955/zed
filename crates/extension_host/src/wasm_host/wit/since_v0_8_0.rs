@@ -757,7 +757,8 @@ async fn convert_response(
 
 impl nodejs::Host for WasmState {
     async fn node_binary_path(&mut self) -> wasmtime::Result<Result<String, String>> {
-        self.node_runtime()
+        self.host
+            .node_runtime
             .binary_path()
             .await
             .map(|path| path.to_string_lossy().into_owned())
@@ -769,6 +770,7 @@ impl nodejs::Host for WasmState {
         package_name: String,
     ) -> wasmtime::Result<Result<String, String>> {
         self.node_runtime()
+            .await
             .package_manager_latest_version(&package_name)
             .await
             .map(|v| v.to_string())
@@ -780,6 +782,7 @@ impl nodejs::Host for WasmState {
         package_name: String,
     ) -> wasmtime::Result<Result<Option<String>, String>> {
         self.node_runtime()
+            .await
             .package_manager_installed_version(&self.work_dir(), &package_name)
             .await
             .map(|option| option.map(|version| version.to_string()))
@@ -796,6 +799,7 @@ impl nodejs::Host for WasmState {
             .into_wasmtime_result()?;
 
         self.node_runtime()
+            .await
             .package_manager_install_packages(&self.work_dir(), &[(&package_name, &version)])
             .await
             .to_wasmtime_result()

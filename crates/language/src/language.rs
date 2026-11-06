@@ -858,13 +858,6 @@ where
                 return (Ok(cached_binary.clone()), None);
             }
 
-            if !binary_options.allow_binary_download {
-                return (
-                    Err(anyhow::anyhow!("downloading language servers disabled")),
-                    None,
-                );
-            }
-
             let Some(container_dir) = delegate.language_server_download_dir(&self.name()).await
             else {
                 return (
@@ -879,6 +872,19 @@ where
                 .context(
                     "did not find existing language server binary, falling back to downloading",
                 );
+            if !binary_options.allow_binary_download {
+                // A server Zed downloaded earlier stays usable; only fetching updates is disabled.
+                return match last_downloaded_binary {
+                    Ok(binary) => {
+                        *cached_binary = Some((binary_options.pre_release, binary.clone()));
+                        (Ok(binary), None)
+                    }
+                    Err(_) => (
+                        Err(anyhow::anyhow!("downloading language servers disabled")),
+                        None,
+                    ),
+                };
+            }
             let download_binary = async move {
                 let mut binary = self
                     .try_fetch_server_binary(

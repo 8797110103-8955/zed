@@ -1,32 +1,78 @@
 use std::str::FromStr;
-use std::sync::LazyLock;
 
 use derive_more::Deref;
-use regex::Regex;
 use url::Url;
 
 /// The URL to a Git remote.
 #[derive(Debug, PartialEq, Eq, Clone, Deref)]
 pub struct RemoteUrl(Url);
 
-// Detect the `user@` prefix of an SCP-like remote (e.g. `git@host:path`). The
-// username may contain anything but the `@`/`:`/`/` that delimit the user,
-// host, and path, so match by exclusion rather than an allowlist that misses
-// names like `first.last`.
-static USERNAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[^/@:]+@").expect("Failed to create USERNAME_REGEX"));
+impl RemoteUrl {
+    fn parse(input: &str) -> Result<Url, url::ParseError> {
+        let mut input = input.trim();
+        // Remote helpers wrap the address as `<transport>::<address>`.
+        while let Some((transport, address)) = input.split_once("::") {
+            if transport.is_empty()
+                || !transport
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "+-.".contains(character))
+            {
+                break;
+            }
+            input = address;
+        }
+
+        // Drive paths must not become SSH URLs with a one-letter host.
+        if input.split_once(':').is_some_and(|(prefix, _)| {
+            prefix.len() == 1
+                && prefix
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+        }) {
+            return Err(url::ParseError::RelativeUrlWithoutBase);
+        }
+
+        if input.contains("://") || input.starts_with("file:") {
+            return Url::parse(input);
+        }
+
+        // A colon before any slash denotes SCP syntax, except inside an IPv6 host.
+        let mut inside_brackets = false;
+        for (index, character) in input.char_indices() {
+            match character {
+                '[' => inside_brackets = true,
+                ']' => inside_brackets = false,
+                '/' | '\\' => break,
+                ':' if !inside_brackets => {
+                    let (authority, _) = input.split_at(index);
+                    let path = input
+                        .get(index + 1..)
+                        .ok_or(url::ParseError::RelativeUrlWithoutBase)?;
+                    if authority.is_empty() || path.is_empty() {
+                        return Err(url::ParseError::RelativeUrlWithoutBase);
+                    }
+                    return Url::parse(&format!("ssh://{authority}/{path}"));
+                }
+                _ => {}
+            }
+        }
+
+        Url::parse(input)
+    }
+}
 
 impl FromStr for RemoteUrl {
     type Err = url::ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if USERNAME_REGEX.is_match(input) {
-            // Rewrite remote URLs like `git@github.com:user/repo.git` to `ssh://git@github.com/user/repo.git`
-            let ssh_url = format!("ssh://{}", input.replacen(':', "/", 1));
-            Ok(RemoteUrl(Url::parse(&ssh_url)?))
-        } else {
-            Ok(RemoteUrl(Url::parse(input)?))
+        let mut url = Self::parse(input)?;
+        // Unlike HTTP URLs, SSH URLs retain the case of DNS names in `url`.
+        // Providers compare hosts directly, so normalize them for every transport.
+        if let Some(host) = url.host_str() {
+            let host = host.to_ascii_lowercase();
+            url.set_host(Some(&host))?;
         }
+        Ok(Self(url))
     }
 }
 
@@ -76,6 +122,43 @@ mod tests {
                 "/octocat/zed.git",
             ),
             (
+                "github.com:octocat/zed.git",
+                "ssh",
+                "github.com",
+                "/octocat/zed.git",
+            ),
+            (
+                "git@GitHub.com:octocat/zed.git",
+                "ssh",
+                "github.com",
+                "/octocat/zed.git",
+            ),
+            ("git@[::1]:team/repo.git", "ssh", "[::1]", "/team/repo.git"),
+            (
+                "[2001:db8::1]:team/repo.git",
+                "ssh",
+                "[2001:db8::1]",
+                "/team/repo.git",
+            ),
+            (
+                "persistent-https::https://example.com/team/repo",
+                "https",
+                "example.com",
+                "/team/repo",
+            ),
+            (
+                "helper::first.last@gitlab.example.com:group/repo.git",
+                "ssh",
+                "gitlab.example.com",
+                "/group/repo.git",
+            ),
+            (
+                "ssh://git@example.com:2222/team/repo.git",
+                "ssh",
+                "example.com",
+                "/team/repo.git",
+            ),
+            (
                 "file:///path/to/local/zed",
                 "file",
                 "",
@@ -102,7 +185,18 @@ mod tests {
 
     #[test]
     fn test_parsing_invalid_remote_urls() {
-        let invalid_urls = vec!["not_a_url", "http://"];
+        let invalid_urls = vec![
+            "not_a_url",
+            "http://",
+            "/srv/team/repo.git",
+            "./example.com:repo.git",
+            r"C:\srv\team\repo.git",
+            "C:/srv/team/repo.git",
+            "C://srv/team/repo.git",
+            r"\\server\team\repo.git",
+            "git@[::1:team/repo.git",
+            "example.com:",
+        ];
 
         for url in invalid_urls {
             assert!(

@@ -158,7 +158,7 @@ impl Project {
                     .as_ref()
                     .context("Package manager task has no working directory")?
                     .to_path_buf();
-                let (command, arguments) = {
+                let (command, arguments, task_environment) = {
                     let runtime =
                         package_manager_runtime.context("Package manager tasks are unavailable")?;
                     let arguments = spawn_task.args.clone();
@@ -176,8 +176,26 @@ impl Project {
                                 .await
                         })
                         .await?;
-                    (resolved.path.to_string_lossy().into_owned(), resolved.args)
+                    (resolved.program, resolved.args, resolved.env)
                 };
+                // The bare manager name resolves through the PATH it was resolved with.
+                env.retain(|name, _| {
+                    !task_environment
+                        .keys()
+                        .any(|task_name| task_name.eq_ignore_ascii_case(name))
+                });
+                // The task's own variables are applied over `env` again when the terminal
+                // starts, so its PATH must be the resolved one as well.
+                if let Some((name, path)) = task_environment
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                {
+                    spawn_task
+                        .env
+                        .retain(|existing, _| !existing.eq_ignore_ascii_case("PATH"));
+                    spawn_task.env.insert(name.clone(), path.clone());
+                }
+                env.extend(task_environment);
                 let task_shell = if spawn_task.shell == Shell::System {
                     Shell::Program(shell.clone())
                 } else {
@@ -929,7 +947,7 @@ mod tests {
             Project::remote(
                 remote_client,
                 client,
-                node_runtime::NodeRuntime::unavailable(),
+                node_runtime::PackageManagerRuntime::unavailable(),
                 user_store,
                 Arc::new(language::LanguageRegistry::test(
                     cx.background_executor().clone(),

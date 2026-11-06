@@ -1,3 +1,19 @@
+// FORK: Suggested improvements, implemented in `svg_preview` but intentionally
+// not applied here yet:
+// - Resizing: the fit zoom is only computed on the first layout, so resizing
+//   the window or pane keeps the old absolute zoom. Storing the zoom relative
+//   to the fit zoom and recomputing the fit in `prepaint` would scale the image
+//   proportionally with the view.
+// - Pan offset: `pan_offset` is in absolute pixels and does not scale with the
+//   view; storing it in unscaled image pixels would keep the visible area stable.
+// - Fit to view: `compute_fit_to_view_zoom` caps at 100%, so small images never
+//   fill the view ("contain"). Dropping the `.min(1.0)` cap would allow it.
+// - Fit toggle: the toolbar `FitToView` button is not a toggle. It could be
+//   highlighted while the image is fitted, and clicking it again could restore
+//   the previous zoom (default: actual size), kept only for this view's life.
+// - Scrolling: a plain scroll pans and zooming needs Ctrl/Cmd, while the SVG
+//   preview zooms on a plain scroll.
+
 mod image_info;
 mod image_viewer_settings;
 

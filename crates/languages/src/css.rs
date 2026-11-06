@@ -44,6 +44,7 @@ impl LspInstaller for CssLspAdapter {
     ) -> Result<Self::BinaryVersion> {
         self.node
             .for_project(delegate.worktree_root_path())
+            .with_environment(delegate.shell_env().await.into_iter().collect())
             .package_manager_latest_version("vscode-langservers-extracted")
             .await
     }
@@ -73,8 +74,10 @@ impl LspInstaller for CssLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let node = self.node.for_project(delegate.worktree_root_path());
+        let delegate = delegate.clone();
 
         async move {
+            let node = node.with_environment(delegate.shell_env().await.into_iter().collect());
             let server_path = container_dir.join(SERVER_PATH);
 
             node.package_manager_install_latest_packages(&container_dir, &[Self::PACKAGE_NAME])
@@ -92,13 +95,15 @@ impl LspInstaller for CssLspAdapter {
         &self,
         version: &Self::BinaryVersion,
         container_dir: &PathBuf,
-        _: &Arc<dyn LspAdapterDelegate>,
+        delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Option<LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
+        let delegate = delegate.clone();
         let version = version.clone();
         let container_dir = container_dir.clone();
 
         async move {
+            let node = node.with_environment(delegate.shell_env().await.into_iter().collect());
             let server_path = container_dir.join(SERVER_PATH);
 
             let should_install_language_server = node

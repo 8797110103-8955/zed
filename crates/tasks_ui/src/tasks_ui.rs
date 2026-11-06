@@ -538,7 +538,7 @@ mod tests {
     use editor::{Editor, MultiBufferOffset, SelectionEffects};
     use gpui::{Entity, TestAppContext, UpdateGlobal, VisualTestContext};
     use language::{Language, LanguageConfig};
-    use node_runtime::NodeRuntime;
+    use node_runtime::PackageManagerRuntime;
     use project::{
         BasicContextProvider, FakeFs, Inventory, Project, TaskContexts, TaskSourceKind, WorktreeId,
         task_store::{TaskSettingsLocation, TaskStore},
@@ -776,7 +776,7 @@ mod tests {
             });
             let languages = project.read(cx).languages().clone();
             let fs = project.read(cx).fs().clone();
-            languages::init(languages, fs, NodeRuntime::unavailable(), cx);
+            languages::init(languages, fs, PackageManagerRuntime::unavailable(), cx);
         });
 
         task_inventory(&workspace, cx)

@@ -14,7 +14,9 @@ use git::{
     RemoteUrl,
 };
 
-use crate::get_host_from_git_remote_url;
+use crate::{
+    get_host_from_git_remote_url, get_web_base_url_from_git_remote_url, remote_matches_base_url,
+};
 
 #[derive(Debug, Deserialize)]
 struct CommitDetails {
@@ -58,7 +60,7 @@ impl Gitea {
 
         Ok(Self::new(
             "Gitea Self-Hosted",
-            Url::parse(&format!("https://{}", host))?,
+            get_web_base_url_from_git_remote_url(remote_url)?,
         ))
     }
 
@@ -69,14 +71,11 @@ impl Gitea {
         commit: &str,
         client: &Arc<dyn HttpClient>,
     ) -> Result<Option<User>> {
-        let Some(host) = self.base_url.host_str() else {
-            bail!("failed to get host from gitea base url");
-        };
-        let url = format!(
-            "https://{host}/api/v1/repos/{repo_owner}/{repo}/git/commits/{commit}?stat=false&verification=false&files=false"
-        );
+        let url = self.base_url.join(&format!(
+            "api/v1/repos/{repo_owner}/{repo}/git/commits/{commit}?stat=false&verification=false&files=false"
+        ))?;
 
-        let request = Request::get(&url)
+        let request = Request::get(url.as_str())
             .header("Content-Type", "application/json")
             .follow_redirects(http_client::RedirectPolicy::FollowAll);
 
@@ -129,8 +128,7 @@ impl GitHostingProvider for Gitea {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("gitea.com")) {
             return None;
         }
 

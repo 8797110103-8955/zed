@@ -1,5 +1,5 @@
 use super::GitPanel;
-use editor::Editor;
+use editor::{Editor, actions::SelectAll};
 use git::{StashAll, StashApply, StashPop, StashStaged, StashTracked};
 use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
 use project::git_store::Repository;
@@ -9,6 +9,7 @@ use workspace::{ModalView, Workspace};
 
 struct RepositoryInputModal {
     title: SharedString,
+    confirm_label: SharedString,
     editors: Vec<Entity<Editor>>,
     required_fields: usize,
     sender: Option<futures::channel::oneshot::Sender<Vec<String>>>,
@@ -90,32 +91,48 @@ impl Render for RepositoryInputModal {
             .gap_3()
             .child(Headline::new(self.title.clone()).size(HeadlineSize::XSmall))
             .children(self.editors.iter().cloned())
-            .child(Button::new("confirm-repository-input", "Confirm").on_click(
-                cx.listener(|this, _, window, cx| this.confirm(&menu::Confirm, window, cx)),
-            ))
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("confirm-repository-input", self.confirm_label.clone())
+                        .style(ButtonStyle::Outlined)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm(&menu::Confirm, window, cx)
+                        })),
+                ),
+            )
     }
 }
 
+/// Fields with an initial value start with it selected, so typing replaces it.
 pub(super) fn repository_input(
-    title: &'static str,
+    title: impl Into<SharedString>,
+    confirm_label: &'static str,
     placeholders: &[&'static str],
+    initial_values: Vec<String>,
     required_fields: usize,
     workspace: WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Option<Vec<String>>> {
+    let title = title.into();
     let placeholders = placeholders.to_vec();
     let (sender, receiver) = futures::channel::oneshot::channel();
     if workspace
         .update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, |window, cx| RepositoryInputModal {
-                title: title.into(),
+                title,
+                confirm_label: confirm_label.into(),
                 editors: placeholders
                     .into_iter()
-                    .map(|placeholder| {
+                    .enumerate()
+                    .map(|(index, placeholder)| {
                         cx.new(|cx| {
                             let mut editor = Editor::single_line(window, cx);
                             editor.set_placeholder_text(placeholder, window, cx);
+                            if let Some(initial_value) = initial_values.get(index) {
+                                editor.set_text(initial_value.as_str(), window, cx);
+                                editor.select_all(&SelectAll, window, cx);
+                            }
                             editor
                         })
                     })
@@ -427,6 +444,7 @@ mod tests {
             let (sender, mut receiver) = futures::channel::oneshot::channel();
             let modal = cx.new(|cx| RepositoryInputModal {
                 title: "Add Remote".into(),
+                confirm_label: "Confirm".into(),
                 editors: vec![
                     cx.new(|cx| Editor::single_line(window, cx)),
                     cx.new(|cx| Editor::single_line(window, cx)),

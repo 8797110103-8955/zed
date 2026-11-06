@@ -8,7 +8,9 @@ use git::{
     RemoteUrl,
 };
 
-use crate::get_host_from_git_remote_url;
+use crate::{
+    get_host_from_git_remote_url, get_web_base_url_from_git_remote_url, remote_matches_base_url,
+};
 
 pub struct SourceHut {
     name: String,
@@ -42,7 +44,7 @@ impl SourceHut {
 
         Ok(Self::new(
             "SourceHut Self-Hosted",
-            Url::parse(&format!("https://{}", host))?,
+            get_web_base_url_from_git_remote_url(remote_url)?,
         ))
     }
 }
@@ -71,8 +73,7 @@ impl GitHostingProvider for SourceHut {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("git.sr.ht")) {
             return None;
         }
 

@@ -36,15 +36,16 @@ use crate::{
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "lowercase")]
 pub enum PackageManager {
-    /// Detect the package manager from project declarations and lockfiles.
+    /// Tasks read packageManager or infer it from project markers; agent and language server
+    /// installs use any installed manager, downloading pnpm when none is installed.
     #[default]
     Auto,
-    Npm,
     Pnpm,
-    Yarn,
-    Bun,
     /// Vite+
     Vp,
+    Bun,
+    Npm,
+    Yarn,
 }
 
 #[with_fallible_options]

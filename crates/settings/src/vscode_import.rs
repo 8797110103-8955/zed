@@ -230,11 +230,11 @@ impl VsCodeSettings {
             package_manager: self.read_enum("npm.packageManager", |name| {
                 match name.split('@').next()? {
                     "auto" => Some(PackageManager::Auto),
-                    "npm" => Some(PackageManager::Npm),
                     "pnpm" => Some(PackageManager::Pnpm),
-                    "yarn" => Some(PackageManager::Yarn),
-                    "bun" => Some(PackageManager::Bun),
                     "vp" | "vite-plus" => Some(PackageManager::Vp),
+                    "bun" => Some(PackageManager::Bun),
+                    "npm" => Some(PackageManager::Npm),
+                    "yarn" => Some(PackageManager::Yarn),
                     _ => None,
                 }
             }),

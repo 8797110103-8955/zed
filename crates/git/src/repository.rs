@@ -4314,6 +4314,44 @@ mod tests {
         git_command(path, ["init", "-b", "main"]);
     }
 
+    #[gpui::test]
+    async fn test_soft_reset_to_hash_preserves_index_and_worktree(cx: &mut TestAppContext) {
+        async {
+            cx.executor().allow_parking();
+            let directory = tempfile::tempdir()?;
+            let root = directory.path();
+            git_init_repo(root);
+            let file = root.join("file.txt");
+            fs::write(&file, "base\n")?;
+            git_command(root, ["add", "file.txt"]);
+            git_command(root, ["commit", "-m", "base"]);
+            let target = git_command_output(root, ["rev-parse", "HEAD"]);
+            fs::write(&file, "committed\n")?;
+            git_command(root, ["add", "file.txt"]);
+            git_command(root, ["commit", "-m", "second"]);
+            fs::write(&file, "staged\n")?;
+            git_command(root, ["add", "file.txt"]);
+            fs::write(&file, "working\n")?;
+            let index = fs::read(root.join(".git/index"))?;
+            let repository = RealGitRepository::new(
+                &root.join(".git"),
+                None,
+                Some("git".into()),
+                cx.executor(),
+            )?;
+            repository
+                .reset(target.clone(), ResetMode::Soft, Arc::default())
+                .await?;
+            assert_eq!(git_command_output(root, ["rev-parse", "HEAD"]), target);
+            assert_eq!(fs::read(root.join(".git/index"))?, index);
+            assert_eq!(git_command_output(root, ["show", ":file.txt"]), "staged");
+            assert_eq!(fs::read_to_string(&file)?, "working\n");
+            Ok::<_, anyhow::Error>(())
+        }
+        .await
+        .expect("soft reset must preserve index and working tree");
+    }
+
     fn clone_remote_repository_with_main_and_feature(temp_dir: &Path) -> (PathBuf, PathBuf) {
         let remote_directory = temp_dir.join("remote.git");
         let seed_directory = temp_dir.join("seed");

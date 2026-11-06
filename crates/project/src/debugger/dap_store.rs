@@ -998,25 +998,23 @@ impl dap::adapters::DapDelegate for DapAdapterDelegate {
         self.console.unbounded_send(msg).ok();
     }
 
-    #[cfg(not(target_os = "windows"))]
     async fn which(&self, command: &OsStr) -> Option<PathBuf> {
         let worktree_abs_path = self.worktree.abs_path();
         let shell_path = self.shell_env().await.get("PATH").cloned();
         which::which_in(command, shell_path.as_ref(), worktree_abs_path).ok()
     }
 
-    #[cfg(target_os = "windows")]
-    async fn which(&self, command: &OsStr) -> Option<PathBuf> {
-        // On Windows, `PATH` is handled differently from Unix. Windows generally expects users to modify the `PATH` themselves,
-        // and every program loads it directly from the system at startup.
-        // There's also no concept of a default shell on Windows, and you can't really retrieve one, so trying to get shell environment variables
-        // from a specific directory doesn’t make sense on Windows.
-        which::which(command).ok()
-    }
-
     async fn shell_env(&self) -> HashMap<String, String> {
         let task = self.load_shell_env_task.clone();
-        task.await.unwrap_or_default()
+        let environment = task.await.unwrap_or_default();
+        node_runtime::project_tool_environment(
+            self.worktree_root_path(),
+            environment.clone().into_iter().collect(),
+        )
+        .await
+        .log_err()
+        .map(|environment| environment.into_iter().collect())
+        .unwrap_or(environment)
     }
 
     fn toolchain_store(&self) -> Arc<dyn LanguageToolchainStore> {

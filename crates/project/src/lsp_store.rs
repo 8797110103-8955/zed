@@ -102,7 +102,6 @@ use lsp::{
     RenameFilesParams, TextEdit, Uri, WillRenameFiles, WorkDoneProgressCancelParams,
     notification::DidRenameFiles,
 };
-use node_runtime::read_package_installed_version;
 use parking_lot::Mutex;
 use postage::{mpsc, sink::Sink, stream::Stream, watch};
 use rand::prelude::*;
@@ -16920,45 +16919,27 @@ impl LspAdapterDelegate for LocalLspAdapterDelegate {
 
     async fn shell_env(&self) -> HashMap<String, String> {
         let task = self.load_shell_env_task.clone();
-        task.await.unwrap_or_default()
+        let environment = task.await.unwrap_or_default();
+        node_runtime::project_tool_environment(
+            self.worktree_root_path(),
+            environment.clone().into_iter().collect(),
+        )
+        .await
+        .log_err()
+        .map(|environment| environment.into_iter().collect())
+        .unwrap_or(environment)
     }
 
     async fn package_manager_installed_version(
         &self,
         package_name: &str,
     ) -> Result<Option<(PathBuf, Version)>> {
-        let local_package_directory = self.worktree_root_path();
-        let node_modules_directory = local_package_directory.join("node_modules");
-
-        if let Some(version) =
-            read_package_installed_version(node_modules_directory.clone(), package_name).await?
-        {
-            return Ok(Some((node_modules_directory, version)));
-        }
-        let Some(npm) = self.which("npm".as_ref()).await else {
-            log::warn!(
-                "Failed to find npm executable for {:?}",
-                local_package_directory
-            );
-            return Ok(None);
-        };
-
-        let env = self.shell_env().await;
-        let output = util::command::new_command(&npm)
-            .args(["root", "-g"])
-            .envs(env)
-            .current_dir(local_package_directory)
-            .output()
-            .await?;
-        let global_node_modules =
-            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
-
-        if let Some(version) =
-            read_package_installed_version(global_node_modules.clone(), package_name).await?
-        {
-            return Ok(Some((global_node_modules, version)));
-        }
-        return Ok(None);
+        node_runtime::find_installed_package(
+            self.worktree_root_path(),
+            package_name,
+            self.shell_env().await.into_iter().collect(),
+        )
+        .await
     }
 
     async fn which(&self, command: &OsStr) -> Option<PathBuf> {

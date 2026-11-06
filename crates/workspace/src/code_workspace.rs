@@ -268,6 +268,87 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_recent_project_opens_in_requesting_empty_window(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/projects"),
+            json!({
+                "demo.code-workspace": json!({"folders": [{"path": "a"}, {"path": "b"}]}).to_string(),
+                "a": {}, "b": {}
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [], cx).await;
+        let original_window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let app_state = original_window
+            .read_with(cx, |multi_workspace, cx| {
+                multi_workspace.workspace().read(cx).app_state.clone()
+            })
+            .expect("original window");
+        let manifest_path = PathBuf::from(path!("/projects/demo.code-workspace"));
+        let original = cx
+            .update(|cx| {
+                open_paths(
+                    std::slice::from_ref(&manifest_path),
+                    app_state,
+                    OpenOptions {
+                        requesting_window: Some(original_window),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })
+            .await
+            .expect("original project");
+
+        for paths in [
+            vec![manifest_path],
+            vec![
+                PathBuf::from(path!("/projects/a")),
+                PathBuf::from(path!("/projects/b")),
+            ],
+        ] {
+            let project = Project::test(fs.clone(), [], cx).await;
+            let new_window =
+                cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let opened = new_window
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace
+                        .workspace()
+                        .clone()
+                        .update(cx, |workspace, cx| {
+                            workspace.open_workspace_for_paths(
+                                OpenMode::NewWindow,
+                                paths,
+                                window,
+                                cx,
+                            )
+                        })
+                })
+                .expect("new window")
+                .await
+                .expect("open recent project");
+            assert_ne!(opened.entity_id(), original.workspace.entity_id());
+            new_window
+                .read_with(cx, |multi_workspace, _| {
+                    assert_eq!(multi_workspace.workspace().entity_id(), opened.entity_id());
+                })
+                .expect("project stays in new window");
+            original_window
+                .read_with(cx, |multi_workspace, _| {
+                    assert_eq!(
+                        multi_workspace.workspace().entity_id(),
+                        original.workspace.entity_id()
+                    );
+                })
+                .expect("original project stays open");
+        }
+        assert_eq!(cx.read(|cx| cx.windows().len()), 3);
+    }
+
+    #[gpui::test]
     async fn test_code_workspace_invalid_file_does_not_open_a_project(cx: &mut TestAppContext) {
         crate::tests::init_test(cx);
         let app_state = cx.update(AppState::test);

@@ -53,6 +53,7 @@ pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
 pub(crate) mod remote_output;
+mod remote_web_link;
 pub mod repository_selector;
 pub mod solo_diff_view;
 pub mod staged_diff;

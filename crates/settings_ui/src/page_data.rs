@@ -3420,7 +3420,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Package Management"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Package Manager",
-                description: "Choose the package manager for project tasks and extension tools. Auto detects project declarations and lockfiles. Tool installation uses an available alternative if the preferred manager is missing.",
+                description: "Choose the package manager for project tasks and for installing agents and language servers. For tasks, Auto reads packageManager from package.json, then checks project markers. For agents and language servers, Auto uses an installed manager in pnpm, vp, bun, npm, yarn order and downloads pnpm if none is installed. A selected manager that is missing is installed through any installed manager, or downloaded if none is installed.",
                 field: Box::new(SettingField {
                     json_path: Some("package_manager"),
                     pick: |content| content.package_manager.as_ref(),
@@ -11088,9 +11088,8 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
 /// Documents what Zed configures for `typescript-ls`, since those defaults live in
 /// the language server adapter rather than in `default.json`.
 fn typescript_language_server_section() -> Box<[SettingsPageItem]> {
-    let is_typescript_language = active_language().is_some_and(|language| {
-        matches!(language.as_ref(), "TypeScript" | "TSX" | "JavaScript")
-    });
+    let is_typescript_language = active_language()
+        .is_some_and(|language| matches!(language.as_ref(), "TypeScript" | "TSX" | "JavaScript"));
     if !is_typescript_language {
         return Box::new([]);
     }

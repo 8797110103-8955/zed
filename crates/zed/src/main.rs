@@ -203,6 +203,65 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 }
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
+fn package_manager_installation_notification(
+    manager: node_runtime::PackageManager,
+    directory: PathBuf,
+    add_to_path: bool,
+    cx: &mut App,
+) -> gpui::Entity<MessageNotification> {
+    use ui::prelude::*;
+
+    cx.new(|cx| {
+        let open_directory = directory.clone();
+        MessageNotification::new_from_builder(cx, move |_, _| {
+            v_flex()
+                .gap_1()
+                .child(Label::new(format!("{} has been installed", manager.name())))
+                .child(
+                    Button::new(
+                        "package-manager-location",
+                        open_directory.display().to_string(),
+                    )
+                    .label_size(LabelSize::Small)
+                    .truncate(true)
+                    .tooltip(ui::Tooltip::text(open_directory.display().to_string()))
+                    .on_click({
+                        let directory = open_directory.clone();
+                        move |_, _, cx| cx.open_with_system(&directory)
+                    }),
+                )
+                .into_any_element()
+        })
+        .when(add_to_path, |notification| {
+            notification
+                .primary_message("Add to user PATH")
+                .primary_on_click(move |_, cx| {
+                    let directory = directory.clone();
+                    let installation = cx.background_spawn(async move {
+                        node_runtime::add_installation_to_user_path(&directory).await
+                    });
+                    cx.spawn(async move |_, cx| {
+                        let result = installation.await;
+                        cx.update(|cx| {
+                            let message = match result {
+                                Ok(()) => "Installation directory added to user PATH".to_string(),
+                                Err(error) => format!("Failed to update user PATH: {error:#}"),
+                            };
+                            show_app_notification(
+                                NotificationId::Named("package-manager-path".into()),
+                                cx,
+                                move |cx| {
+                                    cx.new(|cx| MessageNotification::new(message.clone(), cx))
+                                },
+                            );
+                        })
+                    })
+                    .detach();
+                })
+        })
+    })
+}
+
 fn main() {
     STARTUP_TIME.get_or_init(|| Instant::now());
 
@@ -551,8 +610,10 @@ fn main() {
             }))
             .1,
         );
+        let (package_manager_installations, mut installation_events) = futures::channel::mpsc::unbounded();
         let node_runtime =
-            PackageManagerRuntime::new(node_runtime, client.http_client(), package_manager_rx);
+            PackageManagerRuntime::new(node_runtime, client.http_client(), package_manager_rx)
+                .with_installation_events(package_manager_installations);
         for (mut node_errors, notification_name, install_label, install_url, open_settings) in [
             (
                 node_runtime.node_runtime().errors(),
@@ -614,6 +675,63 @@ fn main() {
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
+        cx.spawn({
+            let workspace_store = workspace_store.clone();
+            async move |cx| {
+                while let Some(event) = installation_events.next().await {
+                    match event {
+                        node_runtime::PackageManagerInstallEvent::Select { response } => {
+                            let prompt = cx.update(|cx| -> Result<_> {
+                                let (window, workspace) = workspace_store.read(cx)
+                                    .workspaces_with_windows()
+                                    .find(|(window, _)| Some(window.window_id()) == cx.active_window().map(|window| window.window_id()))
+                                    .or_else(|| workspace_store.read(cx).workspaces_with_windows().next())
+                                    .map(|(window, workspace)| (window, workspace.clone()))
+                                    .context("no workspace is available to select a package manager")?;
+                                window.update(cx, |_, window, cx| {
+                                    git_ui::picker_prompt::prompt(
+                                        "No package manager found. Install globally (Esc to cancel)",
+                                        node_runtime::PackageManager::INSTALLABLE.iter().map(|manager| {
+                                            match manager {
+                                                node_runtime::PackageManager::Pnpm => "pnpm (Recommended)".into(),
+                                                node_runtime::PackageManager::Vp => "Vite+ (vp)".into(),
+                                                node_runtime::PackageManager::Bun => "Bun".into(),
+                                                node_runtime::PackageManager::Npm => "npm (requires Node.js)".into(),
+                                                node_runtime::PackageManager::Yarn => "Yarn (requires Node.js)".into(),
+                                                node_runtime::PackageManager::Auto => "Auto".into(),
+                                            }
+                                        }).collect(),
+                                        workspace, window, cx,
+                                    )
+                                })
+                            });
+                            let selected = match prompt {
+                                Ok(prompt) => prompt.await.and_then(|index| node_runtime::PackageManager::INSTALLABLE.get(index).copied()),
+                                Err(error) => { log::error!("{error:#}"); None }
+                            };
+                            if response.send(selected).is_err() {
+                                log::debug!("package manager request was cancelled before selection");
+                            }
+                        }
+                        node_runtime::PackageManagerInstallEvent::Installed { manager, directory, installed_via_manager } => {
+                            let add_to_path = installed_via_manager && !node_runtime::installation_in_user_path(&directory)
+                                .await.log_err().unwrap_or(true);
+                            cx.update(|cx| {
+                                for workspace in workspace_store.read(cx).workspaces().cloned().collect::<Vec<_>>() {
+                                    workspace.update(cx, |workspace, cx| {
+                                        workspace.show_notification(
+                                            NotificationId::Named(format!("package-manager-installed-{}", manager.name()).into()),
+                                            cx,
+                                            |cx| package_manager_installation_notification(manager, directory.clone(), add_to_path, cx),
+                                        );
+                                    }).log_err();
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }).detach();
 
         language_extension::init(
             language_extension::LspAccess::ViaWorkspaces({

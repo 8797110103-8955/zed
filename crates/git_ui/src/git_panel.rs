@@ -2657,6 +2657,7 @@ impl GitPanel {
     }
 
     fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
+        self.changes_collapsed = false;
         self.set_active_tab(GitPanelTab::Changes, window, cx);
         if self.commit_editor_collapsed {
             self.toggle_commit_editor(&ToggleCommitEditor, window, cx);
@@ -4799,6 +4800,46 @@ impl GitPanel {
         }));
     }
 
+    fn create_branch_at_head(
+        &mut self,
+        repository: Entity<Repository>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_write_access(cx) {
+            return;
+        }
+        let Some(short_sha) = repository
+            .read(cx)
+            .head_commit
+            .as_ref()
+            .map(|commit| commit.sha.chars().take(7).collect::<String>())
+        else {
+            return;
+        };
+        let input = repository_input(
+            format!("Create a branch at {short_sha}?"),
+            "Create",
+            &["Branch name"],
+            vec![short_sha],
+            1,
+            self.workspace.clone(),
+            window,
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            let Some(mut values) = input.await else {
+                return Ok(());
+            };
+            let name = values.pop().context("Missing branch name")?;
+            repository
+                .update(cx, |repository, _| repository.create_branch(name, None))
+                .await??;
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err("Failed to create branch", window, cx, |_, _, _| None);
+    }
+
     fn repository_menu_action(
         &mut self,
         repository: Entity<Repository>,
@@ -4839,7 +4880,7 @@ impl GitPanel {
             let result = async {
                 match action {
                     RepositoryMenuAction::CreateBranch => {
-                        let input = cx.update(|window, cx| repository_input("Create Branch", &["Branch name", "Base branch or commit (optional, defaults to HEAD)"], 1, workspace, window, cx))?.await;
+                        let input = cx.update(|window, cx| repository_input("Create Branch", "Confirm", &["Branch name", "Base branch or commit (optional, defaults to HEAD)"], Vec::new(), 1, workspace, window, cx))?.await;
                         let Some(mut values) = input else { return Ok(()); };
                         let base = values.pop().filter(|value| !value.is_empty());
                         let name = values.pop().context("Missing branch name")?;
@@ -4859,7 +4900,7 @@ impl GitPanel {
                         }
                     }
                     RepositoryMenuAction::AddRemote => {
-                        let input = cx.update(|window, cx| repository_input("Add Remote", &["Remote name (for example, origin)", "Remote URL"], 2, workspace, window, cx))?.await;
+                        let input = cx.update(|window, cx| repository_input("Add Remote", "Confirm", &["Remote name (for example, origin)", "Remote URL"], Vec::new(), 2, workspace, window, cx))?.await;
                         let Some(mut values) = input else { return Ok(()); };
                         let url = values.pop().context("Missing remote URL")?;
                         let name = values.pop().context("Missing remote name")?;
@@ -7403,10 +7444,13 @@ impl GitPanel {
                 .branch
                 .as_ref()
                 .and_then(Branch::tracking_status);
+            let is_detached = repository_state.branch.is_none();
             let sync_disabled = self.pending_remote_operation.is_some()
                 || !self.has_write_access(cx)
                 || !self.can_push_and_pull(cx)
-                || repository_state.branch.is_none();
+                || is_detached;
+            let create_branch_disabled =
+                !self.has_write_access(cx) || repository_state.head_commit.is_none();
 
             let branch_selector = PopoverMenu::new(("repository-branch", repository_id.0))
                 .trigger_with_tooltip(
@@ -7593,7 +7637,23 @@ impl GitPanel {
                             )
                         })
                     })
-                    .child(
+                    .child(if is_detached {
+                        IconButton::new(
+                            ("create-repository-branch", repository_id.0),
+                            IconName::GitBranchPlus,
+                        )
+                        .icon_size(IconSize::Small)
+                        .disabled(create_branch_disabled)
+                        .tooltip(Tooltip::text("Create Branch at Current Commit"))
+                        .on_click(cx.listener({
+                            let repository = repository.clone();
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.create_branch_at_head(repository.clone(), window, cx);
+                            }
+                        }))
+                        .into_any_element()
+                    } else {
                         IconButton::new(
                             ("sync-repository", repository_id.0),
                             if tracking.is_some() {
@@ -7620,8 +7680,9 @@ impl GitPanel {
                                     cx,
                                 );
                             }
-                        })),
-                    )
+                        }))
+                        .into_any_element()
+                    })
                     .child(repository_menu)
                     .into_any_element(),
             );

@@ -127,35 +127,16 @@ fn package_manager_from_package_json(
         .get("packageManager")
         .and_then(|value| value.as_str())
         .and_then(package_manager_name)
-        .or_else(|| {
-            package_json
-                .get("devEngines")
-                .and_then(|value| value.as_object())
-                .and_then(|dev_engines| dev_engines.get("packageManager"))
-                .and_then(package_manager_from_dev_engine)
-        })
-}
-
-fn package_manager_from_dev_engine(value: &Value) -> Option<&'static str> {
-    match value {
-        Value::Object(package_manager) => package_manager
-            .get("name")
-            .and_then(|name| name.as_str())
-            .and_then(package_manager_name),
-        Value::Array(package_managers) => package_managers
-            .iter()
-            .find_map(package_manager_from_dev_engine),
-        _ => None,
-    }
 }
 
 fn package_manager_name(value: &str) -> Option<&'static str> {
     let value = value.split_once('@').map(|(name, _)| name).unwrap_or(value);
     match value {
         "pnpm" => Some("pnpm"),
-        "yarn" => Some("yarn"),
-        "npm" => Some("npm"),
+        "vp" | "vite-plus" => Some("vp"),
         "bun" => Some("bun"),
+        "npm" => Some("npm"),
+        "yarn" => Some("yarn"),
         _ => None,
     }
 }
@@ -181,19 +162,23 @@ mod tests {
             package_manager(r#"{"packageManager": "pnpm@11.1.3"}"#),
             Some("pnpm")
         );
+        assert_eq!(
+            package_manager(r#"{"packageManager": "vp@1.5.0"}"#),
+            Some("vp")
+        );
 
         assert_eq!(
             package_manager(
                 r#"{"devEngines": {"packageManager": {"name": "pnpm", "version": "^11.1.3", "onFail": "download"}}}"#
             ),
-            Some("pnpm"),
+            None,
         );
 
         assert_eq!(
             package_manager(
                 r#"{"devEngines": {"packageManager": [{"name": "foo"}, {"name": "yarn", "version": "^4.0.0"}]}}"#
             ),
-            Some("yarn"),
+            None,
         );
 
         assert_eq!(

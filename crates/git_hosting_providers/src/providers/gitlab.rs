@@ -26,7 +26,9 @@ fn merge_request_number_regex() -> &'static Regex {
     &MERGE_REQUEST_NUMBER_REGEX
 }
 
-use crate::get_host_from_git_remote_url;
+use crate::{
+    get_host_from_git_remote_url, get_web_base_url_from_git_remote_url, remote_matches_base_url,
+};
 
 #[derive(Debug, Deserialize)]
 struct CommitDetails {
@@ -71,7 +73,7 @@ impl Gitlab {
 
         Ok(Self::new(
             "GitLab Self-Hosted",
-            Url::parse(&format!("https://{}", host))?,
+            get_web_base_url_from_git_remote_url(remote_url)?,
         ))
     }
 
@@ -82,16 +84,13 @@ impl Gitlab {
         commit: &str,
         client: &Arc<dyn HttpClient>,
     ) -> Result<Option<AvatarInfo>> {
-        let Some(host) = self.base_url.host_str() else {
-            bail!("failed to get host from gitlab base url");
-        };
         let project_path = format!("{}/{}", repo_owner, repo);
         let project_path_encoded = urlencoding::encode(&project_path);
-        let url = format!(
-            "https://{host}/api/v4/projects/{project_path_encoded}/repository/commits/{commit}"
-        );
+        let url = self.base_url.join(&format!(
+            "api/v4/projects/{project_path_encoded}/repository/commits/{commit}"
+        ))?;
 
-        let request = Request::get(&url)
+        let request = Request::get(url.as_str())
             .header("Content-Type", "application/json")
             .follow_redirects(http_client::RedirectPolicy::FollowAll);
 
@@ -117,9 +116,12 @@ impl Gitlab {
             .map(|commit| commit.author_email)
             .context("failed to deserialize GitLab commit details")?;
 
-        let avatar_info_url = format!("https://{host}/api/v4/avatar?email={author_email}");
+        let mut avatar_info_url = self.base_url.join("api/v4/avatar")?;
+        avatar_info_url
+            .query_pairs_mut()
+            .append_pair("email", &author_email);
 
-        let request = Request::get(&avatar_info_url)
+        let request = Request::get(avatar_info_url.as_str())
             .header("Content-Type", "application/json")
             .follow_redirects(http_client::RedirectPolicy::FollowAll);
 
@@ -171,8 +173,7 @@ impl GitHostingProvider for Gitlab {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("gitlab.com")) {
             return None;
         }
 

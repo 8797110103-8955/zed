@@ -7057,6 +7057,7 @@ dependencies = [
  "fuzzy",
  "fuzzy_nucleo",
  "git",
+ "git_hosting_providers",
  "git_ui_core",
  "gpui",
  "indoc",
@@ -7095,6 +7096,7 @@ dependencies = [
  "ui",
  "ui_input",
  "unindent",
+ "url",
  "util",
  "watch",
  "workspace",
@@ -11298,6 +11300,8 @@ dependencies = [
  "util",
  "watch",
  "which",
+ "windows 0.62.2",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
@@ -17450,6 +17454,7 @@ checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
 name = "svg_preview"
 version = "0.1.0"
 dependencies = [
+ "editor",
  "file_icons",
  "gpui",
  "language",

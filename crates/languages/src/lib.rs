@@ -102,10 +102,7 @@ fn init_with_task_detection(
         fs.clone(),
         defer_package_manager_detection,
     ));
-    let typescript_lsp_adapter = Arc::new(typescript::TypeScriptLspAdapter::new(
-        node,
-        fs.clone(),
-    ));
+    let typescript_lsp_adapter = Arc::new(typescript::TypeScriptLspAdapter::new(node, fs.clone()));
 
     let built_in_languages = [
         LanguageInfo {

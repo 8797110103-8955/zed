@@ -47,12 +47,24 @@ mod test_mocks {
 
     pub(crate) struct MockDelegate {
         worktree_root: PathBuf,
+        node_runtime: Option<node_runtime::PackageManagerRuntime>,
+        headless: bool,
     }
 
     impl MockDelegate {
         pub(crate) fn new() -> Arc<dyn adapters::DapDelegate> {
             Arc::new(Self {
                 worktree_root: PathBuf::from("/tmp/test"),
+                node_runtime: None,
+                headless: false,
+            })
+        }
+
+        pub(crate) fn with_package_manager(headless: bool) -> Arc<dyn adapters::DapDelegate> {
+            Arc::new(Self {
+                worktree_root: std::env::temp_dir(),
+                node_runtime: Some(node_runtime::PackageManagerRuntime::unavailable()),
+                headless,
             })
         }
     }
@@ -72,7 +84,9 @@ mod test_mocks {
         }
 
         fn node_runtime(&self) -> node_runtime::PackageManagerRuntime {
-            unimplemented!("Not needed for tests")
+            self.node_runtime
+                .clone()
+                .expect("test requires a package manager runtime")
         }
 
         fn toolchain_store(&self) -> Arc<dyn language::LanguageToolchainStore> {
@@ -98,7 +112,7 @@ mod test_mocks {
         }
 
         fn is_headless(&self) -> bool {
-            false
+            self.headless
         }
     }
 }

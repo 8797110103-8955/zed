@@ -2665,22 +2665,19 @@ impl ConversationView {
 
         window.spawn(cx, async move |cx| {
             let mut task = login.clone();
-            if let Some(cmd) = &task.command {
-                // Have "node" command use Zed's managed Node runtime by default
-                if cmd == "node" {
-                    let resolved_node_runtime = project.update(cx, |project, cx| {
-                        let agent_server_store = project.agent_server_store().clone();
-                        agent_server_store.update(cx, |store, cx| {
-                            store.node_runtime().map(|node_runtime| {
-                                cx.background_spawn(async move { node_runtime.binary_path().await })
-                            })
+            if task.command.as_deref() == Some("node") {
+                let resolved_node_runtime = project.update(cx, |project, cx| {
+                    let agent_server_store = project.agent_server_store().clone();
+                    agent_server_store.update(cx, |store, cx| {
+                        store.node_runtime().map(|node_runtime| {
+                            cx.background_spawn(async move { node_runtime.binary_path().await })
                         })
-                    });
+                    })
+                });
 
-                    if let Some(resolve_task) = resolved_node_runtime {
-                        if let Ok(node_path) = resolve_task.await {
-                            task.command = Some(node_path.to_string_lossy().to_string());
-                        }
+                if let Some(resolve_task) = resolved_node_runtime {
+                    if let Some(node_path) = resolve_task.await.log_err() {
+                        task.command = Some(node_path.to_string_lossy().into_owned());
                     }
                 }
             }

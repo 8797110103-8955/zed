@@ -29,13 +29,13 @@ use settings::{
 };
 use std::{cell::OnceCell, collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use task::{DebugTaskFile, TaskTemplates, VsCodeDebugTaskFile, VsCodeTaskFile};
-use util::{ResultExt, rel_path::RelPath, serde::default_true};
+use util::{ResultExt, merge_non_null_json_value_into, rel_path::RelPath, serde::default_true};
 use worktree::{PathChange, UpdatedEntriesSet, Worktree, WorktreeId};
 
 use crate::{
     task_store::{TaskSettingsLocation, TaskStore},
     trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent},
-    vscode_workspace::{VsCodeWorkspace, convert_settings, empty_object, merge_settings},
+    vscode_workspace::{VsCodeWorkspace, convert_settings, empty_object},
     worktree_store::{WorktreeStore, WorktreeStoreEvent},
 };
 
@@ -805,11 +805,11 @@ impl Settings for ProjectSettings {
             git: git_settings,
             package_manager: match content.package_manager.unwrap_or_default() {
                 settings::PackageManager::Auto => node_runtime::PackageManager::Auto,
-                settings::PackageManager::Npm => node_runtime::PackageManager::Npm,
                 settings::PackageManager::Pnpm => node_runtime::PackageManager::Pnpm,
-                settings::PackageManager::Yarn => node_runtime::PackageManager::Yarn,
-                settings::PackageManager::Bun => node_runtime::PackageManager::Bun,
                 settings::PackageManager::Vp => node_runtime::PackageManager::Vp,
+                settings::PackageManager::Bun => node_runtime::PackageManager::Bun,
+                settings::PackageManager::Npm => node_runtime::PackageManager::Npm,
+                settings::PackageManager::Yarn => node_runtime::PackageManager::Yarn,
             },
             load_direnv: project.load_direnv.clone().unwrap(),
             session: SessionSettings {
@@ -1489,12 +1489,12 @@ impl SettingsObserver {
                     .iter()
                     .any(|folder| folder.path == path.as_ref())
             }) {
-                merge_settings(&mut settings, workspace.settings.clone());
+                merge_non_null_json_value_into(workspace.settings.clone(), &mut settings);
             }
         }
         let result = (|| -> anyhow::Result<_> {
             if let Some(content) = self.folder_settings.get(&(id, directory.clone())) {
-                merge_settings(&mut settings, serde_json::from_str(content)?);
+                merge_non_null_json_value_into(serde_json::from_str(content)?, &mut settings);
             }
             Ok(Some(serde_json::to_string(&settings)?))
         })();
@@ -1753,7 +1753,7 @@ async fn load_folder_settings(
             .await
             .map_err(|error| (relative_path, error))?;
         if let Some(value) = value {
-            merge_settings(&mut merged, value);
+            merge_non_null_json_value_into(value, &mut merged);
         }
     }
     serde_json::to_string(&merged)

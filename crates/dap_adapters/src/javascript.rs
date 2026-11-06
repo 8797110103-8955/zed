@@ -62,7 +62,9 @@ impl JsDebugAdapter {
 
     async fn install_dwarf_debugging(&self, delegate: &Arc<dyn DapDelegate>) -> Result<()> {
         let js_debug_directory = self.installed_version_directory().await?.join("js-debug");
-        let node_runtime = delegate.node_runtime();
+        let node_runtime = delegate
+            .node_runtime()
+            .with_environment(delegate.shell_env().await.into_iter().collect());
         let installed_version = node_runtime
             .package_manager_installed_version(
                 &js_debug_directory,
@@ -129,7 +131,7 @@ impl JsDebugAdapter {
                 .and_then(|value| value.as_str().map(str::to_owned))
             {
                 match program.as_str() {
-                    "npm" | "pnpm" | "yarn" | "bun"
+                    "pnpm" | "vp" | "bun" | "npm" | "yarn"
                         if !configuration.contains_key("runtimeExecutable")
                             && !configuration.contains_key("runtimeArgs") =>
                     {
@@ -158,38 +160,46 @@ impl JsDebugAdapter {
                 .and_then(Value::as_str)
                 == Some(task::PACKAGE_MANAGER_COMMAND)
             {
-                if delegate.is_headless() {
-                    configuration.insert("runtimeExecutable".to_owned(), "npm".into());
-                } else {
-                    let runtime = delegate.node_runtime();
-                    let preference = runtime.package_manager_preference().await?;
-                    let directory = configuration
-                        .get("cwd")
-                        .and_then(Value::as_str)
-                        .map(PathBuf::from)
-                        .context("Package manager debug task has no working directory")?;
-                    let arguments = configuration
-                        .get("args")
-                        .cloned()
-                        .map(serde_json::from_value::<Vec<String>>)
-                        .transpose()?
-                        .unwrap_or_default();
-                    let mut environment = delegate.shell_env().await;
-                    environment.extend(envs.clone());
-                    let command = runtime
-                        .task_command(
-                            &directory,
-                            &arguments,
-                            environment.into_iter().collect(),
-                            preference,
-                            &[],
-                        )
-                        .await?;
-                    configuration.insert(
-                        "runtimeExecutable".to_owned(),
-                        command.path.to_string_lossy().into_owned().into(),
-                    );
-                    configuration.insert("args".to_owned(), serde_json::to_value(command.args)?);
+                let runtime = delegate.node_runtime();
+                let preference = runtime.package_manager_preference().await?;
+                let directory = configuration
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .context("Package manager debug task has no working directory")?;
+                let arguments = configuration
+                    .get("args")
+                    .cloned()
+                    .map(serde_json::from_value::<Vec<String>>)
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut environment = delegate.shell_env().await;
+                environment.extend(envs.clone());
+                let command = runtime
+                    .task_command(
+                        &directory,
+                        &arguments,
+                        environment.into_iter().collect(),
+                        preference,
+                        &[],
+                    )
+                    .await?;
+                configuration.insert("runtimeExecutable".to_owned(), command.program.into());
+                configuration.insert("args".to_owned(), serde_json::to_value(command.args)?);
+                // js-debug resolves the bare manager name through the launched process's PATH,
+                // which must be the one the manager was resolved with.
+                if let Some((name, path)) = command
+                    .env
+                    .into_iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                {
+                    let launch_env = configuration
+                        .entry("env")
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    if let Some(launch_env) = launch_env.as_object_mut() {
+                        launch_env.retain(|existing, _| !existing.eq_ignore_ascii_case("PATH"));
+                        launch_env.insert(name, path.into());
+                    }
                 }
             }
 
@@ -657,4 +667,48 @@ fn normalize_task_type(task_type: &mut Value) {
     .to_owned();
 
     *task_type = Value::String(new_name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_mocks::MockDelegate;
+
+    #[gpui::test]
+    async fn test_package_manager_resolution_errors_in_local_and_headless_debugging(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        for headless in [false, true] {
+            let delegate = MockDelegate::with_package_manager(headless);
+            let task = DebugTaskDefinition {
+                label: "package manager task".into(),
+                adapter: "JavaScript".into(),
+                config: json!({
+                    "request": "launch",
+                    "runtimeExecutable": task::PACKAGE_MANAGER_COMMAND,
+                    "args": ["run", "test"],
+                    "env": { "PATH": "" },
+                }),
+                tcp_connection: None,
+            };
+            let error = JsDebugAdapter::default()
+                .get_installed_binary(
+                    &delegate,
+                    &task,
+                    Some("unused-adapter.js".into()),
+                    None,
+                    None,
+                    &mut cx.to_async(),
+                )
+                .await
+                .expect_err("missing project package managers must stop debug launch");
+            let message = format!("{error:#}");
+            assert!(message.contains("No usable package manager"), "{message}");
+            assert!(
+                message.contains("https://pnpm.io/installation"),
+                "{message}"
+            );
+        }
+    }
 }

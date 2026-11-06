@@ -98,7 +98,7 @@ impl LspInstaller for BashLspAdapter {
         container_dir: &PathBuf,
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Option<lsp::LanguageServerBinary>> + use<> {
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
         let version = version.clone();
         let container_dir = container_dir.clone();
         let delegate = delegate.clone();
@@ -138,6 +138,7 @@ impl LspInstaller for BashLspAdapter {
     ) -> Result<Self::BinaryVersion> {
         self.node
             .for_project(delegate.worktree_root_path())
+            .with_environment(delegate.shell_env().await.into_iter().collect())
             .package_manager_latest_version(Self::PACKAGE_NAME)
             .await
     }
@@ -152,6 +153,7 @@ impl LspInstaller for BashLspAdapter {
         let delegate = delegate.clone();
 
         async move {
+            let node = node.with_environment(delegate.shell_env().await.into_iter().collect());
             let server_path = container_dir
                 .join("node_modules")
                 .join(Self::NODE_MODULE_RELATIVE_SERVER_PATH);

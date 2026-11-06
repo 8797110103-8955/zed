@@ -625,6 +625,9 @@ pub struct RepositorySnapshot {
     pub merge: MergeDetails,
     pub remote_origin_url: Option<String>,
     pub remote_upstream_url: Option<String>,
+    /// All remotes as `(name, url)`, sorted by name. Remote (collab/SSH)
+    /// repositories only receive `origin` and `upstream` over the protocol.
+    pub remote_urls: Arc<[(SharedString, String)]>,
     pub stash_entries: GitStash,
     pub linked_worktrees: Arc<[GitWorktree]>,
 }
@@ -858,6 +861,7 @@ pub enum RepositoryEvent {
     StatusesChanged,
     HeadChanged,
     BranchListChanged,
+    RemotesChanged,
     TagsChanged,
     StashEntriesChanged,
     GitWorktreeListChanged,
@@ -6021,6 +6025,7 @@ impl RepositorySnapshot {
             merge: Default::default(),
             remote_origin_url: None,
             remote_upstream_url: None,
+            remote_urls: Arc::from([]),
             stash_entries: Default::default(),
             linked_worktrees: Arc::from([]),
             path_style,
@@ -10044,6 +10049,14 @@ impl Repository {
         self.snapshot.linked_worktrees = new_linked_worktrees;
         self.snapshot.remote_upstream_url = update.remote_upstream_url;
         self.snapshot.remote_origin_url = update.remote_origin_url;
+        let remote_urls = [
+            ("origin", &self.snapshot.remote_origin_url),
+            ("upstream", &self.snapshot.remote_upstream_url),
+        ]
+        .into_iter()
+        .filter_map(|(name, url)| Some((SharedString::from(name), url.clone()?)))
+        .collect();
+        self.update_remote_urls(remote_urls, cx);
 
         let edits = update
             .removed_statuses
@@ -10072,6 +10085,24 @@ impl Repository {
         }
         self.clear_pending_ops(cx);
         Ok(())
+    }
+
+    fn update_remote_urls(
+        &mut self,
+        remote_urls: Arc<[(SharedString, String)]>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.snapshot.remote_urls == remote_urls {
+            return;
+        }
+        if let Some(provider_registry) = GitHostingProviderRegistry::try_global(cx) {
+            git_hosting_providers::register_additional_providers(
+                provider_registry,
+                remote_urls.iter().map(|(_, url)| url.as_str()),
+            );
+        }
+        self.snapshot.remote_urls = remote_urls;
+        cx.emit(RepositoryEvent::RemotesChanged);
     }
 
     fn clear_pending_ops(&mut self, cx: &mut Context<Self>) {
@@ -10143,15 +10174,6 @@ impl Repository {
             let Some(state) = state.await.log_err() else {
                 return;
             };
-            if let Some(git_hosting_provider_registry) =
-                cx.update(|cx| GitHostingProviderRegistry::try_global(cx))
-            {
-                git_hosting_providers::register_additional_providers(
-                    git_hosting_provider_registry,
-                    state.backend.clone(),
-                )
-                .await;
-            }
             let state = RepositoryState::Local(state);
             let mut jobs = VecDeque::new();
             loop {
@@ -11728,6 +11750,132 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_remote_changes_update_hosting_providers(cx: &mut TestAppContext) {
+        init_test(cx);
+        let registry = cx.update(|cx| {
+            let registry = GitHostingProviderRegistry::default_global(cx);
+            git_hosting_providers::init(cx);
+            registry
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project_root = Path::new(util::path!("/project"));
+        let git_directory = project_root.join(".git");
+        fs.insert_tree(project_root, json!({".git": {}})).await;
+        let initial_url = "https://gitlab.initial.example/team/repo.git";
+        let added_url = "https://gitlab.added.example/team/repo.git";
+        let changed_url = "https://gitlab.changed.example/team/repo.git";
+        fs.set_remote_for_repo(&git_directory, "origin", initial_url);
+        let project = Project::test(fs.clone(), [project_root], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        let repository = project.read_with(cx, |project, cx| {
+            project.active_repository(cx).expect("repository")
+        });
+        assert!(parse_git_remote_url(registry.clone(), initial_url).is_some());
+        let initial_provider_count = registry.list_hosting_providers().len();
+
+        for (remotes, additional_providers, expect_event) in [
+            (
+                vec![("origin", initial_url), ("upstream", added_url)],
+                1,
+                true,
+            ),
+            (
+                vec![("origin", initial_url), ("upstream", changed_url)],
+                2,
+                true,
+            ),
+            (
+                vec![("mirror", changed_url), ("origin", initial_url)],
+                2,
+                true,
+            ),
+            (
+                vec![("mirror", changed_url), ("origin", initial_url)],
+                2,
+                false,
+            ),
+            (vec![("origin", initial_url)], 2, true),
+            (vec![], 2, true),
+        ] {
+            let mut events = cx.events(&repository);
+            fs.with_git_state(&git_directory, true, |state| {
+                state.remotes = remotes
+                    .iter()
+                    .map(|(name, url)| (name.to_string(), url.to_string()))
+                    .collect();
+            })
+            .expect("repository exists");
+            project
+                .update(cx, |project, cx| project.git_scans_complete(cx))
+                .await;
+            repository.read_with(cx, |repository, _| {
+                let expected = remotes
+                    .iter()
+                    .map(|(name, url)| (SharedString::from(*name), url.to_string()))
+                    .collect::<Vec<_>>();
+                assert_eq!(repository.remote_urls.as_ref(), expected.as_slice());
+            });
+            for (_, url) in &remotes {
+                let (provider, remote) =
+                    parse_git_remote_url(registry.clone(), url).expect("registered provider");
+                assert_eq!(
+                    provider
+                        .build_commit_permalink(
+                            &remote,
+                            git::BuildCommitPermalinkParams { sha: "abc123" },
+                        )
+                        .as_str(),
+                    format!("{}/-/commit/abc123", url.trim_end_matches(".git")),
+                );
+            }
+            assert_eq!(
+                registry.list_hosting_providers().len(),
+                initial_provider_count + additional_providers,
+            );
+            let mut remotes_changed = false;
+            while let Ok(event) = events.try_recv() {
+                remotes_changed |= event == RepositoryEvent::RemotesChanged;
+            }
+            assert_eq!(remotes_changed, expect_event);
+        }
+
+        let remote_url = "https://gitlab.remote.example/team/repo.git";
+        assert!(parse_git_remote_url(registry.clone(), remote_url).is_none());
+        for origin in [Some(remote_url), None] {
+            let mut events = cx.events(&repository);
+            repository
+                .update(cx, |repository, cx| {
+                    repository.apply_remote_update(
+                        proto::UpdateRepository {
+                            remote_origin_url: origin.map(str::to_owned),
+                            is_last_update: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                })
+                .expect("remote repository update");
+            repository.read_with(cx, |repository, _| {
+                assert_eq!(repository.remote_urls.len(), usize::from(origin.is_some()));
+                assert_eq!(repository.remote_origin_url.as_deref(), origin);
+            });
+            assert!(parse_git_remote_url(registry.clone(), remote_url).is_some());
+            assert!(parse_git_remote_url(registry.clone(), initial_url).is_some());
+            assert_eq!(
+                registry.list_hosting_providers().len(),
+                initial_provider_count + 3,
+            );
+            let mut remotes_changed = false;
+            while let Ok(event) = events.try_recv() {
+                remotes_changed |= event == RepositoryEvent::RemotesChanged;
+            }
+            assert!(remotes_changed);
+        }
+    }
+
+    #[gpui::test]
     async fn test_get_permalink_for_file_without_selection(cx: &mut TestAppContext) {
         use util::rel_path::rel_path;
 
@@ -12989,9 +13137,15 @@ async fn compute_snapshot(
         .filter(|wt| wt.path != *work_directory_abs_path)
         .collect();
 
-    let mut remote_urls = backend.remote_urls().await;
-    let remote_origin_url = remote_urls.remove("origin");
-    let remote_upstream_url = remote_urls.remove("upstream");
+    let remote_urls = backend.remote_urls().await;
+    let remote_origin_url = remote_urls.get("origin").cloned();
+    let remote_upstream_url = remote_urls.get("upstream").cloned();
+    let mut remote_urls = remote_urls
+        .into_iter()
+        .map(|(name, url)| (SharedString::from(name), url))
+        .collect::<Vec<_>>();
+    remote_urls.sort();
+    let remote_urls: Arc<[(SharedString, String)]> = remote_urls.into();
 
     log::debug!("fetched remotes");
 
@@ -13015,6 +13169,7 @@ async fn compute_snapshot(
             scan_id: prev_snapshot.scan_id + 1,
             ..prev_snapshot
         };
+        this.update_remote_urls(remote_urls, cx);
 
         if head_changed {
             cx.emit(RepositoryEvent::HeadChanged);

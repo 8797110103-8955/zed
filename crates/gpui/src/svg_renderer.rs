@@ -102,6 +102,14 @@ pub struct SvgRenderer {
 /// scales should retain this value to avoid re-paying the parse cost.
 pub struct ParsedSvg(usvg::Tree);
 
+impl ParsedSvg {
+    /// Returns the SVG's intrinsic size in logical pixels before rasterization.
+    pub fn size(&self) -> Size<f32> {
+        let size = self.0.size();
+        Size::new(size.width(), size.height())
+    }
+}
+
 /// The size in which to rasterize the SVG.
 #[derive(Clone, Copy)]
 pub enum SvgSize {
@@ -293,7 +301,8 @@ fn rasterize_tree(tree: &usvg::Tree, size: SvgSize) -> Result<Pixmap, usvg::Erro
     height *= scale;
 
     // Render the SVG to a pixmap with the specified width and height.
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width as u32, height as u32)
+    // Round up so a positive subpixel dimension still has a pixel to render into.
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width.ceil() as u32, height.ceil() as u32)
         .ok_or(usvg::Error::InvalidSize)?;
 
     let transform = resvg::tiny_skia::Transform::from_scale(
@@ -372,6 +381,7 @@ mod tests {
         let image = renderer.render_parsed(&svg, SvgSize::ExactSize(requested_size))?;
 
         assert_eq!(image.size(0), requested_size);
+        assert_eq!(svg.size(), Size::new(32.0, 16.0));
         Ok(())
     }
 
@@ -387,6 +397,30 @@ mod tests {
         )?;
 
         assert_eq!(image.size(0), Size::new(DevicePixels(24), DevicePixels(12)));
+        Ok(())
+    }
+
+    #[test]
+    fn renders_subpixel_svg_dimensions() -> Result<()> {
+        let renderer = SvgRenderer::new(Arc::new(()));
+        for (width, height, scale, expected_width, expected_height) in [
+            (1000, 1, 0.25, 500, 1),
+            (1, 1000, 0.25, 1, 500),
+            (100_000, 1, 1.0, 8192, 1),
+            (1, 100_000, 1.0, 1, 8192),
+        ] {
+            let source = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"></svg>"#,
+            );
+            let svg = renderer.parse_svg(source.as_bytes())?;
+            let image = renderer.render_parsed(&svg, scale)?;
+
+            assert_eq!(svg.size(), Size::new(width as f32, height as f32));
+            assert_eq!(
+                image.size(0),
+                Size::new(DevicePixels(expected_width), DevicePixels(expected_height)),
+            );
+        }
         Ok(())
     }
 

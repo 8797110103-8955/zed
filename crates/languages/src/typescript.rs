@@ -655,9 +655,8 @@ impl TypeScriptLspAdapter {
     }
 
     pub fn enhance_diagnostic_message(message: &str) -> Option<String> {
-        static SINGLE_WORD_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-            regex::Regex::new(r"'([^\s']*)'").expect("Failed to create REGEX")
-        });
+        static SINGLE_WORD_REGEX: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"'([^\s']*)'").expect("Failed to create REGEX"));
 
         static MULTI_WORD_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
             regex::Regex::new(r"'([^']+\s+[^']*)'").expect("Failed to create REGEX")
@@ -704,8 +703,8 @@ impl TypeScriptLspAdapter {
         }
         let message = format!(
             "{} uses TypeScript {version}. Zed only supports TypeScript {MINIMUM_TYPESCRIPT_MAJOR_VERSION} and newer, \
-            so some syntax and diagnostics may differ from your build. Using Zed's bundled TypeScript \
-            {MINIMUM_TYPESCRIPT_MAJOR_VERSION} instead; upgrade the project to typescript@{MINIMUM_TYPESCRIPT_MAJOR_VERSION}.",
+            so some syntax and diagnostics may differ from your build. Upgrade the project to \
+            typescript@{MINIMUM_TYPESCRIPT_MAJOR_VERSION} or configure a compatible tsgo binary.",
             directory.display()
         );
         cx.update(|cx| delegate.show_notification(&message, cx));
@@ -745,6 +744,7 @@ impl LspInstaller for TypeScriptLspAdapter {
     ) -> Result<Self::BinaryVersion> {
         self.node
             .for_project(delegate.worktree_root_path())
+            .with_environment(delegate.shell_env().await.into_iter().collect())
             .package_manager_latest_version_with_requirement(
                 Self::PACKAGE_NAME,
                 Some(&TYPESCRIPT_VERSION_REQ),
@@ -758,6 +758,7 @@ impl LspInstaller for TypeScriptLspAdapter {
         _: Option<Toolchain>,
         cx: &AsyncApp,
     ) -> Option<LanguageServerBinary> {
+        let environment = delegate.shell_env().await;
         // Mirror Node's resolution: the nearest `node_modules/typescript` is the
         // project's compiler. Parent directories are only searched up to the
         // repository root (monorepos hoist dependencies there); outside a
@@ -775,17 +776,24 @@ impl LspInstaller for TypeScriptLspAdapter {
             if let Some(version) = self.installed_typescript_version(directory).await {
                 if version.major < MINIMUM_TYPESCRIPT_MAJOR_VERSION {
                     self.warn_unsupported_project_version(directory, &version, delegate, cx);
-                    return None;
+                    break;
                 }
-                let mut binary = self.native_binary(directory).await?;
-                binary.env = Some(delegate.shell_env().await);
-                return Some(binary);
+                if let Some(mut binary) = self.native_binary(directory).await {
+                    binary.env = Some(environment);
+                    return Some(binary);
+                }
+                break;
             }
             if directory == search_root {
                 break;
             }
         }
-        None
+        let path = delegate.which("tsgo".as_ref()).await?;
+        Some(LanguageServerBinary {
+            path,
+            arguments: typescript_server_binary_arguments(),
+            env: Some(environment),
+        })
     }
 
     fn check_if_version_installed(
@@ -823,7 +831,10 @@ impl LspInstaller for TypeScriptLspAdapter {
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let adapter = self.clone();
         let package_manager = self.node.for_project(delegate.worktree_root_path());
+        let delegate = delegate.clone();
         async move {
+            let package_manager =
+                package_manager.with_environment(delegate.shell_env().await.into_iter().collect());
             package_manager
                 .package_manager_install_packages(
                     &container_dir,
@@ -991,14 +1002,16 @@ mod tests {
     use util::{path, rel_path::rel_path};
 
     use crate::typescript::{
-        PackageJsonData, TypeScriptContextProvider, TypeScriptLspAdapter,
-        native_typescript_binary, replace_test_name_parameters,
+        PackageJsonData, TypeScriptContextProvider, TypeScriptLspAdapter, native_typescript_binary,
+        replace_test_name_parameters,
     };
 
     struct FakeTypeScriptDelegate {
         root: std::path::PathBuf,
         executor: BackgroundExecutor,
         notifications: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+        system_binary: Option<std::path::PathBuf>,
+        download_directory: Option<std::path::PathBuf>,
     }
 
     #[async_trait::async_trait]
@@ -1041,7 +1054,7 @@ mod tests {
             &self,
             _: &lsp::LanguageServerName,
         ) -> Option<std::sync::Arc<Path>> {
-            None
+            self.download_directory.clone().map(Into::into)
         }
 
         async fn package_manager_installed_version(
@@ -1052,7 +1065,7 @@ mod tests {
         }
 
         async fn which(&self, _: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
-            None
+            self.system_binary.clone()
         }
 
         async fn shell_env(&self) -> collections::HashMap<String, String> {
@@ -1086,8 +1099,9 @@ mod tests {
             }),
         )
         .await;
-        let native_binary = native_typescript_binary(Path::new(path!("/outer/repo/native/node_modules")))
-            .expect("supported test platform");
+        let native_binary =
+            native_typescript_binary(Path::new(path!("/outer/repo/native/node_modules")))
+                .expect("supported test platform");
         fs::Fs::create_dir(
             fs.as_ref(),
             native_binary.parent().expect("binary directory"),
@@ -1106,6 +1120,8 @@ mod tests {
                 root: root.into(),
                 executor: cx.executor(),
                 notifications: notifications.clone(),
+                system_binary: None,
+                download_directory: None,
             })
         };
         let async_cx = cx.to_async();
@@ -1116,6 +1132,26 @@ mod tests {
             .expect("project TypeScript 7 binary");
         assert_eq!(binary.path, native_binary);
         assert!(notifications.lock().is_empty());
+
+        let system_binary = std::path::PathBuf::from(path!("/system/tsgo"));
+        for (root, expected) in [
+            (path!("/outer/repo/native"), native_binary.clone()),
+            (path!("/outer/repo/plain"), system_binary.clone()),
+        ] {
+            let delegate: std::sync::Arc<dyn language::LspAdapterDelegate> =
+                std::sync::Arc::new(FakeTypeScriptDelegate {
+                    root: root.into(),
+                    executor: cx.executor(),
+                    notifications: notifications.clone(),
+                    system_binary: Some(system_binary.clone()),
+                    download_directory: None,
+                });
+            let binary = adapter
+                .check_if_user_installed(&delegate, None, &async_cx)
+                .await
+                .expect("existing project or system binary");
+            assert_eq!(binary.path, expected);
+        }
 
         let legacy = delegate_for(path!("/outer/repo/legacy"));
         for _ in 0..2 {
@@ -1148,9 +1184,12 @@ mod tests {
         .await;
         let loose_binary = native_typescript_binary(Path::new(path!("/loose/node_modules")))
             .expect("supported test platform");
-        fs::Fs::create_dir(fs.as_ref(), loose_binary.parent().expect("binary directory"))
-            .await
-            .expect("create native binary directory");
+        fs::Fs::create_dir(
+            fs.as_ref(),
+            loose_binary.parent().expect("binary directory"),
+        )
+        .await
+        .expect("create native binary directory");
         fs.insert_file(&loose_binary, Vec::new()).await;
         assert!(
             adapter
@@ -1159,6 +1198,88 @@ mod tests {
                 .is_none(),
             "TypeScript above a worktree that is not in a repository must be ignored"
         );
+    }
+
+    #[gpui::test]
+    async fn test_downloaded_tools_schedule_update_checks(cx: &mut TestAppContext) {
+        use language::DynLspInstaller as _;
+        use std::sync::Arc;
+
+        for (system, cached, allow_binary_download) in [
+            (true, false, true),
+            (false, true, true),
+            (false, true, false),
+            (false, false, false),
+            (false, false, true),
+        ] {
+            let fs = FakeFs::new(cx.executor());
+            fs.insert_tree(Path::new(path!("/project")), json!({".git": {}}))
+                .await;
+            let cache_directory = Path::new(path!("/server-cache"));
+            let cached_path = native_typescript_binary(&cache_directory.join("node_modules"))
+                .expect("supported platform");
+            if cached {
+                fs.insert_tree(
+                    cache_directory,
+                    json!({
+                        "node_modules": {"typescript": {"package.json": r#"{"version":"7.0.2"}"#}}
+                    }),
+                )
+                .await;
+                fs::Fs::create_dir(fs.as_ref(), cached_path.parent().expect("binary directory"))
+                    .await
+                    .expect("create binary directory");
+                fs.insert_file(&cached_path, Vec::new()).await;
+            }
+            let node = node_runtime::PackageManagerRuntime::unavailable();
+            let mut node_errors = node.node_runtime().errors();
+            let adapter = Arc::new(TypeScriptLspAdapter::new(node, fs));
+            let delegate: Arc<dyn language::LspAdapterDelegate> =
+                Arc::new(FakeTypeScriptDelegate {
+                    root: Path::new(path!("/project")).into(),
+                    executor: cx.executor(),
+                    notifications: Arc::default(),
+                    system_binary: system.then(|| Path::new(path!("/system/tsgo")).into()),
+                    download_directory: Some(cache_directory.into()),
+                });
+            let cached_binary = Arc::new(futures::lock::Mutex::new(None));
+            let (binary, installer) = adapter
+                .get_language_server_command(
+                    delegate,
+                    None,
+                    lsp::LanguageServerBinaryOptions {
+                        allow_path_lookup: true,
+                        allow_binary_download,
+                        pre_release: false,
+                    },
+                    cached_binary.lock_owned().await,
+                    cx.to_async(),
+                )
+                .await;
+            assert!(
+                node_errors.borrow().is_none(),
+                "lookup must not probe Node or install tools"
+            );
+            if system || cached {
+                let expected = if system {
+                    Path::new(path!("/system/tsgo")).into()
+                } else {
+                    cached_path
+                };
+                assert_eq!(binary.expect("existing tool").path, expected);
+                assert_eq!(
+                    installer.is_some(),
+                    !system && allow_binary_download,
+                    "only servers Zed downloaded are checked for updates, and only when downloads are allowed"
+                );
+                drop(installer);
+            } else {
+                assert!(binary.is_err());
+                assert_eq!(installer.is_some(), allow_binary_download);
+                drop(installer);
+                assert!(node_errors.borrow().is_none());
+            }
+        }
     }
 
     #[test]

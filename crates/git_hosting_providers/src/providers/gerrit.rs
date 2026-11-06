@@ -8,6 +8,8 @@ use git::{
     RemoteUrl,
 };
 
+use crate::remote_matches_base_url;
+
 pub struct Gerrit {
     name: String,
     base_url: Url,
@@ -47,8 +49,7 @@ impl GitHostingProvider for Gerrit {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, None) {
             return None;
         }
 

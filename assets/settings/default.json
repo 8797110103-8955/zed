@@ -2346,10 +2346,12 @@
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
     "Env": [".env.*"],
   },
-  // Auto detects the project's package manager, preferring pnpm when no marker exists.
-  // Tool installation falls back to
-  // an available system package manager if the preferred one is missing.
-  // Options: auto, npm, pnpm, yarn, bun, vp.
+  // For tasks, auto reads packageManager, then project markers.
+  // For agents and language servers, auto uses an installed manager in
+  // pnpm, vp, bun, npm, yarn order and downloads pnpm when none is installed.
+  // A selected manager that is missing is installed through any installed
+  // manager, or downloaded when none is installed.
+  // Options: auto, pnpm, vp, bun, npm, yarn.
   "package_manager": "auto",
 
   // [FORK] Upstream `node` settings, kept for reference only. This build always uses the

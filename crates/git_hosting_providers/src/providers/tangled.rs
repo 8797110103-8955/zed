@@ -6,6 +6,8 @@ use git::{
 };
 use url::Url;
 
+use crate::remote_matches_base_url;
+
 pub struct Tangled {
     name: String,
     base_url: Url,
@@ -58,8 +60,7 @@ impl GitHostingProvider for Tangled {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("tangled.org")) {
             return None;
         }
 

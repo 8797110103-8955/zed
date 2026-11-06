@@ -94,8 +94,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Command> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let command = extension
                     .call_language_server_command(
@@ -123,8 +122,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_initialization_options(
@@ -150,8 +148,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_workspace_configuration(
@@ -176,8 +173,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 extension
                     .call_language_server_initialization_options_schema(
@@ -201,8 +197,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 extension
                     .call_language_server_workspace_configuration_schema(
@@ -227,8 +222,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_additional_initialization_options(
@@ -255,8 +249,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<Option<String>> {
         self.call_with_language_server_status_source(status_source, move |extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let options = extension
                     .call_language_server_additional_workspace_configuration(
@@ -467,8 +460,7 @@ impl extension::Extension for WasmExtension {
     ) -> Result<DebugAdapterBinary> {
         self.call(|extension, store| {
             async move {
-                store.data_mut().package_manager_project_root =
-                    Some(PathBuf::from(worktree.root_path()).into());
+                store.data_mut().package_manager_worktree = Some(worktree.clone());
                 let resource = store.data_mut().table.push(worktree)?;
                 let dap_binary = extension
                     .call_get_dap_binary(store, dap_name, config, user_installed_path, resource)
@@ -562,7 +554,7 @@ pub struct WasmState {
     pub host: Arc<WasmHost>,
     pub(crate) capability_granter: CapabilityGranter,
     pub(crate) language_server_status_source: Option<gpui::EntityId>,
-    package_manager_project_root: Option<Arc<Path>>,
+    package_manager_worktree: Option<Arc<dyn WorktreeDelegate>>,
 }
 
 type MainThreadCall = Box<dyn Send + for<'a> FnOnce(&'a mut AsyncApp) -> LocalBoxFuture<'a, ()>>;
@@ -697,7 +689,7 @@ impl WasmHost {
                         manifest.clone(),
                     ),
                     language_server_status_source: None,
-                    package_manager_project_root: None,
+                    package_manager_worktree: None,
                 },
             );
             // Store will yield after 1 tick, and get a new deadline of 1 tick after each yield.
@@ -939,7 +931,7 @@ impl WasmExtension {
             .unbounded_send(Box::new(move |extension, store| {
                 async {
                     let result = f(extension, store).await;
-                    store.data_mut().package_manager_project_root = None;
+                    store.data_mut().package_manager_worktree = None;
                     return_tx.send(result).ok();
                 }
                 .boxed()
@@ -961,10 +953,16 @@ impl WasmExtension {
 }
 
 impl WasmState {
-    fn node_runtime(&self) -> PackageManagerRuntime {
-        match &self.package_manager_project_root {
-            Some(root) => self.host.node_runtime.for_project(root.clone()),
-            None => self.host.node_runtime.clone(),
+    fn node_runtime(&self) -> impl Future<Output = PackageManagerRuntime> + Send + use<> {
+        let runtime = self.host.node_runtime.clone();
+        let worktree = self.package_manager_worktree.clone();
+        async move {
+            match worktree {
+                Some(worktree) => runtime
+                    .for_project(PathBuf::from(worktree.root_path()))
+                    .with_environment(worktree.shell_env().await.into_iter().collect()),
+                None => runtime,
+            }
         }
     }
 

@@ -2092,9 +2092,9 @@ impl WorkspaceDb {
     // Entries are deduplicated by git worktree identity, but preserve the original
     // serialized paths for reopening.
     pub async fn recent_project_workspaces(&self, fs: &dyn Fs) -> Result<Vec<RecentWorkspace>> {
-        Ok(dedupe_recent_workspaces(
-            self.recent_project_workspaces_ungrouped(fs).await?,
-        ))
+        let workspaces =
+            dedupe_recent_workspaces(self.recent_project_workspaces_ungrouped(fs).await?);
+        Ok(dedupe_code_workspace_folders(workspaces, fs).await)
     }
 
     pub async fn delete_recent_workspace_group(
@@ -2732,6 +2732,69 @@ async fn resolve_local_workspace_identity(fs: &dyn Fs, paths: &PathList) -> Opti
     Some(PathList::new(&resolved_path_refs))
 }
 
+async fn dedupe_code_workspace_folders(
+    workspaces: Vec<RecentWorkspace>,
+    fs: &dyn Fs,
+) -> Vec<RecentWorkspace> {
+    let mut workspace_folder_sets = HashSet::default();
+    for workspace in &workspaces {
+        if workspace.location != SerializedWorkspaceLocation::Local
+            || !workspace
+                .paths
+                .paths()
+                .iter()
+                .any(|path| crate::code_workspace::is_workspace_file(path))
+        {
+            continue;
+        }
+
+        let mut folders = Vec::new();
+        let mut valid = true;
+        for path in workspace.paths.paths() {
+            if crate::code_workspace::is_workspace_file(path) {
+                match crate::code_workspace::read_workspace(path.clone(), fs).await {
+                    Ok(configuration) => {
+                        for folder in configuration.folders {
+                            if fs.is_dir(&folder.path).await {
+                                folders.push(folder.path);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("Could not resolve recent workspace folders: {error:#}");
+                        valid = false;
+                        break;
+                    }
+                }
+            } else {
+                folders.push(path.clone());
+            }
+        }
+        if valid && !folders.is_empty() {
+            folders.sort_unstable();
+            folders.dedup();
+            let folders = PathList::new(&folders);
+            let identity = resolve_local_workspace_identity(fs, &folders)
+                .await
+                .unwrap_or(folders);
+            workspace_folder_sets.insert(identity.paths().to_vec());
+        }
+    }
+
+    workspaces
+        .into_iter()
+        .filter(|workspace| {
+            workspace.location != SerializedWorkspaceLocation::Local
+                || workspace
+                    .paths
+                    .paths()
+                    .iter()
+                    .any(|path| crate::code_workspace::is_workspace_file(path))
+                || !workspace_folder_sets.contains(workspace.identity_paths.paths())
+        })
+        .collect()
+}
+
 fn dedupe_recent_workspaces(
     workspaces: impl IntoIterator<Item = RecentWorkspace>,
 ) -> Vec<RecentWorkspace> {
@@ -2816,6 +2879,7 @@ mod tests {
     use remote::SshConnectionOptions;
     use serde_json::json;
     use std::{thread, time::Duration};
+    use util::path;
 
     /// Creates a unique directory in a FakeFs, returning the path.
     /// Uses a UUID suffix to avoid collisions with other tests sharing the global DB.
@@ -5876,6 +5940,140 @@ mod tests {
             recents[0].identity_paths.paths(),
             &[PathBuf::from("/the-project")]
         );
+    }
+
+    #[gpui::test]
+    async fn test_recent_project_workspaces_dedupe_code_workspace_folders(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        let db = WorkspaceDb::open_test_db(
+            "test_recent_project_workspaces_dedupe_code_workspace_folders",
+        )
+        .await;
+        let manifest = json!({"folders": [{"path": "a"}, {"path": "b"}]}).to_string();
+        fs.insert_tree(
+            path!("/projects"),
+            json!({
+                "demo.code-workspace": manifest,
+                "other.code-workspace": manifest,
+                "a": {}, "b": {}, "c": {}
+            }),
+        )
+        .await;
+        for (id, paths) in [
+            (
+                1,
+                vec![
+                    Path::new(path!("/projects/a")),
+                    Path::new(path!("/projects/b")),
+                ],
+            ),
+            (2, vec![Path::new(path!("/projects/demo.code-workspace"))]),
+            (3, vec![Path::new(path!("/projects/other.code-workspace"))]),
+            (4, vec![Path::new(path!("/projects/a"))]),
+            (
+                5,
+                vec![
+                    Path::new(path!("/projects/a")),
+                    Path::new(path!("/projects/b")),
+                    Path::new(path!("/projects/c")),
+                ],
+            ),
+        ] {
+            db.save_workspace(workspace_with(id, &paths, empty_pane_group(), None))
+                .await;
+        }
+        db.save_workspace(remote_workspace_with(
+            6,
+            "example.com",
+            &[
+                Path::new(path!("/projects/a")),
+                Path::new(path!("/projects/b")),
+            ],
+        ))
+        .await;
+
+        let recents = db.recent_project_workspaces(fs.as_ref()).await.unwrap();
+        assert_eq!(recents.len(), 5);
+        assert!(
+            !recents
+                .iter()
+                .any(|workspace| workspace.workspace_id == WorkspaceId(1))
+        );
+        for id in 2..=6 {
+            assert!(
+                recents
+                    .iter()
+                    .any(|workspace| workspace.workspace_id == WorkspaceId(id))
+            );
+        }
+        let workspace = recents
+            .iter()
+            .find(|workspace| workspace.workspace_id == WorkspaceId(2))
+            .unwrap();
+        assert_eq!(
+            workspace.paths,
+            PathList::new(&[path!("/projects/demo.code-workspace")])
+        );
+        assert_eq!(workspace.identity_paths, workspace.paths);
+    }
+
+    #[gpui::test]
+    async fn test_recent_code_workspace_folders_include_additional_roots(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        let db = WorkspaceDb::open_test_db(
+            "test_recent_code_workspace_folders_include_additional_roots",
+        )
+        .await;
+        fs.insert_tree(
+            path!("/projects"),
+            json!({
+                "demo.code-workspace": json!({"folders": [{"path": "a"}]}).to_string(),
+                "broken.code-workspace": "invalid json",
+                "a": {}, "b": {}, "c": {}
+            }),
+        )
+        .await;
+        for (id, paths) in [
+            (
+                1,
+                vec![
+                    Path::new(path!("/projects/a")),
+                    Path::new(path!("/projects/b")),
+                ],
+            ),
+            (
+                2,
+                vec![
+                    Path::new(path!("/projects/demo.code-workspace")),
+                    Path::new(path!("/projects/b")),
+                ],
+            ),
+            (3, vec![Path::new(path!("/projects/a"))]),
+            (4, vec![Path::new(path!("/projects/broken.code-workspace"))]),
+            (5, vec![Path::new(path!("/projects/c"))]),
+        ] {
+            db.save_workspace(workspace_with(id, &paths, empty_pane_group(), None))
+                .await;
+        }
+
+        let recents = db.recent_project_workspaces(fs.as_ref()).await.unwrap();
+        assert_eq!(recents.len(), 4);
+        assert!(
+            !recents
+                .iter()
+                .any(|workspace| workspace.workspace_id == WorkspaceId(1))
+        );
+        for id in 2..=5 {
+            assert!(
+                recents
+                    .iter()
+                    .any(|workspace| workspace.workspace_id == WorkspaceId(id))
+            );
+        }
     }
 
     #[gpui::test]

@@ -1428,11 +1428,11 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
             let executable =
                 node_runtime::read_package_executable(node_modules_dir, package_name).await?;
 
-            let node_binary = node_runtime.binary_path().await?;
-            env.extend(node_runtime::package_manager_command_env(&node_binary));
+            env.extend(node_runtime::node_command_env());
             env.extend(distribution_env);
             env.extend(extra_env);
             env.extend(settings_env);
+            let node_binary = node_runtime.binary_path().await?;
 
             let mut command_args = vec![executable.to_string_lossy().into_owned()];
             command_args.extend(args);

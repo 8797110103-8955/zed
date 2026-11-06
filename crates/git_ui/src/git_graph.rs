@@ -7,14 +7,16 @@ use crate::{
     commit_tooltip::CommitAvatar,
     commit_view::CommitView,
     git_status_icon,
+    remote_web_link::{RemoteWebLink, remote_web_links},
 };
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
 use file_icons::FileIcons;
 use git::{
-    BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
-    parse_git_remote_url,
-    repository::{InitialGraphCommitData, LogOrder, LogSource, RepoPath, SearchCommitArgs},
+    GitHostingProviderRegistry, GitRemote, Oid, parse_git_remote_url,
+    repository::{
+        InitialGraphCommitData, LogOrder, LogSource, RepoPath, ResetMode, SearchCommitArgs,
+    },
     status::{FileStatus, StatusCode, TrackedStatus},
 };
 use gpui::{
@@ -55,15 +57,17 @@ use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
     Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, ContextMenuEntry, DiffStat,
     Disclosure, Divider, HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem,
-    ListItemSpacing, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
-    TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
-    prelude::*, redistribute_hidden_fractions, redistribute_hidden_widths,
+    ListItemSpacing, Modal, ModalFooter, ModalHeader, RedistributableColumnsState,
+    ScrollableHandle, Section, Table, TableInteractionState, TableRenderContext,
+    TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns, prelude::*,
+    redistribute_hidden_fractions, redistribute_hidden_widths,
     render_redistributable_columns_resize_handles, render_table_header, table_row::TableRow,
 };
 use util::{ResultExt, debug_panic};
 use workspace::{
     ItemNavHistory, ModalView, Workspace,
     item::{Item, ItemEvent, TabTooltipContent},
+    notifications::DetachAndPromptErr,
 };
 
 const COMMIT_CIRCLE_RADIUS: Pixels = px(4.5);
@@ -135,6 +139,120 @@ impl Focusable for CommitTagPicker {
 impl Render for CommitTagPicker {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().child(self.picker.clone())
+    }
+}
+
+#[derive(Clone)]
+struct ResetCommitLine {
+    short_sha: SharedString,
+    subject: SharedString,
+}
+
+impl ResetCommitLine {
+    fn new(sha: &str, subject: &str) -> Self {
+        Self {
+            short_sha: sha.chars().take(7).collect::<String>().into(),
+            subject: subject
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+                .into(),
+        }
+    }
+
+    fn render(&self, cx: &App) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .child(
+                Label::new(self.short_sha.clone())
+                    .size(LabelSize::Small)
+                    .buffer_font(cx),
+            )
+            .child(Label::new("-").size(LabelSize::Small).color(Color::Muted))
+            .child(
+                div().flex_1().min_w_0().child(
+                    Label::new(self.subject.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line()
+                        .truncate(),
+                ),
+            )
+    }
+}
+
+struct ResetSoftConfirmation {
+    focus_handle: FocusHandle,
+    graph: WeakEntity<GitGraph>,
+    commit: Oid,
+    title: SharedString,
+    /// Only shown when more than one commit sits between HEAD and the target.
+    head: Option<ResetCommitLine>,
+    target: ResetCommitLine,
+}
+
+impl ResetSoftConfirmation {
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let commit = self.commit;
+        if let Ok(reset) = self
+            .graph
+            .update(cx, |graph, cx| graph.reset_to_commit(commit, cx))
+        {
+            reset.detach_and_prompt_err("Failed to reset to commit", window, cx, |_, _, _| None);
+        }
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for ResetSoftConfirmation {}
+impl ModalView for ResetSoftConfirmation {}
+
+impl Focusable for ResetSoftConfirmation {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for ResetSoftConfirmation {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let commit_lines = v_flex()
+            .w_full()
+            .gap_1()
+            .when_some(self.head.as_ref(), |this, head| {
+                this.child(head.render(cx)).child(
+                    Icon::new(IconName::ExpandVertical)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+            })
+            .child(self.target.render(cx));
+
+        v_flex()
+            .key_context("ResetSoftConfirmation")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.confirm(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(DismissEvent)))
+            .elevation_3(cx)
+            .w(rems(34.))
+            .child(
+                Modal::new("reset-soft-confirmation", None)
+                    .header(ModalHeader::new().headline(self.title.clone()))
+                    .section(Section::new().child(commit_lines))
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            Button::new("reset-soft-confirm", "Reset Soft")
+                                .style(ButtonStyle::Outlined)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm(window, cx);
+                                })),
+                        ),
+                    ),
+            )
     }
 }
 
@@ -1812,6 +1930,7 @@ impl GitGraph {
                 self.pending_select_sha = None;
                 self.invalidate_state(cx);
             }
+            RepositoryEvent::RemotesChanged => cx.notify(),
             RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
                 // Only invalidate if we scanned atleast once,
                 // meaning we are not inside the initial repo loading state
@@ -1847,6 +1966,134 @@ impl GitGraph {
     fn get_repository(&self, cx: &App) -> Option<Entity<Repository>> {
         let git_store = self.git_store.read(cx);
         git_store.repositories().get(&self.repo_id).cloned()
+    }
+
+    fn can_reset(&self, cx: &App) -> bool {
+        self.workspace
+            .read_with(cx, |workspace, cx| {
+                !workspace.project().read(cx).is_read_only(cx)
+            })
+            .unwrap_or(false)
+    }
+
+    fn confirm_reset_to_commit(
+        &mut self,
+        commit: Oid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repository) = self.get_repository(cx) else {
+            return;
+        };
+        let target_subject = match repository.update(cx, |repository, cx| {
+            repository.fetch_commit_data(commit, false, cx).clone()
+        }) {
+            CommitDataState::Loaded(data) => data.subject.clone(),
+            CommitDataState::Loading(_) => SharedString::default(),
+        };
+        let target = ResetCommitLine::new(&commit.to_string(), &target_subject);
+
+        let repository = repository.read(cx);
+        let target_name = repository
+            .branch
+            .as_ref()
+            .map_or_else(|| "HEAD".to_string(), |branch| branch.name().to_string());
+        let title: SharedString = format!("Reset {target_name} to {}?", target.short_sha).into();
+
+        let head = repository.head_commit.as_ref().and_then(|head_commit| {
+            let head_oid = head_commit.sha.parse::<Oid>().ok()?;
+            let is_parent_of_head = self
+                .graph_data
+                .commits
+                .iter()
+                .find(|entry| entry.data.sha == head_oid)
+                .is_some_and(|entry| entry.data.parents.contains(&commit));
+            (head_oid != commit && !is_parent_of_head)
+                .then(|| ResetCommitLine::new(&head_commit.sha, &head_commit.message))
+        });
+
+        let graph = cx.entity().downgrade();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |_window, cx| ResetSoftConfirmation {
+                    focus_handle: cx.focus_handle(),
+                    graph,
+                    commit,
+                    title,
+                    head,
+                    target,
+                });
+            })
+            .log_err();
+    }
+
+    fn render_web_link(index: usize, link: RemoteWebLink) -> impl IntoElement {
+        let RemoteWebLink {
+            remote_name,
+            group,
+            provider_name,
+            icon,
+            url,
+            secure_url,
+        } = link;
+        let tooltip_title: SharedString = format!("Open on {provider_name} ({remote_name})").into();
+
+        // The main button fills the row; the "'s" link sits on top of its end.
+        v_flex()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .child(
+                Button::new(("view-on-remote", index), format!("View on {group}"))
+                    .start_icon(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                    .label_size(LabelSize::Small)
+                    .truncate(true)
+                    .color(Color::Muted)
+                    .tooltip({
+                        let url = SharedString::from(url.clone());
+                        move |_window, cx: &mut App| {
+                            Tooltip::with_meta(tooltip_title.clone(), None, url.clone(), cx)
+                        }
+                    })
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+            .when_some(secure_url, |this, secure_url| {
+                this.child(
+                    h_flex().absolute().top_0().right_0().h_full().child(
+                        Button::new(("view-on-remote-secure", index), "’s")
+                            .label_size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .tooltip({
+                                let secure_url = SharedString::from(secure_url.clone());
+                                move |_window, cx: &mut App| {
+                                    Tooltip::with_meta(
+                                        "Open with HTTPS",
+                                        None,
+                                        secure_url.clone(),
+                                        cx,
+                                    )
+                                }
+                            })
+                            .on_click(move |_, _, cx| cx.open_url(&secure_url)),
+                    ),
+                )
+            })
+    }
+
+    fn reset_to_commit(&mut self, commit: Oid, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
+        if !self.can_reset(cx) {
+            return Task::ready(Err(anyhow::anyhow!("Project is read-only")));
+        }
+        let Some(repository) = self.get_repository(cx) else {
+            return Task::ready(Err(anyhow::anyhow!("Repository is no longer available")));
+        };
+        let reset = repository.update(cx, |repository, cx| {
+            repository.reset(commit.to_string(), ResetMode::Soft, cx)
+        });
+        cx.spawn(async move |_, _| {
+            reset.await??;
+            Ok(())
+        })
     }
 
     /// Checks whether a ref name from git's `%D` decoration
@@ -3056,6 +3303,20 @@ impl GitGraph {
             })
         });
 
+        let is_head_commit = repository
+            .read(cx)
+            .head_commit
+            .as_ref()
+            .is_some_and(|head_commit| head_commit.sha == full_sha);
+
+        let web_links = repository.update(cx, |repo, cx| {
+            remote_web_links(
+                &repo.remote_urls,
+                full_sha.as_ref(),
+                GitHostingProviderRegistry::default_global(cx),
+            )
+        });
+
         let avatar = {
             let author_email_for_avatar = if author_email.is_empty() {
                 None
@@ -3338,47 +3599,31 @@ impl GitGraph {
                                             .detach();
                                         })
                                 })
-                                .when_some(remote.clone(), |this, remote| {
-                                    let provider_name = remote.host.name();
-                                    let icon =
-                                        ui::git_hosting_provider_icon(provider_name.as_str());
-                                    let parsed_remote = ParsedGitRemote {
-                                        owner: remote.owner.as_ref().into(),
-                                        repo: remote.repo.as_ref().into(),
-                                    };
-                                    let params = BuildCommitPermalinkParams {
-                                        sha: full_sha.as_ref(),
-                                    };
-                                    let url = remote
-                                        .host
-                                        .build_commit_permalink(&parsed_remote, params)
-                                        .to_string();
-
-                                    this.child(
-                                        Button::new(
-                                            "view-on-provider",
-                                            format!("View on {}", provider_name),
-                                        )
-                                        .tooltip({
-                                            move |_window, cx: &mut App| {
-                                                Tooltip::simple("Open In Browser", cx)
-                                            }
-                                        })
+                                .children(web_links.into_iter().enumerate().map(
+                                    |(index, link)| Self::render_web_link(index, link),
+                                ))
+                                .child(
+                                    Button::new("reset-soft", "Reset Soft")
                                         .start_icon(
-                                            Icon::new(icon)
+                                            Icon::new(IconName::ForwardArrow)
                                                 .size(IconSize::Small)
                                                 .color(Color::Muted),
                                         )
                                         .label_size(LabelSize::Small)
-                                        .truncate(true)
                                         .color(Color::Muted)
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                cx.open_url(&url);
-                                            },
-                                        ),
-                                    )
-                                }),
+                                        .disabled(!self.can_reset(cx) || is_head_commit)
+                                        .tooltip(Tooltip::text(if is_head_commit {
+                                            "HEAD is already at this commit"
+                                        } else {
+                                            "Move HEAD to this commit, keeping staged and working changes"
+                                        }))
+                                        .on_click({
+                                            let commit = commit_entry.data.sha;
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.confirm_reset_to_commit(commit, window, cx);
+                                            })
+                                        }),
+                                ),
                         )
                     }),
             )
@@ -5398,6 +5643,84 @@ mod tests {
             language_model::init(cx);
             crate::init(cx);
         });
+    }
+
+    #[gpui::test]
+    async fn test_soft_reset_preserves_staged_and_working_changes(cx: &mut TestAppContext) {
+        async {
+            use fs::Fs as _;
+            use git::repository::{AskPassDelegate, CommitOptions};
+
+            init_test(cx);
+            let fs = FakeFs::new(cx.executor());
+            let root = Path::new(util::path!("/project"));
+            let dot_git = root.join(".git");
+            fs.insert_tree(root, json!({".git": {}, "file.txt": "working"}))
+                .await;
+            let target = Oid::from_bytes(&[1; 20])?;
+            fs.set_head_for_repo(&dot_git, &[("file.txt", "base".into())], target.to_string());
+            fs.set_index_for_repo(&dot_git, &[("file.txt", "committed".into())]);
+            let project = Project::test(fs.clone(), [root], cx).await;
+            cx.run_until_parked();
+            let repository = project
+                .read_with(cx, |project, cx| project.active_repository(cx))
+                .context("missing repository")?;
+            let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
+            repository
+                .update(cx, |repository, cx| {
+                    repository.commit("second".into(), None, CommitOptions::default(), askpass, cx)
+                })
+                .await??;
+            fs.set_index_for_repo(&dot_git, &[("file.txt", "staged".into())]);
+
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace =
+                multi_workspace.read_with(&*cx, |multi, _| multi.workspace().downgrade());
+            let graph = cx.new_window_entity(|window, cx| {
+                GitGraph::new(
+                    repository.read(cx).id,
+                    project.read(cx).git_store().clone(),
+                    workspace,
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            graph
+                .update(cx, |graph, cx| graph.reset_to_commit(target, cx))
+                .await?;
+            cx.run_until_parked();
+            fs.with_git_state(&dot_git, false, |state| {
+                assert_eq!(state.refs.get("HEAD"), Some(&target.to_string()));
+                assert_eq!(
+                    state
+                        .head_contents
+                        .get(&RepoPath::new("file.txt").expect("valid path")),
+                    Some(&b"base".to_vec())
+                );
+                assert_eq!(
+                    state
+                        .index_contents
+                        .get(&RepoPath::new("file.txt").expect("valid path")),
+                    Some(&b"staged".to_vec())
+                );
+            })?;
+            assert_eq!(fs.load(&root.join("file.txt")).await?, "working");
+            assert!(
+                graph
+                    .update(cx, |graph, cx| graph.reset_to_commit(
+                        Oid::from_bytes(&[2; 20]).expect("valid SHA"),
+                        cx
+                    ))
+                    .await
+                    .is_err()
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await
+        .expect("graph reset must preserve staged and working changes");
     }
 
     fn build_oid_to_row_map(graph: &GraphData) -> HashMap<Oid, usize> {

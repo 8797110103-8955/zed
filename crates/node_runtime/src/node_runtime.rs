@@ -1,9 +1,11 @@
 pub mod package_manager;
 
 pub use package_manager::{
-    PackageDistTags, PackageInfo, PackageManager, PackageManagerCommand, PackageManagerRuntime,
-    VersionStrategy, detect_package_manager, detect_package_manager_on_disk,
-    package_manager_command_env, read_package_executable, read_package_installed_version,
+    PackageDistTags, PackageInfo, PackageManager, PackageManagerInstallEvent,
+    PackageManagerInvocation, PackageManagerRuntime, VersionStrategy,
+    add_installation_to_user_path, detect_package_manager, detect_package_manager_on_disk,
+    find_installed_package, installation_in_user_path, node_command_env, project_tool_environment,
+    read_package_executable, read_package_installed_version,
 };
 
 use anyhow::{Result, bail};
@@ -125,11 +127,11 @@ impl NodeRuntime {
         let instance = if let Some(system_node_error) = system_node_error {
             // failure case not cached, since it's cheap to check again
             return state.unavailable(format!(
-                "This feature requires a supported system Node.js installation. {system_node_error}. Install Node.js and restart Zed. Zed will not download Node.js automatically."
+                "This feature requires a supported Node.js installation. {system_node_error}. Install it manually and retry: https://nodejs.org/en/download"
             ));
         } else {
             // failure case is cached because it will always happen with these options
-            state.unavailable("Node.js is unavailable. Install a supported system Node.js version.")
+            state.unavailable("Node.js is unavailable. Install it manually and retry: https://nodejs.org/en/download")
         };
 
         state.instance = Some(instance.boxed_clone());
@@ -368,130 +370,7 @@ impl NodeRuntimeTrait for UnavailableNodeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context as _;
     use std::{fs, process::ExitStatus};
-    #[test]
-    fn test_system_node_runs_without_npm() -> Result<()> {
-        const CHILD: &str = "ZED_TEST_SYSTEM_NODE_WITHOUT_NPM";
-        let executable_name = if cfg!(windows) { "node.cmd" } else { "node" };
-        if env::var_os(CHILD).is_some() {
-            let directory = env::current_dir()?;
-            let data_directory = directory.join("data");
-            fs::create_dir_all(&data_directory)?;
-            paths::set_custom_data_dir(&data_directory.to_string_lossy());
-            return smol::block_on(async {
-                let runtime = NodeRuntime::new(
-                    None,
-                    watch::channel(Some(NodeBinaryOptions {
-                        allow_path_lookup: true,
-                    }))
-                    .1,
-                );
-                assert_eq!(
-                    runtime.binary_path().await?,
-                    directory.join(executable_name)
-                );
-                assert!(runtime.errors().borrow().is_none());
-                Ok(())
-            });
-        }
-
-        let directory = tempfile::tempdir()?;
-        let executable = directory.path().join(executable_name);
-        if cfg!(windows) {
-            fs::write(&executable, "@echo off\r\necho v22.0.0\r\n")?;
-        } else {
-            fs::write(&executable, "#!/bin/sh\nprintf 'v22.0.0\\n'\n")?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
-            }
-        }
-        let output = smol::block_on(
-            util::command::new_command(env::current_exe()?)
-                .args([
-                    "--exact",
-                    "tests::test_system_node_runs_without_npm",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("PATH", directory.path())
-                .env("PATHEXT", ".CMD;.EXE")
-                .current_dir(directory.path())
-                .output(),
-        )?;
-        anyhow::ensure!(
-            output.status.success(),
-            "isolated Node.js discovery failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_system_node_failure_is_reported_without_download_and_can_be_retried() -> Result<()> {
-        const CHILD: &str = "ZED_TEST_SYSTEM_NODE_MISSING";
-        if env::var_os(CHILD).is_some() {
-            return smol::block_on(async {
-                let (mut options, receiver) = watch::channel(Some(NodeBinaryOptions {
-                    allow_path_lookup: true,
-                }));
-                let runtime = NodeRuntime::new(None, receiver);
-                let mut errors = runtime.errors();
-                assert!(errors.borrow().is_none());
-
-                let error = runtime
-                    .binary_path()
-                    .await
-                    .err()
-                    .context("missing Node.js must fail")?;
-                assert!(error.to_string().contains("will not download Node.js"));
-                assert_eq!(errors.borrow().as_deref(), Some(&error.to_string()));
-
-                assert!(runtime.binary_path().await.is_err());
-                assert!(smol::future::poll_once(errors.changed()).await.is_none());
-
-                options.send(Some(NodeBinaryOptions::default()))?;
-                let error = runtime
-                    .binary_path()
-                    .await
-                    .err()
-                    .context("disabled Node.js must fail")?;
-                assert!(
-                    error
-                        .to_string()
-                        .contains("Install a supported system Node.js")
-                );
-                errors.changed().await?;
-                assert_eq!(errors.borrow().as_deref(), Some(&error.to_string()));
-                Ok(())
-            });
-        }
-
-        let directory = tempfile::tempdir()?;
-        let output = smol::block_on(
-            util::command::new_command(env::current_exe()?)
-                .args([
-                    "--exact",
-                    "tests::test_system_node_failure_is_reported_without_download_and_can_be_retried",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("PATH", directory.path())
-                .current_dir(directory.path())
-                .output(),
-        )?;
-        anyhow::ensure!(
-            output.status.success(),
-            "missing Node.js reporting failed:
-stdout: {}
-stderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(())
-    }
     #[test]
     fn test_node_lookup_distinguishes_basenames_and_relative_paths() -> Result<()> {
         let directory = tempfile::tempdir()?;

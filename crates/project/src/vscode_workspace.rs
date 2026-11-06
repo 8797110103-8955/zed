@@ -149,21 +149,6 @@ pub(crate) fn convert_settings(path: &Path, value: Value) -> Result<Value> {
     )?)
 }
 
-pub(crate) fn merge_settings(base: &mut Value, overrides: Value) {
-    if let (Value::Object(base), Value::Object(overrides)) = (&mut *base, &overrides) {
-        for (key, value) in overrides {
-            if !value.is_null() {
-                merge_settings(
-                    base.entry(key.clone()).or_insert(Value::Null),
-                    value.clone(),
-                );
-            }
-        }
-    } else if !overrides.is_null() {
-        *base = overrides;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,9 +235,9 @@ mod tests {
     fn test_code_workspace_settings_merge_preserves_explicit_overrides() {
         let mut settings =
             json!({"tab_size": 2, "languages": {"Rust": {"tab_size": 4, "hard_tabs": true}}});
-        merge_settings(
-            &mut settings,
+        util::merge_non_null_json_value_into(
             json!({"tab_size": null, "languages": {"Rust": {"hard_tabs": false}}}),
+            &mut settings,
         );
         assert_eq!(
             settings,

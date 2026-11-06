@@ -781,6 +781,7 @@ impl LspInstaller for PyrightLspAdapter {
     ) -> Result<Self::BinaryVersion> {
         self.node
             .for_project(delegate.worktree_root_path())
+            .with_environment(delegate.shell_env().await.into_iter().collect())
             .package_manager_latest_version(Self::SERVER_NAME.as_ref())
             .await
     }
@@ -826,6 +827,7 @@ impl LspInstaller for PyrightLspAdapter {
         let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
+            let node = node.with_environment(delegate.shell_env().await.into_iter().collect());
             let server_path = container_dir.join(Self::SERVER_PATH);
             node.package_manager_install_latest_packages(
                 &container_dir,
@@ -849,7 +851,7 @@ impl LspInstaller for PyrightLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Option<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
         let version = version.clone();
         let container_dir = container_dir.clone();
 
@@ -2228,6 +2230,7 @@ impl LspInstaller for BasedPyrightLspAdapter {
     ) -> Result<Self::BinaryVersion> {
         self.node
             .for_project(delegate.worktree_root_path())
+            .with_environment(delegate.shell_env().await.into_iter().collect())
             .package_manager_latest_version(Self::SERVER_NAME.as_ref())
             .await
     }
@@ -2274,6 +2277,7 @@ impl LspInstaller for BasedPyrightLspAdapter {
         let node = self.node.for_project(delegate.worktree_root_path());
 
         async move {
+            let node = node.with_environment(delegate.shell_env().await.into_iter().collect());
             let server_path = container_dir.join(Self::SERVER_PATH);
             node.package_manager_install_latest_packages(
                 &container_dir,
@@ -2297,7 +2301,7 @@ impl LspInstaller for BasedPyrightLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Option<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
-        let node = self.node.clone();
+        let node = self.node.for_project(delegate.worktree_root_path());
         let version = version.clone();
         let container_dir = container_dir.clone();
 

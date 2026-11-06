@@ -16,7 +16,9 @@ use git::{
     PullRequest, RemoteUrl,
 };
 
-use crate::get_host_from_git_remote_url;
+use crate::{
+    get_host_from_git_remote_url, get_web_base_url_from_git_remote_url, remote_matches_base_url,
+};
 
 fn pull_request_number_regex() -> &'static Regex {
     static PULL_REQUEST_NUMBER_REGEX: LazyLock<Regex> =
@@ -117,7 +119,7 @@ impl Github {
 
         Ok(Self::new(
             "GitHub Self-Hosted",
-            Url::parse(&format!("https://{}", host))?,
+            get_web_base_url_from_git_remote_url(remote_url)?,
         ))
     }
 
@@ -192,8 +194,7 @@ impl GitHostingProvider for Github {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("github.com")) {
             return None;
         }
 

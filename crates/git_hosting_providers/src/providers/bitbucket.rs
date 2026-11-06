@@ -17,7 +17,9 @@ use git::{
 };
 use urlencoding::encode;
 
-use crate::get_host_from_git_remote_url;
+use crate::{
+    get_host_from_git_remote_url, get_web_base_url_from_git_remote_url, remote_matches_base_url,
+};
 
 fn pull_request_regex() -> &'static Regex {
     static PULL_REQUEST_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -95,7 +97,7 @@ impl Bitbucket {
 
         Ok(Self::new(
             "BitBucket Self-Hosted",
-            Url::parse(&format!("https://{}", host))?,
+            get_web_base_url_from_git_remote_url(remote_url)?,
         ))
     }
 
@@ -117,14 +119,16 @@ impl Bitbucket {
         };
         let is_self_hosted = self.is_self_hosted();
         let url = if is_self_hosted {
-            format!(
-                "https://{host}/rest/api/latest/projects/{repo_owner}/repos/{repo}/commits/{commit}?avatarSize=128"
-            )
+            self.base_url.join(&format!(
+                "rest/api/latest/projects/{repo_owner}/repos/{repo}/commits/{commit}?avatarSize=128"
+            ))?
         } else {
-            format!("https://api.{host}/2.0/repositories/{repo_owner}/{repo}/commit/{commit}")
+            Url::parse(&format!(
+                "https://api.{host}/2.0/repositories/{repo_owner}/{repo}/commit/{commit}"
+            ))?
         };
 
-        let request = Request::get(&url)
+        let request = Request::get(url.as_str())
             .header("Content-Type", "application/json")
             .follow_redirects(http_client::RedirectPolicy::FollowAll);
 
@@ -188,8 +192,7 @@ impl GitHostingProvider for Bitbucket {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
-        if host != self.base_url.host_str()? {
+        if !remote_matches_base_url(&url, &self.base_url, Some("bitbucket.org")) {
             return None;
         }
 

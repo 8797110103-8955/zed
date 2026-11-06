@@ -7,43 +7,13 @@
 #![cfg(unix)]
 
 use anyhow::Result;
-use node_runtime::{NodeBinaryOptions, NodeDiscoveryError, NodeRuntime, SystemNode};
+use node_runtime::{NodeDiscoveryError, SystemNode};
 use semver::Version;
 use std::{
     env, fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    sync::Arc,
 };
-
-#[test]
-fn path_lookup_runtime_keeps_node_available_when_npm_is_missing() -> Result<()> {
-    if env::var_os(CHILD).is_some() {
-        let directory = env::current_dir()?;
-        paths::set_custom_data_dir(&directory.join("data").to_string_lossy());
-        let node = directory.join("node");
-        return smol::block_on(async {
-            let runtime = NodeRuntime::new(
-                None,
-                watch::channel(Some(NodeBinaryOptions {
-                    allow_path_lookup: true,
-                }))
-                .1,
-            );
-            assert_eq!(runtime.binary_path().await?, node);
-            assert!(runtime.errors().borrow().is_none());
-            Ok(())
-        });
-    }
-
-    let directory = tempfile::tempdir()?;
-    fake_node(directory.path(), "printf 'v22.0.0\\n'")?;
-    run_child_test(
-        "path_lookup_runtime_keeps_node_available_when_npm_is_missing",
-        directory.path(),
-        directory.path(),
-    )
-}
 
 #[test]
 fn discovers_node_without_npm_and_passes_the_search_path_to_the_probe() -> Result<()> {

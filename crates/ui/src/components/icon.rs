@@ -116,11 +116,14 @@ impl From<IconName> for Icon {
 }
 
 pub fn git_hosting_provider_icon(provider_name: &str) -> IconName {
+    let provider_name = provider_name
+        .strip_suffix(" Self-Hosted")
+        .unwrap_or(provider_name);
     match provider_name {
-        "Bitbucket" => IconName::Bitbucket,
-        "Chromium" => IconName::Gerrit,
+        "Bitbucket" | "BitBucket" => IconName::Bitbucket,
+        "Chromium" | "Gerrit" | "Gitiles" => IconName::Gerrit,
         "Codeberg" => IconName::Codeberg,
-        "Forgejo Self-Hosted" => IconName::Forgejo,
+        "Forgejo" => IconName::Forgejo,
         "GitHub" => IconName::Github,
         "GitLab" => IconName::Gitlab,
         "Gitea" => IconName::Gitea,

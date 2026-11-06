@@ -278,8 +278,8 @@ pub struct SettingsContent {
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
     /// Package manager used for project tasks and installing extension tools.
-    /// Auto detects project declarations and lockfiles. Tool installation falls back
-    /// to an available system package manager when the preferred one is missing.
+    /// Auto reads packageManager, then project markers, then available managers. Missing managers are installed
+    /// globally through an available manager, or an installer selected at runtime.
     pub package_manager: Option<crate::PackageManager>,
 
     pub proxy: Option<String>,

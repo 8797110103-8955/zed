@@ -11,20 +11,6 @@ See the platform-specific instructions for building Zed from source:
 - [Linux](./development/linux.md)
 - [Windows](./development/windows.md)
 
-## Local builds {#local-build-defaults}
-
-From the repository root, build with `release-fast`:
-
-```sh
-cargo build --profile release-fast
-```
-
-Or build and install to `target/bin/`:
-
-```sh
-cargo install --path crates/zed --profile release-fast --root target --locked --force
-```
-
 ## Bird's-eye view of Zed {#birds-eye-view-of-zed}
 
 Keep the [Zed glossary](./development/glossary.md) handy when starting out. It explains structures and terms you'll see throughout the codebase.

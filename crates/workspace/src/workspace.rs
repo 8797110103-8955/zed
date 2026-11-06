@@ -4140,7 +4140,9 @@ impl Workspace {
                         OpenOptions {
                             requesting_window,
                             open_mode,
-                            workspace_matching: if open_mode == OpenMode::NewWindow {
+                            workspace_matching: if workspace_is_empty
+                                || open_mode == OpenMode::NewWindow
+                            {
                                 WorkspaceMatching::None
                             } else {
                                 WorkspaceMatching::default()
@@ -11555,7 +11557,11 @@ pub fn open_paths(
         let abs_paths = expanded_paths;
         let mut reuse_target = if let Some(configuration) = &code_configuration {
             cx.update(|cx| {
-                if open_options.open_mode == OpenMode::NewWindow { return None; }
+                if open_options.open_mode == OpenMode::NewWindow
+                    || open_options.workspace_matching == WorkspaceMatching::None
+                {
+                    return None;
+                }
                 cx.windows().into_iter().filter_map(|window| window.downcast::<MultiWorkspace>())
                     .find_map(|window| {
                         let workspace = window.read(cx).ok()?.workspaces().find(|workspace| {
