@@ -1976,6 +1976,21 @@ impl GitGraph {
             .unwrap_or(false)
     }
 
+    fn uncommit(&self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repository) = self.get_repository(cx) else {
+            return;
+        };
+        self.workspace
+            .update(cx, |workspace, cx| {
+                if let Some(panel) = workspace.panel::<crate::git_panel::GitPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.uncommit_repository(repository, Some(commit), window, cx);
+                    });
+                }
+            })
+            .log_err();
+    }
+
     fn confirm_reset_to_commit(
         &mut self,
         commit: Oid,
@@ -3603,7 +3618,7 @@ impl GitGraph {
                                     |(index, link)| Self::render_web_link(index, link),
                                 ))
                                 .child(
-                                    Button::new("reset-soft", "Reset Soft")
+                                    Button::new("reset-soft", if is_head_commit { "Uncommit" } else { "Reset Soft" })
                                         .start_icon(
                                             Icon::new(IconName::ForwardArrow)
                                                 .size(IconSize::Small)
@@ -3611,16 +3626,20 @@ impl GitGraph {
                                         )
                                         .label_size(LabelSize::Small)
                                         .color(Color::Muted)
-                                        .disabled(!self.can_reset(cx) || is_head_commit)
+                                        .disabled(!self.can_reset(cx))
                                         .tooltip(Tooltip::text(if is_head_commit {
-                                            "HEAD is already at this commit"
+                                            "Undo the latest commit, keeping staged and working changes"
                                         } else {
                                             "Move HEAD to this commit, keeping staged and working changes"
                                         }))
                                         .on_click({
                                             let commit = commit_entry.data.sha;
                                             cx.listener(move |this, _, window, cx| {
-                                                this.confirm_reset_to_commit(commit, window, cx);
+                                                if is_head_commit {
+                                                    this.uncommit(commit, window, cx);
+                                                } else {
+                                                    this.confirm_reset_to_commit(commit, window, cx);
+                                                }
                                             })
                                         }),
                                 ),
@@ -5646,81 +5665,117 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_soft_reset_preserves_staged_and_working_changes(cx: &mut TestAppContext) {
-        async {
-            use fs::Fs as _;
-            use git::repository::{AskPassDelegate, CommitOptions};
+    async fn test_soft_reset_and_uncommit_preserve_staged_and_working_changes(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        for uncommit in [false, true] {
+            assert_reset_preserves_staged_and_working_changes(uncommit, cx)
+                .await
+                .expect("graph reset must preserve staged and working changes");
+        }
+    }
 
-            init_test(cx);
-            let fs = FakeFs::new(cx.executor());
-            let root = Path::new(util::path!("/project"));
-            let dot_git = root.join(".git");
-            fs.insert_tree(root, json!({".git": {}, "file.txt": "working"}))
-                .await;
-            let target = Oid::from_bytes(&[1; 20])?;
-            fs.set_head_for_repo(&dot_git, &[("file.txt", "base".into())], target.to_string());
-            fs.set_index_for_repo(&dot_git, &[("file.txt", "committed".into())]);
-            let project = Project::test(fs.clone(), [root], cx).await;
-            cx.run_until_parked();
-            let repository = project
-                .read_with(cx, |project, cx| project.active_repository(cx))
-                .context("missing repository")?;
-            let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
-            repository
-                .update(cx, |repository, cx| {
-                    repository.commit("second".into(), None, CommitOptions::default(), askpass, cx)
-                })
-                .await??;
-            fs.set_index_for_repo(&dot_git, &[("file.txt", "staged".into())]);
+    async fn assert_reset_preserves_staged_and_working_changes(
+        uncommit: bool,
+        cx: &mut TestAppContext,
+    ) -> Result<()> {
+        use fs::Fs as _;
+        use git::repository::{AskPassDelegate, CommitOptions};
 
-            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
-                workspace::MultiWorkspace::test_new(project.clone(), window, cx)
-            });
-            let workspace =
-                multi_workspace.read_with(&*cx, |multi, _| multi.workspace().downgrade());
-            let graph = cx.new_window_entity(|window, cx| {
-                GitGraph::new(
-                    repository.read(cx).id,
-                    project.read(cx).git_store().clone(),
-                    workspace,
+        let fs = FakeFs::new(cx.executor());
+        let root = Path::new(util::path!("/project"));
+        let dot_git = root.join(".git");
+        fs.insert_tree(root, json!({".git": {}, "file.txt": "working"}))
+            .await;
+        let target = Oid::from_bytes(&[1; 20])?;
+        let head = Oid::from_bytes(&[2; 20])?;
+        fs.set_head_for_repo(&dot_git, &[("file.txt", "base".into())], target.to_string());
+        fs.set_index_for_repo(&dot_git, &[("file.txt", "committed".into())]);
+        let project = Project::test(fs.clone(), [root], cx).await;
+        cx.run_until_parked();
+        let repository = project
+            .read_with(cx, |project, cx| project.active_repository(cx))
+            .context("missing repository")?;
+        let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
+        repository
+            .update(cx, |repository, cx| {
+                repository.commit("second".into(), None, CommitOptions::default(), askpass, cx)
+            })
+            .await??;
+        fs.set_head_for_repo(
+            &dot_git,
+            &[("file.txt", "committed".into())],
+            head.to_string(),
+        );
+        fs.set_index_for_repo(&dot_git, &[("file.txt", "staged".into())]);
+
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().clone());
+        let graph = cx.new_window_entity(|window, cx| {
+            GitGraph::new(
+                repository.read(cx).id,
+                project.read(cx).git_store().clone(),
+                workspace.downgrade(),
+                None,
+                window,
+                cx,
+            )
+        });
+        if uncommit {
+            project.read_with(cx, |project, _| {
+                project.languages().add(Arc::new(language::Language::new(
+                    language::LanguageConfig {
+                        name: "Git Commit".into(),
+                        ..Default::default()
+                    },
                     None,
-                    window,
-                    cx,
-                )
+                )));
             });
+            let panel = workspace.update_in(cx, |workspace, window, cx| {
+                let panel = crate::git_panel::GitPanel::new_test(workspace, window, cx);
+                workspace.add_panel(panel.clone(), window, cx);
+                panel
+            });
+            graph.update_in(cx, |graph, window, cx| graph.uncommit(head, window, cx));
+            cx.run_until_parked();
+            panel.read_with(cx, |panel, cx| {
+                assert_eq!(panel.commit_editor.read(cx).text(cx), "initial commit");
+            });
+        } else {
             graph
                 .update(cx, |graph, cx| graph.reset_to_commit(target, cx))
                 .await?;
-            cx.run_until_parked();
-            fs.with_git_state(&dot_git, false, |state| {
-                assert_eq!(state.refs.get("HEAD"), Some(&target.to_string()));
-                assert_eq!(
-                    state
-                        .head_contents
-                        .get(&RepoPath::new("file.txt").expect("valid path")),
-                    Some(&b"base".to_vec())
-                );
-                assert_eq!(
-                    state
-                        .index_contents
-                        .get(&RepoPath::new("file.txt").expect("valid path")),
-                    Some(&b"staged".to_vec())
-                );
-            })?;
-            assert_eq!(fs.load(&root.join("file.txt")).await?, "working");
-            assert!(
-                graph
-                    .update(cx, |graph, cx| graph.reset_to_commit(
-                        Oid::from_bytes(&[2; 20]).expect("valid SHA"),
-                        cx
-                    ))
-                    .await
-                    .is_err()
-            );
-            Ok::<_, anyhow::Error>(())
         }
-        .await
-        .expect("graph reset must preserve staged and working changes");
+        cx.run_until_parked();
+        fs.with_git_state(&dot_git, false, |state| {
+            assert_eq!(state.refs.get("HEAD"), Some(&target.to_string()));
+            assert_eq!(
+                state
+                    .head_contents
+                    .get(&RepoPath::new("file.txt").expect("valid path")),
+                Some(&b"base".to_vec())
+            );
+            assert_eq!(
+                state
+                    .index_contents
+                    .get(&RepoPath::new("file.txt").expect("valid path")),
+                Some(&b"staged".to_vec())
+            );
+        })?;
+        assert_eq!(fs.load(&root.join("file.txt")).await?, "working");
+        assert!(
+            graph
+                .update(cx, |graph, cx| graph.reset_to_commit(
+                    Oid::from_bytes(&[2; 20]).expect("valid SHA"),
+                    cx
+                ))
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     fn build_oid_to_row_map(graph: &GraphData) -> HashMap<Oid, usize> {

@@ -1018,9 +1018,9 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Pull changes from remote, then push local commits",
+                    "Fetch, pull incoming commits if needed, then push",
                     &git::Sync,
-                    "git pull && git push",
+                    "git fetch → git pull (if needed) → git push",
                     keybinding_target.clone(),
                     cx,
                 )

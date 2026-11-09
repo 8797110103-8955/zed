@@ -20,7 +20,10 @@ use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::solo_diff_view::SoloDiffView;
 use crate::staged_diff::StagedDiff;
 use crate::unstaged_diff::UnstagedDiff;
-use crate::{branch_picker, picker_prompt, render_remote_button};
+use crate::{
+    branch_picker::{self, RemoteBranchOperation},
+    picker_prompt, render_remote_button,
+};
 use crate::{
     git_panel_settings::GitPanelSettings, git_status_icon, repository_selector::RepositorySelector,
 };
@@ -359,7 +362,6 @@ fn git_panel_context_menu(
     has_untracked_files: bool,
     has_stash_items: bool,
     group_by: GitPanelGroupBy,
-    include_copy_paths: bool,
     focus_handle: FocusHandle,
     window: &mut Window,
     cx: &mut App,
@@ -398,12 +400,6 @@ fn git_panel_context_menu(
             })
             .action_disabled_when(!has_stash_items, "Stash Pop", StashPop.boxed_clone())
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
-            .when(include_copy_paths, |context_menu| {
-                context_menu
-                    .separator()
-                    .action("Copy Path", CopyPath.boxed_clone())
-                    .action("Copy Relative Path", CopyRelativePath.boxed_clone())
-            })
             .separator()
             .action_disabled_when(
                 !has_staged_tracked_changes,
@@ -4406,85 +4402,117 @@ impl GitPanel {
     }
 
     pub(crate) fn uncommit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.active_repository.clone() else {
+        let Some(repository) = self.active_repository.clone() else {
             return;
         };
+        self.uncommit_repository(repository, None, window, cx);
+    }
+
+    pub(crate) fn uncommit_repository(
+        &mut self,
+        repository: Entity<Repository>,
+        expected_head: Option<Oid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_write_access(cx) || self.pending_commit.is_some() {
+            return;
+        }
         telemetry::event!("Git Uncommitted");
 
-        let confirmation = self.check_for_pushed_commits(window, cx);
-        let prior_head = self.load_commit_details("HEAD".to_string(), cx);
-
         let task = cx.spawn_in(window, async move |this, cx| {
-            let result = maybe!(async {
-                if let Ok(true) = confirmation.await {
-                    let prior_head = prior_head.await?;
+            let result = async {
+                let head = repository
+                    .update(cx, |repository, _| repository.head_sha())
+                    .await??
+                    .context("The repository has no HEAD commit")?;
+                if let Some(expected_head) = expected_head {
+                    anyhow::ensure!(
+                        head == expected_head.to_string(),
+                        "HEAD changed before uncommit"
+                    );
+                }
 
-                    repo.update(cx, |repo, cx| {
-                        repo.reset("HEAD^".to_string(), ResetMode::Soft, cx)
+                if !Self::check_for_pushed_commits(&repository, cx).await? {
+                    return Ok(());
+                }
+
+                let prior_head = repository
+                    .read_with(cx, |repository, cx| {
+                        repository.show_commit(head.clone(), cx)
+                    })
+                    .await?;
+                let buffer = this
+                    .update(cx, |this, cx| {
+                        let project = this.project.read(cx);
+                        let languages = project.languages().clone();
+                        let buffer_store = project.buffer_store().clone();
+                        repository.update(cx, |repository, cx| {
+                            repository.open_commit_buffer(Some(languages), buffer_store, cx)
+                        })
+                    })?
+                    .await?;
+                let current_head = repository
+                    .update(cx, |repository, _| repository.head_sha())
+                    .await??;
+                anyhow::ensure!(
+                    current_head.as_deref() == Some(head.as_str()),
+                    "HEAD changed before uncommit"
+                );
+
+                repository
+                    .update(cx, |repository, cx| {
+                        repository.reset("HEAD^".into(), ResetMode::Soft, cx)
                     })
                     .await??;
 
-                    Ok(Some(prior_head))
-                } else {
-                    Ok(None)
-                }
-            })
+                buffer.update(cx, |buffer, cx| {
+                    buffer.set_text(prior_head.message, cx);
+                });
+                anyhow::Ok(())
+            }
             .await;
 
-            this.update_in(cx, |this, window, cx| {
+            this.update(cx, |this, cx| {
                 this.pending_commit.take();
-                match result {
-                    Ok(None) => {}
-                    Ok(Some(prior_commit)) => {
-                        this.commit_editor.update(cx, |editor, cx| {
-                            editor.set_text(prior_commit.message, window, cx)
-                        });
-                    }
-                    Err(e) => this.show_error_toast("reset", e, cx),
+                if let Err(error) = result {
+                    this.show_error_toast("uncommit", error, cx);
                 }
             })
-            .ok();
+            .log_err();
         });
 
         self.pending_commit = Some(task);
     }
 
-    fn check_for_pushed_commits(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl Future<Output = anyhow::Result<bool>> + use<> {
-        let repo = self.active_repository.clone();
-        let mut cx = window.to_async(cx);
+    async fn check_for_pushed_commits(
+        repository: &Entity<Repository>,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> anyhow::Result<bool> {
+        let pushed_to = repository
+            .update(cx, |repository, _| repository.check_for_pushed_commits())
+            .await??;
 
-        async move {
-            let repo = repo.context("No active repository")?;
+        if pushed_to.is_empty() {
+            Ok(true)
+        } else {
+            #[derive(strum::EnumIter, strum::VariantNames)]
+            #[strum(serialize_all = "title_case")]
+            enum CancelUncommit {
+                Uncommit,
+                Cancel,
+            }
+            let detail = format!(
+                "This commit was already pushed to {}.",
+                pushed_to.into_iter().join(", ")
+            );
+            let result = cx
+                .update(|window, cx| prompt("Are you sure?", Some(&detail), window, cx))?
+                .await?;
 
-            let pushed_to: Vec<SharedString> = repo
-                .update(&mut cx, |repo, _| repo.check_for_pushed_commits())
-                .await??;
-
-            if pushed_to.is_empty() {
-                Ok(true)
-            } else {
-                #[derive(strum::EnumIter, strum::VariantNames)]
-                #[strum(serialize_all = "title_case")]
-                enum CancelUncommit {
-                    Uncommit,
-                    Cancel,
-                }
-                let detail = format!(
-                    "This commit was already pushed to {}.",
-                    pushed_to.into_iter().join(", ")
-                );
-                let result = cx
-                    .update(|window, cx| prompt("Are you sure?", Some(&detail), window, cx))?
-                    .await?;
-
-                match result {
-                    CancelUncommit::Cancel => Ok(false),
-                    CancelUncommit::Uncommit => Ok(true),
-                }
+            match result {
+                CancelUncommit::Cancel => Ok(false),
+                CancelUncommit::Uncommit => Ok(true),
             }
         }
     }
@@ -5004,28 +5032,20 @@ impl GitPanel {
         }
         repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
         self.schedule_update(window, cx);
-        if matches!(
-            action,
-            RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom
-        ) {
-            if matches!(action, RepositoryMenuAction::Sync)
-                && repository
-                    .read(cx)
-                    .branch
-                    .as_ref()
-                    .and_then(Branch::tracking_status)
-                    .is_none()
-            {
-                self.push_repository(repository, false, false, window, cx);
+        match action {
+            RepositoryMenuAction::Sync => {
+                self.sync_repository(repository, window, cx);
                 return;
             }
-            self.pull_from_or_sync(
-                repository,
-                matches!(action, RepositoryMenuAction::Sync),
-                window,
-                cx,
-            );
-            return;
+            RepositoryMenuAction::PullFrom => {
+                self.prompt_repository_branch(repository, RemoteBranchOperation::Pull, window, cx);
+                return;
+            }
+            RepositoryMenuAction::PushTo => {
+                self.prompt_repository_branch(repository, RemoteBranchOperation::Push, window, cx);
+                return;
+            }
+            _ => {}
         }
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -5093,7 +5113,7 @@ impl GitPanel {
                             }
                         }
                     }
-                    RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom => {}
+                    RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom | RepositoryMenuAction::PushTo => {}
                 }
                 anyhow::Ok(())
             }.await;
@@ -5113,27 +5133,152 @@ impl GitPanel {
         self.repository_menu_action(repository, RepositoryMenuAction::Sync, window, cx);
     }
 
-    fn pull_from_or_sync(
+    fn sync_repository(
         &mut self,
         repository: Entity<Repository>,
-        sync: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(branch) = repository.read(cx).branch.clone() else {
+            return;
+        };
         if !self.can_push_and_pull(cx)
-            || !self.start_remote_operation(RemoteOperationKind::Pull, cx)
+            || !self.start_remote_operation(RemoteOperationKind::Fetch, cx)
         {
             return;
         }
+
+        let push_remote = self.get_remote(Some(repository.clone()), false, true, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let _clear_pending_remote_operation =
+                cx.on_drop(&this, |this, cx| this.clear_remote_operation(cx));
+            let result = async {
+                let Some(push_remote) = push_remote.await? else {
+                    return Ok(());
+                };
+                let fetch_remote = branch
+                    .upstream
+                    .as_ref()
+                    .and_then(Upstream::remote_name)
+                    .map(|name| Remote {
+                        name: name.to_owned().into(),
+                    })
+                    .unwrap_or_else(|| push_remote.clone());
+                let askpass = this.update_in(cx, |this, window, cx| {
+                    this.askpass_delegate(format!("git fetch {}", fetch_remote.name), window, cx)
+                })?;
+                repository
+                    .update(cx, |repository, cx| {
+                        repository.fetch(
+                            FetchOptions::Remote(fetch_remote.clone()),
+                            Some(askpass),
+                            cx,
+                        )
+                    })
+                    .await??;
+
+                let scan = repository
+                    .update(cx, |repository, _| repository.branches())
+                    .await??;
+                if let Some(error) = scan.error {
+                    anyhow::bail!("{error}");
+                }
+                let branch = scan
+                    .branches
+                    .into_iter()
+                    .find(|current| current.is_head && current.ref_name == branch.ref_name)
+                    .context("The checked-out branch changed during sync")?;
+                let upstream = branch.upstream.as_ref();
+                if let Some(upstream) = upstream
+                    && upstream.remote_name() == Some(fetch_remote.name.as_ref())
+                    && upstream
+                        .tracking
+                        .status()
+                        .is_some_and(|status| status.behind > 0)
+                    && let Some(branch_name) = upstream.branch_name()
+                {
+                    let askpass = this.update_in(cx, |this, window, cx| {
+                        this.pending_remote_operation = Some(RemoteOperationKind::Pull);
+                        cx.notify();
+                        this.askpass_delegate(format!("git pull {}", fetch_remote.name), window, cx)
+                    })?;
+                    let output = repository
+                        .update(cx, |repository, cx| {
+                            repository.pull(
+                                Some(branch_name.to_owned().into()),
+                                fetch_remote.name.clone(),
+                                false,
+                                askpass,
+                                cx,
+                            )
+                        })
+                        .await??;
+                    this.update(cx, |this, cx| {
+                        this.show_remote_output(RemoteAction::Pull(fetch_remote), output, cx)
+                    })?;
+                }
+
+                let options = branch
+                    .tracking_status()
+                    .is_none()
+                    .then_some(PushOptions::SetUpstream);
+                let destination = upstream
+                    .filter(|upstream| upstream.tracking.status().is_some())
+                    .and_then(Upstream::branch_name)
+                    .unwrap_or_else(|| branch.name());
+                let askpass = this.update_in(cx, |this, window, cx| {
+                    this.pending_remote_operation = Some(RemoteOperationKind::Push);
+                    cx.notify();
+                    this.askpass_delegate(format!("git push {}", push_remote.name), window, cx)
+                })?;
+                let source_branch: SharedString = branch.name().to_owned().into();
+                let output = repository
+                    .update(cx, |repository, cx| {
+                        repository.push(
+                            source_branch.clone(),
+                            destination.to_owned().into(),
+                            push_remote.name.clone(),
+                            options,
+                            askpass,
+                            cx,
+                        )
+                    })
+                    .await??;
+                this.update(cx, |this, cx| {
+                    this.show_remote_output(
+                        RemoteAction::Push(source_branch, push_remote),
+                        output,
+                        cx,
+                    )
+                })?;
+                anyhow::Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| this.show_error_toast("sync", error, cx))
+                    .log_err();
+            }
+        })
+        .detach();
+    }
+
+    fn prompt_repository_branch(
+        &mut self,
+        repository: Entity<Repository>,
+        operation: RemoteBranchOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(branch) = repository.read(cx).branch.clone() else {
-            self.clear_remote_operation(cx);
             return;
         };
-        // The panel's active repository is updated asynchronously after
-        // `set_as_active_repository`, so query the menu's repository directly.
-        let remote = self.get_remote(Some(repository.clone()), !sync, false, window, cx);
-        let push_remote =
-            sync.then(|| self.get_remote(Some(repository.clone()), false, true, window, cx));
+        if !self.can_push_and_pull(cx)
+            || !self.start_remote_operation(RemoteOperationKind::Fetch, cx)
+        {
+            return;
+        }
+        let is_push = operation == RemoteBranchOperation::Push;
+        let remote = self.get_remote(Some(repository.clone()), true, is_push, window, cx);
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
             let _clear_pending_remote_operation =
@@ -5142,118 +5287,89 @@ impl GitPanel {
                 let Some(remote) = remote.await? else {
                     return Ok(());
                 };
-                let branch_name = if sync {
-                    branch
-                        .upstream
-                        .as_ref()
-                        .and_then(|upstream| upstream.branch_name())
-                        .unwrap_or_else(|| branch.name())
-                        .to_owned()
-                        .into()
-                } else {
-                    let askpass = this.update_in(cx, |this, window, cx| {
-                        this.askpass_delegate("git fetch", window, cx)
-                    })?;
-                    repository
-                        .update(cx, |repository, cx| {
-                            repository.fetch(
-                                FetchOptions::Remote(remote.clone()),
-                                Some(askpass),
-                                cx,
-                            )
-                        })
-                        .await??;
-                    let branches = repository
-                        .update(cx, |repository, _| repository.branches())
-                        .await??;
-                    if let Some(error) = branches.error {
-                        anyhow::bail!("{error}");
-                    }
-                    let selection = cx
-                        .update(|window, cx| {
-                            branch_picker::prompt_remote_branch(
-                                workspace,
-                                repository.clone(),
-                                remote.name.clone(),
-                                branches.branches.into(),
-                                window,
-                                cx,
-                            )
-                        })?
-                        .await?;
-                    let Some(branch) = selection else {
-                        return Ok(());
-                    };
-                    branch
-                        .name()
-                        .strip_prefix(&format!("{}/", remote.name))
-                        .context("Selected branch does not belong to the pull remote")?
-                        .to_owned()
-                        .into()
+                let selection = cx
+                    .update(|window, cx| {
+                        branch_picker::prompt_remote_branch(
+                            workspace,
+                            repository.clone(),
+                            remote.name.clone(),
+                            operation,
+                            branch.clone(),
+                            window,
+                            cx,
+                        )
+                    })?
+                    .await?;
+                let Some(selected_branch) = selection else {
+                    return Ok(());
                 };
+                let prefix = format!("refs/remotes/{}/", remote.name);
+                let branch_name: SharedString = selected_branch
+                    .ref_name
+                    .strip_prefix(&prefix)
+                    .context("Selected branch does not belong to the remote")?
+                    .to_owned()
+                    .into();
                 let askpass = this.update_in(cx, |this, window, cx| {
-                    this.askpass_delegate("git pull", window, cx)
+                    this.pending_remote_operation = Some(if is_push {
+                        RemoteOperationKind::Push
+                    } else {
+                        RemoteOperationKind::Pull
+                    });
+                    cx.notify();
+                    this.askpass_delegate(
+                        format!("git {} {}", operation.name(), remote.name),
+                        window,
+                        cx,
+                    )
                 })?;
-                let output = repository
-                    .update(cx, |repository, cx| {
-                        repository.pull(Some(branch_name), remote.name.clone(), false, askpass, cx)
-                    })
-                    .await??;
-                this.update(cx, |this, cx| {
-                    this.show_remote_output(RemoteAction::Pull(remote.clone()), output, cx)
-                })?;
-                if sync {
-                    let Some(push_remote) = push_remote
-                        .context("Missing push remote selection")?
-                        .await?
-                    else {
-                        return Ok(());
-                    };
-                    let options = match &branch.upstream {
-                        None
-                        | Some(Upstream {
-                            tracking: UpstreamTracking::Gone,
-                            ..
-                        }) => Some(PushOptions::SetUpstream),
-                        _ => None,
-                    };
-                    let askpass = this.update_in(cx, |this, window, cx| {
-                        this.pending_remote_operation = Some(RemoteOperationKind::Push);
-                        cx.notify();
-                        this.askpass_delegate("git push", window, cx)
-                    })?;
+                let (action, output) = if is_push {
+                    let source_branch: SharedString = branch.name().to_owned().into();
+                    let options = branch
+                        .tracking_status()
+                        .is_none()
+                        .then_some(PushOptions::SetUpstream);
                     let output = repository
                         .update(cx, |repository, cx| {
                             repository.push(
-                                branch.name().to_owned().into(),
-                                branch
-                                    .upstream
-                                    .as_ref()
-                                    .and_then(|upstream| upstream.branch_name())
-                                    .unwrap_or_else(|| branch.name())
-                                    .to_owned()
-                                    .into(),
-                                push_remote.name.clone(),
+                                source_branch.clone(),
+                                branch_name,
+                                remote.name.clone(),
                                 options,
                                 askpass,
                                 cx,
                             )
                         })
                         .await??;
-                    this.update(cx, |this, cx| {
-                        this.show_remote_output(
-                            RemoteAction::Push(branch.name().to_owned().into(), push_remote),
-                            output,
-                            cx,
-                        )
-                    })?;
-                }
+                    (RemoteAction::Push(source_branch, remote), output)
+                } else {
+                    let output = repository
+                        .update(cx, |repository, cx| {
+                            anyhow::ensure!(
+                                repository
+                                    .branch
+                                    .as_ref()
+                                    .is_some_and(|current| current.ref_name == branch.ref_name),
+                                "The checked-out branch changed while selecting a remote branch"
+                            );
+                            anyhow::Ok(repository.pull(
+                                Some(branch_name),
+                                remote.name.clone(),
+                                false,
+                                askpass,
+                                cx,
+                            ))
+                        })?
+                        .await??;
+                    (RemoteAction::Pull(remote), output)
+                };
+                this.update(cx, |this, cx| this.show_remote_output(action, output, cx))?;
                 anyhow::Ok(())
             }
             .await;
             if let Err(error) = result {
                 this.update(cx, |this, cx| {
-                    this.show_error_toast(if sync { "sync" } else { "pull" }, error, cx)
+                    this.show_error_toast(operation.name(), error, cx)
                 })
                 .log_err();
             }
@@ -5528,14 +5644,17 @@ impl GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
-        self.push_repository(repo, force_push, select_remote, window, cx);
+        if select_remote {
+            self.prompt_repository_branch(repo, RemoteBranchOperation::Push, window, cx);
+        } else {
+            self.push_repository(repo, force_push, window, cx);
+        }
     }
 
     fn push_repository(
         &mut self,
         repo: Entity<Repository>,
         force_push: bool,
-        select_remote: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5563,7 +5682,7 @@ impl GitPanel {
                 _ => None,
             }
         };
-        let remote = self.get_remote(Some(repo.clone()), select_remote, true, window, cx);
+        let remote = self.get_remote(Some(repo.clone()), false, true, window, cx);
 
         cx.spawn_in(window, async move |this, cx| {
             let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
@@ -7511,7 +7630,6 @@ impl GitPanel {
                     has_untracked_files,
                     has_stash_items,
                     group_by,
-                    false,
                     focus_handle.clone(),
                     window,
                     cx,
@@ -7820,7 +7938,9 @@ impl GitPanel {
                                 .label_size(LabelSize::XSmall)
                                 .color(Color::Muted)
                                 .disabled(sync_disabled)
-                                .tooltip(Tooltip::text("Sync Changes (Pull then Push)"))
+                                .tooltip(Tooltip::text(
+                                    "Sync Changes (Fetch, Pull if Needed, then Push)",
+                                ))
                                 .on_click(cx.listener({
                                     let repository = repository.clone();
                                     move |this, _, window, cx| {
@@ -7864,7 +7984,7 @@ impl GitPanel {
                         .icon_size(IconSize::Small)
                         .disabled(sync_disabled)
                         .tooltip(Tooltip::text(if tracking.is_some() {
-                            "Sync Changes (Pull then Push)"
+                            "Sync Changes (Fetch, Pull if Needed, then Push)"
                         } else {
                             "Create Tracking Branch on Remote"
                         }))
@@ -7892,34 +8012,45 @@ impl GitPanel {
             .flex_none()
             .child(
                 h_flex()
-                    .id("repositories-header")
                     .h_6()
                     .px_1()
-                    .gap_1()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.repositories_collapsed = !this.repositories_collapsed;
-                        cx.notify();
-                    }))
+                    .justify_between()
                     .child(
-                        Icon::new(if self.repositories_collapsed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .size(IconSize::Small),
+                        h_flex()
+                            .id("repositories-header")
+                            .flex_1()
+                            .h_full()
+                            .gap_1()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.repositories_collapsed = !this.repositories_collapsed;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(if self.repositories_collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(IconSize::Small),
+                            )
+                            .child(Label::new("Repositories").size(LabelSize::Small)),
                     )
-                    .child(Label::new("Repositories").size(LabelSize::Small)),
+                    .child(self.render_repositories_menu(cx)),
             )
-            .when(!self.repositories_collapsed, |this| {
-                this.child(
-                    v_flex()
-                        .id("repositories-list")
-                        .max_h(rems(18.))
-                        .overflow_y_scroll()
-                        .children(rows),
-                )
-            })
+            .when(
+                !self.repositories_collapsed
+                    && (!self.commit_editor_expanded || self.active_tab == GitPanelTab::History),
+                |this| {
+                    this.child(
+                        v_flex()
+                            .id("repositories-list")
+                            .max_h(rems(18.))
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
+                },
+            )
     }
 
     fn render_changes_header(
@@ -8004,23 +8135,10 @@ impl GitPanel {
                 .child(
                     h_flex()
                         .gap_0p5()
-                        .child(
-                            IconButton::new("view-history", IconName::HistoryRerun)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "View History",
-                                    &crate::git_graph::Open,
-                                    &self.focus_handle,
-                                ))
-                                .on_click(|_, window, cx| {
-                                    window
-                                        .dispatch_action(crate::git_graph::Open.boxed_clone(), cx);
-                                }),
-                        )
-                        .child(self.render_view_options_menu("view_options_menu", cx))
                         .when(!is_branch_mode, |this| {
                             this.child(self.render_git_changes_actions_button(cx))
-                        }),
+                        })
+                        .child(self.render_view_options_menu("view_options_menu", cx)),
                 ),
         )
     }
@@ -8362,72 +8480,53 @@ impl GitPanel {
         )
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .h_8()
-            .w_full()
-            .px_2()
-            .flex_none()
-            .justify_between()
-            .child(Label::new("Source Control").size(LabelSize::Small))
-            .child(
-                h_flex().gap_0p5().child(
-                    PopoverMenu::new("source-control-menu")
-                        .trigger_with_tooltip(
-                            IconButton::new("source-control-menu-button", IconName::Ellipsis)
-                                .icon_size(IconSize::Small),
-                            Tooltip::text("Source Control Actions"),
-                        )
-                        .menu({
-                            let focus_handle = self.focus_handle.clone();
-                            let panel = cx.weak_entity();
-                            move |window, cx| {
-                                Some(ContextMenu::build(window, cx, |menu, _, cx| {
-                                    menu.context(focus_handle.clone())
-                                        .action("Show Changes", Box::new(ActivateChangesTab))
-                                        .action("View History", Box::new(crate::git_graph::Open))
-                                        .separator()
-                                        .action(
-                                            "Switch Repository",
-                                            Box::new(zed_actions::git::SelectRepo),
-                                        )
-                                        .action("Fetch", Box::new(git::Fetch))
-                                        .action("Pull", Box::new(git::Pull))
-                                        .action("Push", Box::new(git::Push))
-                                        .separator()
-                                        .when_some(
-                                            panel
-                                                .read_with(cx, |panel, _| {
-                                                    panel.active_repository.clone()
-                                                })
-                                                .ok()
-                                                .flatten(),
-                                            |menu, repository| {
-                                                repository_action_submenus(
-                                                    menu,
-                                                    panel.clone(),
-                                                    repository,
-                                                    focus_handle.clone(),
-                                                    cx,
-                                                )
-                                            },
-                                        )
-                                        .separator()
-                                        .action(
-                                            "Show / Hide Commit Editor",
-                                            Box::new(ToggleCommitEditor),
-                                        )
-                                        .action(
-                                            "Expand / Collapse Commit Editor",
-                                            Box::new(ToggleFillCommitEditor),
-                                        )
-                                        .action("Open Commit Modal", Box::new(ExpandCommitEditor))
-                                }))
-                            }
-                        })
-                        .anchor(Anchor::TopRight),
-                ),
+    fn render_repositories_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        PopoverMenu::new("source-control-menu")
+            .trigger_with_tooltip(
+                IconButton::new("source-control-menu-button", IconName::Ellipsis)
+                    .icon_size(IconSize::Small),
+                Tooltip::text("Source Control Actions"),
             )
+            .menu({
+                let focus_handle = self.focus_handle.clone();
+                let panel = cx.weak_entity();
+                move |window, cx| {
+                    Some(ContextMenu::build(window, cx, |menu, _, cx| {
+                        menu.context(focus_handle.clone())
+                            .action("Show Changes", Box::new(ActivateChangesTab))
+                            .action("View History", Box::new(crate::git_graph::Open))
+                            .separator()
+                            .action("Switch Repository", Box::new(zed_actions::git::SelectRepo))
+                            .action("Fetch", Box::new(git::Fetch))
+                            .action("Pull", Box::new(git::Pull))
+                            .action("Push", Box::new(git::Push))
+                            .separator()
+                            .when_some(
+                                panel
+                                    .read_with(cx, |panel, _| panel.active_repository.clone())
+                                    .ok()
+                                    .flatten(),
+                                |menu, repository| {
+                                    repository_action_submenus(
+                                        menu,
+                                        panel.clone(),
+                                        repository,
+                                        focus_handle.clone(),
+                                        cx,
+                                    )
+                                },
+                            )
+                            .separator()
+                            .action("Show / Hide Commit Editor", Box::new(ToggleCommitEditor))
+                            .action(
+                                "Expand / Collapse Commit Editor",
+                                Box::new(ToggleFillCommitEditor),
+                            )
+                            .action("Open Commit Modal", Box::new(ExpandCommitEditor))
+                    }))
+                }
+            })
+            .anchor(Anchor::TopRight)
     }
 
     fn render_history_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -9084,6 +9183,17 @@ impl GitPanel {
             .items_center()
             .justify_center()
             .child(content)
+            .when(
+                self.active_repository.is_some() && !matches!(self.git_access, Some(GitAccess::No)),
+                |this| {
+                    this.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.deploy_view_options_menu(event.position, window, cx);
+                        }),
+                    )
+                },
+            )
     }
 
     fn render_no_changes_ui(&self, cx: &Context<Self>) -> AnyElement {
@@ -9397,7 +9507,7 @@ impl GitPanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.deploy_panel_context_menu(event.position, None, false, window, cx)
+                            this.deploy_view_options_menu(event.position, window, cx)
                         }),
                     )
                     .custom_scrollbars(
@@ -9721,48 +9831,15 @@ impl GitPanel {
         );
     }
 
-    fn deploy_panel_context_menu(
+    fn deploy_view_options_menu(
         &mut self,
         position: Point<Pixels>,
-        target_entry_index: Option<usize>,
-        include_copy_paths: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Every action in this menu acts on uncommitted changes, which the
-        // branch list doesn't show.
-        if self.is_branch_mode() {
-            return;
-        }
-        let has_stash_items = self.stash_entries.entries.len() > 0;
-        let has_tracked_changes = self.has_tracked_changes();
-        let has_staged_changes = self.has_staged_changes();
-        let has_unstaged_changes = self.has_unstaged_changes();
-        let has_new_changes = self.new_count > 0;
-        let has_untracked_files = self.has_untracked_files();
-        let has_staged_tracked_changes = target_entry_index
-            .and_then(|entry_index| self.directory_descendants(entry_index))
-            .map_or_else(
-                || self.has_staged_tracked_changes(),
-                |entries| Self::contains_staged_tracked_entry(entries),
-            );
-
-        let context_menu = git_panel_context_menu(
-            has_tracked_changes,
-            has_staged_tracked_changes,
-            has_staged_changes,
-            has_unstaged_changes,
-            has_new_changes,
-            has_untracked_files,
-            has_stash_items,
-            GitPanelSettings::get_global(cx).group_by,
-            include_copy_paths,
-            self.focus_handle.clone(),
-            window,
-            cx,
-        );
-
-        self.set_context_menu(context_menu, position, target_entry_index, window, cx);
+        let context_menu =
+            git_panel_view_options_menu(self.focus_handle.clone(), cx.weak_entity(), window, cx);
+        self.set_context_menu(context_menu, position, None, window, cx);
     }
 
     fn set_context_menu(
@@ -10671,11 +10748,7 @@ impl Render for GitPanel {
                 v_flex()
                     .size_full()
                     .min_h_0()
-                    .child(self.render_header(cx))
-                    .when(
-                        !self.commit_editor_expanded || self.active_tab == GitPanelTab::History,
-                        |this| this.child(self.render_repositories(cx)),
-                    )
+                    .child(self.render_repositories(cx))
                     .map(|this| match self.active_tab {
                         GitPanelTab::Changes => this
                             .children(self.render_changes_header(window, cx))
@@ -14874,7 +14947,7 @@ mod tests {
             cx.run_until_parked();
             panel.update_in(&mut cx, |panel, window, cx| {
                 let repository = panel.active_repository.clone().expect("active repository");
-                panel.pull_from_or_sync(repository, false, window, cx);
+                panel.prompt_repository_branch(repository, RemoteBranchOperation::Pull, window, cx);
                 assert!(panel.pending_remote_operation.is_some());
             });
             cx.run_until_parked();

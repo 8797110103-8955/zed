@@ -159,6 +159,7 @@ pub(super) enum RepositoryMenuAction {
     ClearStashes,
     Sync,
     PullFrom,
+    PushTo,
 }
 
 pub(super) fn repository_branch_status(summary: git::status::GitSummary) -> (&'static str, Color) {
@@ -258,11 +259,16 @@ pub(super) fn repository_action_submenus(
             })
             .separator()
             .action_disabled_when(!remote_enabled || !has_branch, "Push", Box::new(git::Push))
-            .action_disabled_when(
-                !remote_enabled || !has_branch,
-                "Push To…",
-                Box::new(git::PushTo),
-            )
+            .map(|menu| {
+                repository_menu_entry(
+                    menu,
+                    "Push To…",
+                    panel.clone(),
+                    repository.clone(),
+                    RepositoryMenuAction::PushTo,
+                    !remote_enabled || !has_branch,
+                )
+            })
             .action_disabled_when(
                 !remote_enabled || !has_branch,
                 "Force Push",
