@@ -6,6 +6,7 @@ use crate::{
     },
     commit_tooltip::CommitAvatar,
     commit_view::{CommitView, CommitViewOptions},
+    git_panel::prompt_create_branch,
     git_status_icon,
     git_timestamp::format_git_timestamp,
     remote_web_link::{RemoteWebLink, remote_web_links},
@@ -2004,12 +2005,31 @@ impl GitGraph {
         git_store.repositories().get(&self.repo_id).cloned()
     }
 
-    fn can_reset(&self, cx: &App) -> bool {
+    fn has_write_access(&self, cx: &App) -> bool {
         self.workspace
             .read_with(cx, |workspace, cx| {
                 !workspace.project().read(cx).is_read_only(cx)
             })
             .unwrap_or(false)
+    }
+
+    fn create_branch_at_commit(&self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_write_access(cx) {
+            return;
+        }
+        let Some(repository) = self.get_repository(cx) else {
+            return;
+        };
+        let sha = commit.to_string();
+        let short_sha: String = sha.chars().take(7).collect();
+        prompt_create_branch(
+            self.workspace.clone(),
+            repository,
+            format!("Create Branch at {short_sha}"),
+            Some(sha),
+            window,
+            cx,
+        );
     }
 
     fn uncommit(&self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
@@ -2132,7 +2152,7 @@ impl GitGraph {
     }
 
     fn reset_to_commit(&mut self, commit: Oid, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        if !self.can_reset(cx) {
+        if !self.has_write_access(cx) {
             return Task::ready(Err(anyhow::anyhow!("Project is read-only")));
         }
         let Some(repository) = self.get_repository(cx) else {
@@ -3659,6 +3679,23 @@ impl GitGraph {
                                     |(index, link)| Self::render_web_link(index, link),
                                 ))
                                 .child(
+                                    Button::new("create-branch-at-commit", "Create Branch…")
+                                        .start_icon(
+                                            Icon::new(IconName::GitBranchPlus)
+                                                .size(IconSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                        .label_size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .disabled(!self.has_write_access(cx))
+                                        .on_click({
+                                            let commit = commit_entry.data.sha;
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.create_branch_at_commit(commit, window, cx);
+                                            })
+                                        }),
+                                )
+                                .child(
                                     Button::new("reset-soft", if is_head_commit { "Uncommit" } else { "Reset Soft" })
                                         .start_icon(
                                             Icon::new(IconName::ForwardArrow)
@@ -3667,7 +3704,7 @@ impl GitGraph {
                                         )
                                         .label_size(LabelSize::Small)
                                         .color(Color::Muted)
-                                        .disabled(!self.can_reset(cx))
+                                        .disabled(!self.has_write_access(cx))
                                         .tooltip(Tooltip::text(if is_head_commit {
                                             "Undo the latest commit, keeping staged and working changes"
                                         } else {
@@ -5721,6 +5758,47 @@ mod tests {
             language_model::init(cx);
             crate::init(cx);
         });
+    }
+
+    #[gpui::test]
+    async fn test_create_branch_from_commit_details(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let root = Path::new(util::path!("/project"));
+        let dot_git = root.join(".git");
+        fs.insert_tree(root, json!({".git": {}})).await;
+        let commit = Oid::from_bytes(&[1; 20]).expect("valid commit SHA");
+        fs.set_head_for_repo(&dot_git, &[], commit.to_string());
+        let project = Project::test(fs.clone(), [root], cx).await;
+        cx.run_until_parked();
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().downgrade());
+        let graph = cx.new_window_entity(|window, cx| {
+            let project = project.read(cx);
+            let repository = project.active_repository(cx).expect("active repository");
+            GitGraph::new(
+                repository.read(cx).id,
+                project.git_store().clone(),
+                workspace,
+                None,
+                window,
+                cx,
+            )
+        });
+
+        graph.update_in(cx, |graph, window, cx| {
+            graph.create_branch_at_commit(commit, window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("graph-branch");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        fs.with_git_state(&dot_git, false, |state| {
+            assert!(state.branches.contains("graph-branch"));
+        })
+        .expect("read repository branches");
     }
 
     #[gpui::test]

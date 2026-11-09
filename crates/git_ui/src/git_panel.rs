@@ -1,6 +1,7 @@
 mod branch_mode;
 mod repository_actions;
 
+pub(crate) use self::repository_actions::prompt_create_branch;
 use self::repository_actions::{
     RepositoryMenuAction, repository_action_submenus, repository_branch_status, repository_input,
 };
@@ -4997,35 +4998,73 @@ impl GitPanel {
         if !self.has_write_access(cx) {
             return;
         }
-        let Some(short_sha) = repository
+        let Some(sha) = repository
             .read(cx)
             .head_commit
             .as_ref()
-            .map(|commit| commit.sha.chars().take(7).collect::<String>())
+            .map(|commit| commit.sha.to_string())
         else {
             return;
         };
-        let input = repository_input(
-            format!("Create a branch at {short_sha}?"),
-            "Create",
-            &["Branch name"],
-            vec![short_sha],
-            1,
+        let short_sha: String = sha.chars().take(7).collect();
+        prompt_create_branch(
             self.workspace.clone(),
+            repository,
+            format!("Create Branch at {short_sha}"),
+            Some(sha),
             window,
             cx,
         );
-        cx.spawn_in(window, async move |_, cx| {
-            let Some(mut values) = input.await else {
-                return Ok(());
-            };
-            let name = values.pop().context("Missing branch name")?;
-            repository
-                .update(cx, |repository, _| repository.create_branch(name, None))
-                .await??;
-            anyhow::Ok(())
-        })
-        .detach_and_prompt_err("Failed to create branch", window, cx, |_, _, _| None);
+    }
+
+    fn create_branch_from(
+        &self,
+        repository: Entity<Repository>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let selected_branch = repository
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.ref_name.clone());
+        let on_select: branch_picker::SelectBranchCallback = Arc::new({
+            let repository = repository.clone();
+            let workspace = workspace.clone();
+            move |branch, window, cx| {
+                let title = format!("Create Branch From {}", branch.name());
+                let base = branch.ref_name.to_string();
+                // Let the branch picker dismiss before opening the name prompt.
+                prompt_create_branch(
+                    workspace.clone(),
+                    repository.clone(),
+                    title,
+                    Some(base),
+                    window,
+                    cx,
+                );
+            }
+        });
+        window
+            .spawn(cx, async move |cx| {
+                let workspace_handle = workspace.clone();
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.toggle_modal(window, cx, |window, cx| {
+                            branch_picker::select_modal(
+                                workspace_handle,
+                                Some(repository),
+                                selected_branch,
+                                on_select,
+                                window,
+                                cx,
+                            )
+                        });
+                    })
+                    .log_err();
+            })
+            .detach();
     }
 
     fn repository_menu_action(
@@ -5053,19 +5092,27 @@ impl GitPanel {
                 self.prompt_repository_branch(repository, RemoteBranchOperation::Push, window, cx);
                 return;
             }
+            RepositoryMenuAction::CreateBranch => {
+                prompt_create_branch(
+                    self.workspace.clone(),
+                    repository,
+                    "Create Branch",
+                    None,
+                    window,
+                    cx,
+                );
+                return;
+            }
+            RepositoryMenuAction::CreateBranchFrom => {
+                self.create_branch_from(repository, window, cx);
+                return;
+            }
             _ => {}
         }
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 match action {
-                    RepositoryMenuAction::CreateBranch => {
-                        let input = cx.update(|window, cx| repository_input("Create Branch", "Confirm", &["Branch name", "Base branch or commit (optional, defaults to HEAD)"], Vec::new(), 1, workspace, window, cx))?.await;
-                        let Some(mut values) = input else { return Ok(()); };
-                        let base = values.pop().filter(|value| !value.is_empty());
-                        let name = values.pop().context("Missing branch name")?;
-                        repository.update(cx, |repository, _| repository.create_branch(name, base)).await??;
-                    }
                     RepositoryMenuAction::DeleteBranch => {
                         let scan = repository.update(cx, |repository, _| repository.branches()).await??;
                         if let Some(error) = scan.error { anyhow::bail!("{error}"); }
@@ -5080,7 +5127,7 @@ impl GitPanel {
                         }
                     }
                     RepositoryMenuAction::AddRemote => {
-                        let input = cx.update(|window, cx| repository_input("Add Remote", "Confirm", &["Remote name (for example, origin)", "Remote URL"], Vec::new(), 2, workspace, window, cx))?.await;
+                        let input = cx.update(|window, cx| repository_input("Add Remote", "Confirm", &["Remote name (for example, origin)", "Remote URL"], workspace, window, cx))?.await;
                         let Some(mut values) = input else { return Ok(()); };
                         let url = values.pop().context("Missing remote URL")?;
                         let name = values.pop().context("Missing remote name")?;
@@ -5121,7 +5168,11 @@ impl GitPanel {
                             }
                         }
                     }
-                    RepositoryMenuAction::Sync | RepositoryMenuAction::PullFrom | RepositoryMenuAction::PushTo => {}
+                    RepositoryMenuAction::Sync
+                    | RepositoryMenuAction::PullFrom
+                    | RepositoryMenuAction::PushTo
+                    | RepositoryMenuAction::CreateBranch
+                    | RepositoryMenuAction::CreateBranchFrom => {}
                 }
                 anyhow::Ok(())
             }.await;
@@ -8015,7 +8066,9 @@ impl GitPanel {
             .flex_none()
             .child(
                 h_flex()
-                    .h_6()
+                    .h(ui::Tab::container_height(cx))
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
                     .px_1()
                     .justify_between()
                     .child(
@@ -14764,6 +14817,62 @@ mod tests {
 
             assert_eq!(active_path.path, rel_path("untracked").into_arc());
         });
+    }
+
+    #[gpui::test]
+    async fn test_create_branch_from_prompts_for_name_after_branch_selection(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (fs, _, workspace, panel, mut cx) =
+            setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+        let dot_git = Path::new(path!("/project/.git"));
+        fs.set_branch_name(dot_git, Some("main"));
+        fs.with_git_state(dot_git, true, |state| {
+            state.branches.insert("feature".into());
+        })
+        .expect("configure repository");
+        cx.run_until_parked();
+
+        let run_menu_action = |action, cx: &mut VisualTestContext| {
+            panel.update_in(cx, |panel, window, cx| {
+                let repository = panel.active_repository.clone().expect("active repository");
+                panel.repository_menu_action(repository, action, window, cx);
+            });
+            cx.run_until_parked();
+        };
+        run_menu_action(RepositoryMenuAction::CreateBranch, &mut cx);
+        cx.simulate_input("from-head");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        run_menu_action(RepositoryMenuAction::CreateBranchFrom, &mut cx);
+        let branch_picker = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .active_modal::<branch_picker::BranchList>(cx)
+                .expect("base branch picker")
+        });
+        let picker = branch_picker.read_with(&cx, |list, _| list.picker.clone());
+        picker.update_in(&mut cx, |picker, window, cx| {
+            picker.set_query("feature", window, cx);
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .active_modal::<branch_picker::BranchList>(cx)
+                .is_none()
+        }));
+        cx.simulate_input("from-feature");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        fs.with_git_state(dot_git, false, |state| {
+            assert!(state.branches.contains("from-head"));
+            assert!(state.branches.contains("from-feature"));
+        })
+        .expect("read repository branches");
     }
 
     #[gpui::test]

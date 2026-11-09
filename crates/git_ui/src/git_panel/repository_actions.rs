@@ -1,17 +1,18 @@
 use super::GitPanel;
-use editor::{Editor, actions::SelectAll};
+use anyhow::Context as _;
+use editor::Editor;
 use git::{StashAll, StashApply, StashPop, StashStaged, StashTracked};
 use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
 use project::git_store::Repository;
 use ui::{ContextMenu, ContextMenuEntry, prelude::*};
 use util::ResultExt;
+use workspace::notifications::DetachAndPromptErr;
 use workspace::{ModalView, Workspace};
 
 struct RepositoryInputModal {
     title: SharedString,
     confirm_label: SharedString,
     editors: Vec<Entity<Editor>>,
-    required_fields: usize,
     sender: Option<futures::channel::oneshot::Sender<Vec<String>>>,
 }
 
@@ -41,11 +42,7 @@ impl RepositoryInputModal {
             .iter()
             .map(|editor| editor.read(cx).text(cx).trim().to_owned())
             .collect();
-        if values
-            .iter()
-            .take(self.required_fields)
-            .any(String::is_empty)
-        {
+        if values.iter().any(String::is_empty) {
             return;
         }
         if let Some(sender) = self.sender.take() {
@@ -103,13 +100,10 @@ impl Render for RepositoryInputModal {
     }
 }
 
-/// Fields with an initial value start with it selected, so typing replaces it.
 pub(super) fn repository_input(
     title: impl Into<SharedString>,
     confirm_label: &'static str,
     placeholders: &[&'static str],
-    initial_values: Vec<String>,
-    required_fields: usize,
     workspace: WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
@@ -124,20 +118,14 @@ pub(super) fn repository_input(
                 confirm_label: confirm_label.into(),
                 editors: placeholders
                     .into_iter()
-                    .enumerate()
-                    .map(|(index, placeholder)| {
+                    .map(|placeholder| {
                         cx.new(|cx| {
                             let mut editor = Editor::single_line(window, cx);
                             editor.set_placeholder_text(placeholder, window, cx);
-                            if let Some(initial_value) = initial_values.get(index) {
-                                editor.set_text(initial_value.as_str(), window, cx);
-                                editor.select_all(&SelectAll, window, cx);
-                            }
                             editor
                         })
                     })
                     .collect(),
-                required_fields,
                 sender: Some(sender),
             });
         })
@@ -149,9 +137,36 @@ pub(super) fn repository_input(
     cx.background_spawn(async move { receiver.await.ok() })
 }
 
+pub(crate) fn prompt_create_branch(
+    workspace: WeakEntity<Workspace>,
+    repository: Entity<Repository>,
+    title: impl Into<SharedString>,
+    base: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let title = title.into();
+    window
+        .spawn(cx, async move |cx| {
+            let input = cx.update(|window, cx| {
+                repository_input(title, "Create", &["Branch name"], workspace, window, cx)
+            })?;
+            let Some(mut values) = input.await else {
+                return Ok(());
+            };
+            let name = values.pop().context("Missing branch name")?;
+            repository
+                .update(cx, |repository, _| repository.create_branch(name, base))
+                .await??;
+            Ok(())
+        })
+        .detach_and_prompt_err("Failed to create branch", window, cx, |_, _, _| None);
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum RepositoryMenuAction {
     CreateBranch,
+    CreateBranchFrom,
     DeleteBranch,
     AddRemote,
     RemoveRemote,
@@ -296,11 +311,16 @@ pub(super) fn repository_action_submenus(
                 RepositoryMenuAction::CreateBranch,
                 !writable,
             )
-            .action_disabled_when(
-                !writable,
-                "Checkout Branch…",
-                Box::new(zed_actions::git::Switch),
-            )
+            .map(|menu| {
+                repository_menu_entry(
+                    menu,
+                    "Create Branch From…",
+                    panel.clone(),
+                    repository.clone(),
+                    RepositoryMenuAction::CreateBranchFrom,
+                    !writable,
+                )
+            })
             .action_disabled_when(
                 !writable || !has_branch,
                 "Rename Branch…",
@@ -455,7 +475,6 @@ mod tests {
                     cx.new(|cx| Editor::single_line(window, cx)),
                     cx.new(|cx| Editor::single_line(window, cx)),
                 ],
-                required_fields: 2,
                 sender: Some(sender),
             });
             modal.update(cx, |modal, cx| {
