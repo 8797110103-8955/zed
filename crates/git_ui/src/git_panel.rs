@@ -12,7 +12,7 @@ use crate::commit_context_menu::{
     CommitContextMenuData, CommitContextMenuSource, commit_context_menu,
 };
 use crate::commit_modal::CommitModal;
-use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
+use crate::commit_tooltip::CommitAvatar;
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{Diff, ProjectDiff};
@@ -40,7 +40,6 @@ use file_icons::FileIcons;
 use futures::StreamExt as _;
 use futures::channel::oneshot::Canceled;
 use git::Oid;
-use git::commit::ParsedCommitMessage;
 use git::repository::{
     Branch, CommitData, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions,
     GitCommitTemplate, GitCommitter, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
@@ -101,7 +100,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
-use time::OffsetDateTime;
 use ui::{
     ButtonLike, Checkbox, Chip, ContextMenu, ContextMenuEntry, Divider, DocumentationSide,
     ElevationIndex, IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle,
@@ -7652,7 +7650,7 @@ impl GitPanel {
             })
     }
 
-    fn render_git_changes_actions_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_stage_all_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let (icon, action, stage, tooltip) = if self.primary_changes_action_stages() {
             (
                 IconName::Plus,
@@ -7669,29 +7667,24 @@ impl GitPanel {
             )
         };
 
-        h_flex()
-            .gap_0p5()
-            .child(
-                IconButton::new("git-changes-actions", icon)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::for_action_title_in(
-                        tooltip,
-                        action.as_ref(),
-                        &self.focus_handle,
-                    ))
-                    .disabled(self.entry_count == 0)
-                    .on_click({
-                        let git_panel = cx.weak_entity();
-                        move |_, _, cx| {
-                            git_panel
-                                .update(cx, |git_panel, cx| {
-                                    git_panel.change_all_files_stage(stage, cx);
-                                })
-                                .log_err();
-                        }
-                    }),
-            )
-            .child(self.render_git_changes_actions_menu("git-changes-actions-menu", cx))
+        IconButton::new("git-changes-actions", icon)
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::for_action_title_in(
+                tooltip,
+                action.as_ref(),
+                &self.focus_handle,
+            ))
+            .disabled(self.entry_count == 0)
+            .on_click({
+                let git_panel = cx.weak_entity();
+                move |_, _, cx| {
+                    git_panel
+                        .update(cx, |git_panel, cx| {
+                            git_panel.change_all_files_stage(stage, cx);
+                        })
+                        .log_err();
+                }
+            })
     }
 
     fn render_repositories(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8089,7 +8082,7 @@ impl GitPanel {
                 |base| format!("Changes · Since {base}").into(),
             )
         } else {
-            "Changes · Uncommitted".into()
+            "Changes".into()
         };
 
         Some(
@@ -8146,9 +8139,29 @@ impl GitPanel {
                     h_flex()
                         .gap_0p5()
                         .when(!is_branch_mode, |this| {
-                            this.child(self.render_git_changes_actions_button(cx))
+                            this.child(self.render_stage_all_button(cx))
                         })
-                        .child(self.render_view_options_menu("view_options_menu", cx)),
+                        .child(
+                            IconButton::new("git-graph-button", IconName::GitGraph)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    "Open Git Graph",
+                                    &crate::git_graph::Open,
+                                    &self.focus_handle,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
+                                }),
+                        )
+                        .child(self.render_view_options_menu("view_options_menu", cx))
+                        .when(!is_branch_mode, |this| {
+                            this.child(
+                                self.render_git_changes_actions_menu(
+                                    "git-changes-actions-menu",
+                                    cx,
+                                ),
+                            )
+                        }),
                 ),
         )
     }
@@ -8383,110 +8396,6 @@ impl GitPanel {
                     .layer(ElevationIndex::ModalSurface)
                     .on_click(cx.listener(|this, _, _, cx| this.set_amend_pending(false, cx))),
             )
-    }
-
-    fn render_previous_commit(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let active_repository = self.active_repository.as_ref()?;
-        let branch = active_repository.read(cx).branch.as_ref()?;
-        let commit = branch.most_recent_commit.as_ref()?.clone();
-        let workspace = self.workspace.clone();
-        let this = cx.entity();
-
-        Some(
-            h_flex()
-                .p_1p5()
-                .gap_1p5()
-                .justify_between()
-                .border_t_1()
-                .border_color(cx.theme().colors().border.opacity(0.8))
-                .child(
-                    div()
-                        .id("commit-msg-hover")
-                        .cursor_pointer()
-                        .px_1()
-                        .rounded_sm()
-                        .line_clamp(1)
-                        .hover(|s| s.bg(cx.theme().colors().element_hover))
-                        .child(
-                            Label::new(commit.subject.clone())
-                                .size(LabelSize::Small)
-                                .truncate(),
-                        )
-                        .on_click({
-                            let commit = commit.clone();
-                            let repo = active_repository.downgrade();
-                            move |_, window, cx| {
-                                CommitView::open(
-                                    commit.sha.to_string(),
-                                    repo.clone(),
-                                    workspace.clone(),
-                                    Default::default(),
-                                    window,
-                                    cx,
-                                );
-                            }
-                        })
-                        .hoverable_tooltip({
-                            let repo = active_repository.clone();
-                            move |window, cx| {
-                                GitPanelMessageTooltip::new(
-                                    this.clone(),
-                                    commit.sha.clone(),
-                                    repo.clone(),
-                                    window,
-                                    cx,
-                                )
-                                .into()
-                            }
-                        }),
-                )
-                .child(
-                    h_flex()
-                        .gap_0p5()
-                        .when(commit.has_parent, |this| {
-                            let has_unstaged = self.has_unstaged_changes();
-                            this.child(
-                                IconButton::new("undo", IconName::Undo)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(move |_window, cx| {
-                                        Tooltip::with_meta(
-                                            "Uncommit",
-                                            Some(&git::Uncommit),
-                                            if has_unstaged {
-                                                "git reset HEAD^ --soft"
-                                            } else {
-                                                "git reset HEAD^"
-                                            },
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.uncommit(window, cx)
-                                        }),
-                                    ),
-                            )
-                        })
-                        .child(
-                            IconButton::new("git-graph-button", IconName::GitGraph)
-                                .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action(
-                                        "Open Git Graph",
-                                        &crate::git_graph::Open,
-                                        cx,
-                                    )
-                                })
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
-                                }),
-                        ),
-                ),
-        )
     }
 
     fn render_repositories_menu(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -10779,14 +10688,6 @@ impl Render for GitPanel {
                                                 }
                                             })
                                         })
-                                        .when(
-                                            !self.amend_pending && !self.commit_editor_expanded,
-                                            |this| {
-                                                this.children(
-                                                    self.render_previous_commit(window, cx),
-                                                )
-                                            },
-                                        )
                                 },
                             )
                             .when(
@@ -10943,73 +10844,6 @@ pub(crate) fn git_commit_editor_style(font_size: gpui::Pixels, cx: &App) -> Edit
         },
         syntax: cx.theme().syntax().clone(),
         ..Default::default()
-    }
-}
-
-struct GitPanelMessageTooltip {
-    commit_tooltip: Option<Entity<CommitTooltip>>,
-}
-
-impl GitPanelMessageTooltip {
-    fn new(
-        git_panel: Entity<GitPanel>,
-        sha: SharedString,
-        repository: Entity<Repository>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Self> {
-        let remote_url = repository.read(cx).default_remote_url();
-        cx.new(|cx| {
-            cx.spawn_in(window, async move |this, cx| {
-                let (details, workspace) = git_panel.update(cx, |git_panel, cx| {
-                    (
-                        git_panel.load_commit_details(sha.to_string(), cx),
-                        git_panel.workspace.clone(),
-                    )
-                });
-                let details = details.await?;
-                let provider_registry = cx
-                    .update(|_, app| GitHostingProviderRegistry::default_global(app))
-                    .ok();
-
-                let commit_details = crate::commit_tooltip::CommitDetails {
-                    sha: details.sha.clone(),
-                    author_name: details.author_name.clone(),
-                    author_email: details.author_email.clone(),
-                    commit_time: OffsetDateTime::from_unix_timestamp(details.commit_timestamp)?,
-                    message: Some(ParsedCommitMessage::parse(
-                        details.sha.to_string(),
-                        details.message.to_string(),
-                        remote_url.as_deref(),
-                        provider_registry,
-                    )),
-                    tag_names: Vec::new(),
-                    boundary: false,
-                };
-
-                this.update(cx, |this: &mut GitPanelMessageTooltip, cx| {
-                    this.commit_tooltip = Some(cx.new(move |cx| {
-                        CommitTooltip::new(commit_details, repository, workspace, cx)
-                    }));
-                    cx.notify();
-                })
-            })
-            .detach();
-
-            Self {
-                commit_tooltip: None,
-            }
-        })
-    }
-}
-
-impl Render for GitPanelMessageTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(commit_tooltip) = &self.commit_tooltip {
-            commit_tooltip.clone().into_any_element()
-        } else {
-            gpui::Empty.into_any_element()
-        }
     }
 }
 
