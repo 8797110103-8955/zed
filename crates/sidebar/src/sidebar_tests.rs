@@ -1286,6 +1286,157 @@ async fn test_entities_released_on_window_close(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_cached_new_thread_menu_releases_closed_project(cx: &mut TestAppContext) {
+    let (fs, remaining_project) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(remaining_project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let closing_workspace = add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+    let (group_key, weak_project) = closing_workspace.read_with(cx, |workspace, cx| {
+        (
+            workspace.project_group_key(cx),
+            workspace.project().downgrade(),
+        )
+    });
+    let weak_workspace = closing_workspace.downgrade();
+    drop(closing_workspace);
+
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(400.), px(400.)),
+        |_, _| sidebar.clone().into_any_element(),
+    );
+    let menu_handle = sidebar.update(cx, |sidebar, _| {
+        let header_index = sidebar
+            .contents
+            .entries
+            .iter()
+            .position(
+                |entry| matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &group_key),
+            )
+            .expect("closing project should have a sidebar header");
+        // Keep the old menu handle alive even if a later render reuses its row index.
+        sidebar
+            .project_header_new_thread_menu_handles
+            .remove(&header_index)
+            .expect("closing project's menu should have been rendered")
+    });
+    cx.update(|window, cx| {
+        menu_handle.show(window, cx);
+        assert!(
+            menu_handle.is_deployed(),
+            "project's New Thread menu should open"
+        );
+        menu_handle.hide(cx);
+    });
+
+    assert!(
+        multi_workspace
+            .update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.remove_project_group(&group_key, window, cx)
+            })
+            .await
+            .expect("failed to close project")
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+            .workspaces()
+            .count()),
+        1
+    );
+    weak_workspace.assert_released();
+    weak_project.assert_released();
+    cx.update(|window, cx| {
+        menu_handle.show(window, cx);
+        assert!(!menu_handle.is_deployed());
+    });
+}
+
+#[gpui::test]
+async fn test_sidebar_entries_do_not_retain_closed_project(cx: &mut TestAppContext) {
+    let (fs, remaining_project) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(remaining_project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let closing_workspace = add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+    let (group_key, project) = closing_workspace.read_with(cx, |workspace, cx| {
+        (workspace.project_group_key(cx), workspace.project().clone())
+    });
+    save_n_test_threads(1, &project, cx).await;
+    let weak_project = project.downgrade();
+    drop(project);
+
+    let panel = add_agent_panel(&closing_workspace, cx);
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.create_new_thread(&closing_workspace, window, cx);
+    });
+    cx.run_until_parked();
+    drop(panel);
+
+    let (row, active_entry, switcher_entry) = sidebar.read_with(cx, |sidebar, cx| {
+        let row = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Thread(thread) if thread.metadata.session_id.is_some() => {
+                    Some(thread.clone())
+                }
+                _ => None,
+            })
+            .expect("open project should show its saved thread");
+        let active_entry = sidebar
+            .active_entry
+            .clone()
+            .expect("project draft should be active");
+        let switcher_entry = sidebar
+            .mru_entries_for_switcher(cx)
+            .into_iter()
+            .find_map(|entry| match entry {
+                ThreadSwitcherEntry::Thread(thread) => Some(thread),
+                _ => None,
+            })
+            .expect("thread switcher should show the saved thread");
+        (row, active_entry, switcher_entry)
+    });
+    let weak_workspace = closing_workspace.downgrade();
+    assert_eq!(
+        row.workspace.open_workspace().as_ref(),
+        Some(&closing_workspace)
+    );
+    assert_eq!(
+        active_entry.workspace().entity_id(),
+        weak_workspace.entity_id()
+    );
+    assert_eq!(
+        switcher_entry.workspace.entity_id(),
+        weak_workspace.entity_id()
+    );
+    drop(closing_workspace);
+
+    assert!(
+        multi_workspace
+            .update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.remove_project_group(&group_key, window, cx)
+            })
+            .await
+            .expect("failed to close project")
+    );
+    cx.run_until_parked();
+
+    weak_workspace.assert_released();
+    weak_project.assert_released();
+    assert!(row.workspace.open_workspace().is_none());
+    assert!(active_entry.workspace().upgrade().is_none());
+    assert!(switcher_entry.workspace.upgrade().is_none());
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
+        1
+    );
+}
+
+#[gpui::test]
 async fn test_single_workspace_no_threads(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
@@ -1527,7 +1678,7 @@ async fn test_neighboring_activatable_entry_stays_within_project(cx: &mut TestAp
             icon: IconName::ZedAgent,
             icon_from_external_svg: None,
             status: AgentThreadStatus::Completed,
-            workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+            workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
             is_live: false,
             is_background: false,
             is_title_generating: false,
@@ -1619,7 +1770,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Completed,
-                workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
                 is_live: false,
                 is_background: false,
                 is_title_generating: false,
@@ -1646,7 +1797,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Running,
-                workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
                 is_live: true,
                 is_background: false,
                 is_title_generating: false,
@@ -1673,7 +1824,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Error,
-                workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
                 is_live: true,
                 is_background: false,
                 is_title_generating: false,
@@ -1701,7 +1852,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::WaitingForConfirmation,
-                workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
                 is_live: false,
                 is_background: false,
                 is_title_generating: false,
@@ -1729,7 +1880,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Completed,
-                workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                workspace: ThreadEntryWorkspace::Open(workspace.downgrade()),
                 is_live: true,
                 is_background: true,
                 is_title_generating: false,

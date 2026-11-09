@@ -4287,10 +4287,45 @@ async fn test_local_settings(
         )
     });
 
-    // As client A, create and remove some settings files. As client B, see the changed settings.
+    client_a
+        .fs()
+        .create_dir("/dir/.vscode".as_ref())
+        .await
+        .unwrap();
+    client_a
+        .fs()
+        .insert_file(
+            "/dir/.vscode/settings.json",
+            r#"{"editor.tabSize": 6}"#.into(),
+        )
+        .await;
     client_a
         .fs()
         .remove_file("/dir/.zed/settings.json".as_ref(), Default::default())
+        .await
+        .unwrap();
+    executor.run_until_parked();
+    cx_b.read(|cx| {
+        let store = cx.global::<SettingsStore>();
+        assert_eq!(
+            store
+                .local_settings(worktree_b.read(cx).id())
+                .map(|(path, content)| (
+                    path,
+                    content.all_languages.defaults.tab_size.map(Into::into)
+                ))
+                .collect::<Vec<_>>(),
+            &[
+                (rel_path("").into(), Some(6)),
+                (rel_path("a").into(), Some(8)),
+            ]
+        );
+    });
+
+    // As client A, create and remove some settings files. As client B, see the changed settings.
+    client_a
+        .fs()
+        .remove_file("/dir/.vscode/settings.json".as_ref(), Default::default())
         .await
         .unwrap();
     client_a

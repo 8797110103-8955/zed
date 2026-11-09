@@ -89,6 +89,13 @@ impl ApplicationMenu {
             .collect()
     }
 
+    fn collapsed_menu_entry(&self) -> Option<&MenuEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.menu.name == "File")
+            .or_else(|| self.entries.first())
+    }
+
     fn sanitize_menu_items(items: Vec<OwnedMenuItem>) -> Vec<OwnedMenuItem> {
         let mut cleaned = Vec::new();
         let mut last_was_separator = false;
@@ -179,7 +186,7 @@ impl ApplicationMenu {
         let menu_name = entry.menu.name.clone();
         let entry = entry.clone();
 
-        // Application menu must have same ids as first menu item in standard menu
+        // Keep the popover's IDs when switching to the expanded menu bar.
         div()
             .id(format!("{}-menu-item", menu_name))
             .occlude()
@@ -355,13 +362,19 @@ impl Render for ApplicationMenu {
             }
         }
 
+        let collapsed_entry = if all_menus_shown {
+            None
+        } else {
+            self.collapsed_menu_entry()
+        };
+
         div()
             .key_context("ApplicationMenu")
             .flex()
             .flex_row()
             .gap_x_1()
-            .when(!all_menus_shown && !self.entries.is_empty(), |this| {
-                this.child(self.render_application_menu(&self.entries[0]))
+            .when_some(collapsed_entry, |this, entry| {
+                this.child(self.render_application_menu(entry))
             })
             .when(all_menus_shown, |this| {
                 this.children(
@@ -517,6 +530,41 @@ mod tests {
             "View",
             "Diagnostics"
         )));
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn test_collapsed_menu_opens_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            cx.set_menus([
+                Menu::new("File").items([MenuItem::action(
+                    "New Window",
+                    OpenApplicationMenu(String::new()),
+                )]),
+                Menu::new("Zed").items([MenuItem::action(
+                    "Settings",
+                    OpenApplicationMenu(String::new()),
+                )]),
+            ]);
+        });
+        let (app_menu, cx) = cx.add_window_view(|window, cx| ApplicationMenu::new(window, cx));
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("ICON-Menu")
+            .expect("collapsed menu button should be visible");
+        let position = button.center();
+        cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+        cx.simulate_click(position, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        app_menu.read_with(cx, |app_menu, _| {
+            assert!(
+                menu_entry(&app_menu.entries, "File").handle.is_deployed(),
+                "File should open from the collapsed trigger at {button:?}"
+            );
+            assert!(!menu_entry(&app_menu.entries, "Zed").handle.is_deployed());
+        });
     }
 
     #[gpui::test]

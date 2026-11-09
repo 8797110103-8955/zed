@@ -151,16 +151,16 @@ enum ActiveEntry {
         /// differs (e.g. after cross-window activation creates a new
         /// local ThreadId).
         session_id: Option<acp::SessionId>,
-        workspace: Entity<Workspace>,
+        workspace: WeakEntity<Workspace>,
     },
     Terminal {
         terminal_id: TerminalId,
-        workspace: Entity<Workspace>,
+        workspace: WeakEntity<Workspace>,
     },
 }
 
 impl ActiveEntry {
-    fn workspace(&self) -> &Entity<Workspace> {
+    fn workspace(&self) -> &WeakEntity<Workspace> {
         match self {
             ActiveEntry::Thread { workspace, .. } | ActiveEntry::Terminal { workspace, .. } => {
                 workspace
@@ -214,7 +214,7 @@ struct ActiveThreadInfo {
 
 #[derive(Clone)]
 enum ThreadEntryWorkspace {
-    Open(Entity<Workspace>),
+    Open(WeakEntity<Workspace>),
     Closed {
         /// The paths this entry uses (may point to linked worktrees).
         folder_paths: PathList,
@@ -224,11 +224,18 @@ enum ThreadEntryWorkspace {
 }
 
 impl ThreadEntryWorkspace {
+    fn open_workspace(&self) -> Option<Entity<Workspace>> {
+        match self {
+            Self::Open(workspace) => workspace.upgrade(),
+            Self::Closed { .. } => None,
+        }
+    }
+
     fn is_remote(&self, cx: &App) -> bool {
         match self {
-            ThreadEntryWorkspace::Open(workspace) => {
-                !workspace.read(cx).project().read(cx).is_local()
-            }
+            ThreadEntryWorkspace::Open(workspace) => workspace
+                .read_with(cx, |workspace, cx| !workspace.project().read(cx).is_local())
+                .unwrap_or_default(),
             ThreadEntryWorkspace::Closed {
                 project_group_key, ..
             } => project_group_key.host().is_some(),
@@ -312,19 +319,18 @@ fn draft_display_label_for_thread_metadata(
     workspace: &ThreadEntryWorkspace,
     cx: &App,
 ) -> Option<(SharedString, DraftKind)> {
-    let workspace = match workspace {
-        ThreadEntryWorkspace::Open(workspace) => Some(workspace),
-        ThreadEntryWorkspace::Closed { .. } => None,
-    };
+    let workspace = workspace.open_workspace();
 
-    if let Some(label) =
-        agent_ui::draft_prompt_store::display_label_for_draft(workspace, metadata.thread_id, cx)
-    {
+    if let Some(label) = agent_ui::draft_prompt_store::display_label_for_draft(
+        workspace.as_ref(),
+        metadata.thread_id,
+        cx,
+    ) {
         return Some((label, DraftKind::WithContent));
     }
 
     let placeholder = agent_ui::draft_prompt_store::empty_draft_placeholder_label(
-        workspace,
+        workspace.as_ref(),
         &metadata.agent_id,
         cx,
     );
@@ -471,14 +477,10 @@ impl ListEntry {
         cx: &'a App,
     ) -> Vec<Entity<Workspace>> {
         match self {
-            ListEntry::Thread(thread) => match &thread.workspace {
-                ThreadEntryWorkspace::Open(ws) => vec![ws.clone()],
-                ThreadEntryWorkspace::Closed { .. } => Vec::new(),
-            },
-            ListEntry::Terminal(terminal) => match &terminal.workspace {
-                ThreadEntryWorkspace::Open(workspace) => vec![workspace.clone()],
-                ThreadEntryWorkspace::Closed { .. } => Vec::new(),
-            },
+            ListEntry::Thread(thread) => thread.workspace.open_workspace().into_iter().collect(),
+            ListEntry::Terminal(terminal) => {
+                terminal.workspace.open_workspace().into_iter().collect()
+            }
             ListEntry::ProjectHeader { key, .. } => multi_workspace
                 .workspaces_for_project_group(key, cx)
                 .cloned()
@@ -1178,8 +1180,8 @@ impl Sidebar {
                     this.schedule_update_entries(false, cx);
                 }
                 AgentPanelEvent::TerminalCloseRequested { metadata } => {
-                    if let Some(workspace) = workspace.upgrade() {
-                        let workspace = ThreadEntryWorkspace::Open(workspace);
+                    if workspace.upgrade().is_some() {
+                        let workspace = ThreadEntryWorkspace::Open(workspace.clone());
                         this.close_terminal(metadata, &workspace, window, cx);
                     }
                 }
@@ -1258,7 +1260,7 @@ impl Sidebar {
                 self.active_entry = Some(ActiveEntry::Thread {
                     thread_id: pending_thread_id,
                     session_id,
-                    workspace: active_workspace,
+                    workspace: active_workspace.downgrade(),
                 });
                 self.pending_thread_activation = None;
                 return true;
@@ -1270,7 +1272,7 @@ impl Sidebar {
         if let Some(terminal_id) = panel.active_terminal_id() {
             self.active_entry = Some(ActiveEntry::Terminal {
                 terminal_id,
-                workspace: active_workspace,
+                workspace: active_workspace.downgrade(),
             });
         } else if let Some(thread_id) = panel.active_thread_id(cx) {
             let is_archived = ThreadMetadataStore::global(cx)
@@ -1284,7 +1286,7 @@ impl Sidebar {
                 self.active_entry = Some(ActiveEntry::Thread {
                     thread_id,
                     session_id,
-                    workspace: active_workspace,
+                    workspace: active_workspace.downgrade(),
                 });
             }
         }
@@ -1519,7 +1521,7 @@ impl Sidebar {
             let resolve_workspace = |folder_paths: &PathList| -> ThreadEntryWorkspace {
                 workspace_by_path_list
                     .get(folder_paths)
-                    .map(|ws| ThreadEntryWorkspace::Open((*ws).clone()))
+                    .map(|ws| ThreadEntryWorkspace::Open(ws.downgrade()))
                     .unwrap_or_else(|| ThreadEntryWorkspace::Closed {
                         folder_paths: folder_paths.clone(),
                         project_group_key: group_key.clone(),
@@ -1578,7 +1580,7 @@ impl Sidebar {
                     .entries_for_path(&ws_paths, group_host)
                     .cloned()
                 {
-                    push_terminal_metadata(row, ThreadEntryWorkspace::Open(ws.clone()));
+                    push_terminal_metadata(row, ThreadEntryWorkspace::Open(ws.downgrade()));
                 }
             }
             for worktree_path_list in &linked_worktree_path_lists {
@@ -1715,7 +1717,7 @@ impl Sidebar {
                         }
                         threads.push(make_thread_entry(
                             row,
-                            ThreadEntryWorkspace::Open(ws.clone()),
+                            ThreadEntryWorkspace::Open(ws.downgrade()),
                         ));
                     }
                 }
@@ -2593,18 +2595,17 @@ impl Sidebar {
         .icon_size(IconSize::Small)
         .when(!is_menu_open, |this| this.visible_on_hover(group_name));
 
-        let open_workspaces = self
+        let has_open_workspaces = self
             .multi_workspace
-            .upgrade()
-            .map(|mw| {
-                mw.read(cx)
+            .read_with(cx, |multi_workspace, cx| {
+                multi_workspace
                     .workspaces_for_project_group(key, cx)
-                    .cloned()
-                    .collect::<Vec<_>>()
+                    .next()
+                    .is_some()
             })
-            .unwrap_or_default();
+            .unwrap_or(false);
 
-        if open_workspaces.is_empty() {
+        if !has_open_workspaces {
             let key = key.clone();
             return button
                 .tooltip(move |_, cx| {
@@ -2628,6 +2629,7 @@ impl Sidebar {
         }
 
         let this = cx.weak_entity();
+        let multi_workspace = self.multi_workspace.clone();
         let key = key.clone();
 
         PopoverMenu::new(SharedString::from(format!(
@@ -2647,16 +2649,21 @@ impl Sidebar {
         .menu(move |window, cx| {
             let this = this.clone();
             let key = key.clone();
-            let open_workspaces = open_workspaces.clone();
-            let active_workspace = this
-                .read_with(cx, |sidebar, cx| {
-                    sidebar
-                        .multi_workspace
-                        .upgrade()
-                        .map(|mw| mw.read(cx).workspace().clone())
+            // The popover handle can outlive the sidebar row that created it.
+            let (active_workspace, open_workspaces) = multi_workspace
+                .read_with(cx, |multi_workspace, cx| {
+                    (
+                        multi_workspace.workspace().clone(),
+                        multi_workspace
+                            .workspaces_for_project_group(&key, cx)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
                 })
-                .ok()
-                .flatten();
+                .ok()?;
+            if open_workspaces.is_empty() {
+                return None;
+            }
             let workspace_labels: Vec<_> = open_workspaces
                 .iter()
                 .map(|workspace| workspace_menu_worktree_labels(workspace, cx))
@@ -2668,12 +2675,10 @@ impl Sidebar {
                 move |mut menu, _window, cx| {
                     menu = menu.header("New Thread In…");
 
-                    for (workspace, labels) in open_workspaces
-                        .iter()
-                        .cloned()
-                        .zip(workspace_labels.iter().cloned())
+                    for (workspace, labels) in
+                        open_workspaces.iter().zip(workspace_labels.iter().cloned())
                     {
-                        let is_active_workspace = active_workspace.as_ref() == Some(&workspace);
+                        let is_active_workspace = &active_workspace == workspace;
                         menu = menu.custom_entry(
                             move |_window, _cx| {
                                 h_flex()
@@ -2703,8 +2708,11 @@ impl Sidebar {
                             {
                                 let this = this.clone();
                                 let key = key.clone();
-                                let workspace = workspace.clone();
+                                let workspace = workspace.downgrade();
                                 move |window, cx| {
+                                    let Some(workspace) = workspace.upgrade() else {
+                                        return;
+                                    };
                                     this.update(cx, |sidebar, cx| {
                                         sidebar.set_group_expanded(&key, true, cx);
                                         sidebar.selection = None;
@@ -2716,10 +2724,9 @@ impl Sidebar {
                         );
                     }
 
-                    let base_workspace = active_workspace
-                        .as_ref()
-                        .filter(|workspace| open_workspaces.contains(workspace))
-                        .cloned()
+                    let base_workspace = open_workspaces
+                        .contains(&active_workspace)
+                        .then_some(active_workspace)
                         .or_else(|| open_workspaces.first().cloned());
 
                     // Only offer worktree creation when the base project can
@@ -2731,10 +2738,14 @@ impl Sidebar {
                     });
 
                     if let Some(base_workspace) = base_workspace.filter(|_| !creation_blocked) {
+                        let base_workspace = base_workspace.downgrade();
                         menu = menu.separator().submenu("Create New Worktree…", {
                             let this = this.clone();
                             move |mut submenu, _window, submenu_cx| {
-                                let project = base_workspace.read(submenu_cx).project().clone();
+                                let Some(workspace) = base_workspace.upgrade() else {
+                                    return submenu;
+                                };
+                                let project = workspace.read(submenu_cx).project().clone();
                                 let project_ref = project.read(submenu_cx);
                                 let has_multiple_repositories =
                                     project_ref.repositories(submenu_cx).len() > 1;
@@ -2773,6 +2784,9 @@ impl Sidebar {
                                     let branch_target = target.branch_target();
                                     let workspace = base_workspace.clone();
                                     submenu = submenu.entry(label, None, move |window, cx| {
+                                        let Some(workspace) = workspace.upgrade() else {
+                                            return;
+                                        };
                                         create_worktree_in_workspace(
                                             &workspace,
                                             branch_target.clone(),
@@ -3060,8 +3074,8 @@ impl Sidebar {
                                 let close_multi_workspace = multi_workspace.clone();
                                 let activate_weak_menu = weak_menu.clone();
                                 let close_weak_menu = weak_menu.clone();
-                                let activate_workspace = workspace.clone();
-                                let close_workspace = workspace.clone();
+                                let activate_workspace = workspace.downgrade();
+                                let close_workspace = activate_workspace.clone();
 
                                 menu = menu.custom_entry(
                                     move |_window, _cx| {
@@ -3118,9 +3132,14 @@ impl Sidebar {
                                                         window.prevent_default();
                                                         close_multi_workspace
                                                             .update(cx, |multi_workspace, cx| {
+                                                                let Some(workspace) =
+                                                                    close_workspace.upgrade()
+                                                                else {
+                                                                    return;
+                                                                };
                                                                 multi_workspace
                                                                     .remove(
-                                                                        [close_workspace.clone()],
+                                                                        [workspace],
                                                                         RemovalIntent::CloseProject,
                                                                         window,
                                                                         cx,
@@ -3141,12 +3160,12 @@ impl Sidebar {
                                     move |window, cx| {
                                         activate_multi_workspace
                                             .update(cx, |multi_workspace, cx| {
-                                                multi_workspace.activate(
-                                                    activate_workspace.clone(),
-                                                    None,
-                                                    window,
-                                                    cx,
-                                                );
+                                                let Some(workspace) = activate_workspace.upgrade()
+                                                else {
+                                                    return;
+                                                };
+                                                multi_workspace
+                                                    .activate(workspace, None, window, cx);
                                             })
                                             .ok();
                                         activate_weak_menu
@@ -3668,8 +3687,9 @@ impl Sidebar {
                 let metadata = thread.metadata.clone();
                 match &thread.workspace {
                     ThreadEntryWorkspace::Open(workspace) => {
-                        let workspace = workspace.clone();
-                        self.activate_thread(metadata, &workspace, false, window, cx);
+                        if let Some(workspace) = workspace.upgrade() {
+                            self.activate_thread(metadata, &workspace, false, window, cx);
+                        }
                     }
                     ThreadEntryWorkspace::Closed {
                         folder_paths,
@@ -3967,7 +3987,7 @@ impl Sidebar {
         self.active_entry = Some(ActiveEntry::Thread {
             thread_id: metadata.thread_id,
             session_id: metadata.session_id.clone(),
-            workspace: workspace.clone(),
+            workspace: workspace.downgrade(),
         });
         self.record_thread_access(&metadata.thread_id);
         self.pending_thread_activation = Some(metadata.thread_id);
@@ -4017,7 +4037,7 @@ impl Sidebar {
                     sidebar.active_entry = Some(ActiveEntry::Thread {
                         thread_id: metadata_thread_id,
                         session_id: target_session_id,
-                        workspace,
+                        workspace: workspace.downgrade(),
                     });
                     sidebar.record_thread_access(&metadata_thread_id);
                     sidebar.update_entries(cx);
@@ -4527,7 +4547,7 @@ impl Sidebar {
                 self.active_entry = Some(ActiveEntry::Thread {
                     thread_id: metadata.thread_id,
                     session_id: metadata.session_id.clone(),
-                    workspace: workspace.clone(),
+                    workspace: workspace.downgrade(),
                 });
                 self.activate_workspace(&workspace, window, cx);
                 Self::load_agent_thread_in_workspace(&workspace, metadata, true, window, cx);
@@ -4537,14 +4557,7 @@ impl Sidebar {
                 metadata,
                 workspace,
             } => {
-                self.activate_terminal_entry(
-                    metadata.clone(),
-                    workspace.clone(),
-                    false,
-                    window,
-                    cx,
-                );
-                true
+                self.activate_terminal_entry(metadata.clone(), workspace.clone(), false, window, cx)
             }
         }
     }
@@ -4556,9 +4569,12 @@ impl Sidebar {
         retain: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         match workspace {
             ThreadEntryWorkspace::Open(workspace) => {
+                let Some(workspace) = workspace.upgrade() else {
+                    return false;
+                };
                 self.activate_terminal_in_workspace(&workspace, metadata, retain, window, cx);
             }
             ThreadEntryWorkspace::Closed {
@@ -4574,6 +4590,7 @@ impl Sidebar {
                 );
             }
         }
+        true
     }
 
     fn load_agent_terminal_in_workspace(
@@ -4660,7 +4677,7 @@ impl Sidebar {
         self.record_terminal_access(terminal_id);
         self.active_entry = Some(ActiveEntry::Terminal {
             terminal_id,
-            workspace: workspace.clone(),
+            workspace: workspace.downgrade(),
         });
 
         multi_workspace.update(cx, |multi_workspace, cx| {
@@ -5062,7 +5079,7 @@ impl Sidebar {
                 move |this, workspace, window, cx| {
                     this.close_terminal(
                         &metadata,
-                        &ThreadEntryWorkspace::Open(workspace),
+                        &ThreadEntryWorkspace::Open(workspace.downgrade()),
                         window,
                         cx,
                     );
@@ -5118,7 +5135,7 @@ impl Sidebar {
 
         let terminal_workspace_removed = matches!(
             workspace,
-            ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
+            ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.iter().any(|removed| removed == workspace)
         );
         let metadata = metadata.clone();
         let workspace = workspace.clone();
@@ -5168,7 +5185,7 @@ impl Sidebar {
 
         // Closing from the sidebar must not steal focus, since the row's
         // workspace may not be the active workspace.
-        if let ThreadEntryWorkspace::Open(workspace) = workspace {
+        if let Some(workspace) = workspace.open_workspace() {
             workspace.update(cx, |workspace, cx| {
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
@@ -5197,7 +5214,7 @@ impl Sidebar {
             {
                 return;
             }
-            if defer_draft_activation && let ThreadEntryWorkspace::Open(workspace) = workspace {
+            if defer_draft_activation && let Some(workspace) = workspace.open_workspace() {
                 workspace.update(cx, |workspace, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
@@ -5419,7 +5436,7 @@ impl Sidebar {
         let active_workspace = thread_id.and_then(|thread_id| {
             self.active_entry.as_ref().and_then(|entry| {
                 if entry.is_active_thread(&thread_id) {
-                    Some(entry.workspace().clone())
+                    entry.workspace().upgrade()
                 } else {
                     None
                 }
@@ -5903,7 +5920,7 @@ impl Sidebar {
                         return None;
                     }
                     let workspace = match &thread.workspace {
-                        ThreadEntryWorkspace::Open(workspace) => Some(workspace.clone()),
+                        ThreadEntryWorkspace::Open(workspace) => workspace.upgrade(),
                         ThreadEntryWorkspace::Closed { .. } => {
                             current_header_key.as_ref().and_then(|key| {
                                 self.multi_workspace.upgrade().and_then(|mw| {
@@ -5923,7 +5940,7 @@ impl Sidebar {
                         icon_from_external_svg: thread.icon_from_external_svg.clone(),
                         status: thread.status,
                         metadata: thread.metadata.clone(),
-                        workspace,
+                        workspace: workspace.downgrade(),
                         project_name: current_header_label.clone(),
                         worktrees: thread
                             .worktrees
@@ -6001,6 +6018,9 @@ impl Sidebar {
                 metadata,
                 workspace,
             } => {
+                let Some(workspace) = workspace.upgrade() else {
+                    return;
+                };
                 if let Some(multi_workspace) = self.multi_workspace.upgrade() {
                     multi_workspace.update(cx, |multi_workspace, cx| {
                         multi_workspace.activate(workspace.clone(), None, window, cx);
@@ -6009,16 +6029,16 @@ impl Sidebar {
                 self.active_entry = Some(ActiveEntry::Thread {
                     thread_id: metadata.thread_id,
                     session_id: metadata.session_id.clone(),
-                    workspace: workspace.clone(),
+                    workspace: workspace.downgrade(),
                 });
                 self.update_entries(cx);
-                Self::load_agent_thread_in_workspace(workspace, metadata, false, window, cx);
+                Self::load_agent_thread_in_workspace(&workspace, metadata, false, window, cx);
             }
             ThreadSwitcherSelection::Terminal {
                 metadata,
                 workspace,
             } => {
-                if let ThreadEntryWorkspace::Open(workspace) = workspace {
+                if let Some(workspace) = workspace.open_workspace() {
                     if let Some(multi_workspace) = self.multi_workspace.upgrade() {
                         multi_workspace.update(cx, |multi_workspace, cx| {
                             multi_workspace.activate(workspace.clone(), None, window, cx);
@@ -6026,10 +6046,10 @@ impl Sidebar {
                     }
                     self.active_entry = Some(ActiveEntry::Terminal {
                         terminal_id: metadata.terminal_id,
-                        workspace: workspace.clone(),
+                        workspace: workspace.downgrade(),
                     });
                     self.update_entries(cx);
-                    Self::load_agent_terminal_in_workspace(workspace, metadata, false, window, cx);
+                    Self::load_agent_terminal_in_workspace(&workspace, metadata, false, window, cx);
                 }
             }
         }
@@ -6046,6 +6066,10 @@ impl Sidebar {
                 metadata,
                 workspace,
             } => {
+                let Some(workspace) = workspace.upgrade() else {
+                    self.dismiss_thread_switcher(cx);
+                    return;
+                };
                 if let Some(multi_workspace) = self.multi_workspace.upgrade() {
                     multi_workspace.update(cx, |multi_workspace, cx| {
                         multi_workspace.activate(workspace.clone(), None, window, cx);
@@ -6056,11 +6080,11 @@ impl Sidebar {
                 self.active_entry = Some(ActiveEntry::Thread {
                     thread_id: metadata.thread_id,
                     session_id: metadata.session_id.clone(),
-                    workspace: workspace.clone(),
+                    workspace: workspace.downgrade(),
                 });
                 self.update_entries(cx);
                 self.dismiss_thread_switcher(cx);
-                Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
+                Self::load_agent_thread_in_workspace(&workspace, metadata, true, window, cx);
             }
             ThreadSwitcherSelection::Terminal {
                 metadata,
@@ -6113,9 +6137,8 @@ impl Sidebar {
             _ => None,
         };
         let original_workspace = self
-            .multi_workspace
-            .upgrade()
-            .map(|mw| mw.read(cx).workspace().clone());
+            .active_workspace(cx)
+            .map(|workspace| workspace.downgrade());
 
         let thread_switcher = cx.new(|cx| ThreadSwitcher::new(entries, select_last, window, cx));
 
@@ -6133,6 +6156,8 @@ impl Sidebar {
                     this.confirm_switcher_selection(selection, window, cx);
                 }
                 ThreadSwitcherEvent::Dismissed => {
+                    let original_workspace =
+                        original_workspace.as_ref().and_then(WeakEntity::upgrade);
                     if let Some(mw) = weak_multi_workspace.upgrade() {
                         if let Some(original_ws) = &original_workspace {
                             mw.update(cx, |mw, cx| {
@@ -6148,7 +6173,7 @@ impl Sidebar {
                                 this.active_entry = Some(ActiveEntry::Thread {
                                     thread_id: metadata.thread_id,
                                     session_id: metadata.session_id.clone(),
-                                    workspace: original_ws.clone(),
+                                    workspace: original_ws.downgrade(),
                                 });
                                 this.update_entries(cx);
                                 Self::load_agent_thread_in_workspace(
@@ -6163,12 +6188,11 @@ impl Sidebar {
                         Some(ActiveEntry::Terminal {
                             terminal_id,
                             workspace,
-                        }) => {
+                        }) if let Some(workspace) = workspace.upgrade() => {
                             let terminal_id = *terminal_id;
-                            let workspace = workspace.clone();
                             this.active_entry = Some(ActiveEntry::Terminal {
                                 terminal_id,
-                                workspace: workspace.clone(),
+                                workspace: workspace.downgrade(),
                             });
                             this.update_entries(cx);
                             workspace.update(cx, |workspace, cx| {
@@ -6179,7 +6203,7 @@ impl Sidebar {
                                 }
                             });
                         }
-                        None => {}
+                        _ => {}
                     }
                     this.dismiss_thread_switcher(cx);
                 }
@@ -6451,7 +6475,15 @@ impl Sidebar {
                     this.selection = None;
                     match &thread_workspace {
                         ThreadEntryWorkspace::Open(workspace) => {
-                            this.activate_thread(metadata.clone(), workspace, false, window, cx);
+                            if let Some(workspace) = workspace.upgrade() {
+                                this.activate_thread(
+                                    metadata.clone(),
+                                    &workspace,
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            }
                         }
                         ThreadEntryWorkspace::Closed {
                             folder_paths,
@@ -6480,7 +6512,9 @@ impl Sidebar {
         let context_menu_id = SharedString::from(format!("thread-context-menu-{}", ix));
         let sidebar = cx.weak_entity();
 
-        let active_workspace = self.active_workspace(cx);
+        let active_workspace = self
+            .active_workspace(cx)
+            .map(|workspace| workspace.downgrade());
         let thread_workspace = match &thread_workspace {
             ThreadEntryWorkspace::Open(workspace) => Some(workspace.clone()),
             ThreadEntryWorkspace::Closed { .. } => None,
@@ -6536,7 +6570,9 @@ impl Sidebar {
                                                 &session_id,
                                                 thread_id,
                                                 folder_paths.clone(),
-                                                thread_workspace.clone(),
+                                                thread_workspace
+                                                    .as_ref()
+                                                    .and_then(WeakEntity::upgrade),
                                                 cx,
                                             );
                                         })
@@ -6551,7 +6587,8 @@ impl Sidebar {
                                 let markdown_title = markdown_title.clone();
                                 let thread_workspace = thread_workspace.clone();
                                 move |window, cx| {
-                                    if let Some(thread_workspace) = thread_workspace.as_ref()
+                                    if let Some(thread_workspace) =
+                                        thread_workspace.as_ref().and_then(WeakEntity::upgrade)
                                         && let Some(panel) =
                                             thread_workspace.read(cx).panel::<AgentPanel>(cx)
                                     {
@@ -6569,12 +6606,13 @@ impl Sidebar {
                                     }
 
                                     if is_zed_thread
-                                        && let Some(active_workspace) = &active_workspace
+                                        && let Some(active_workspace) =
+                                            active_workspace.as_ref().and_then(WeakEntity::upgrade)
                                     {
                                         Self::open_closed_native_thread_as_markdown(
                                             &session_id,
                                             markdown_title.clone(),
-                                            active_workspace,
+                                            &active_workspace,
                                             window,
                                             cx,
                                         );
@@ -6859,7 +6897,12 @@ impl Sidebar {
                 window,
                 cx,
                 move |this, workspace, window, cx| {
-                    this.remove_draft(draft_id, &ThreadEntryWorkspace::Open(workspace), window, cx);
+                    this.remove_draft(
+                        draft_id,
+                        &ThreadEntryWorkspace::Open(workspace.downgrade()),
+                        window,
+                        cx,
+                    );
                 },
             );
             return;
@@ -6869,9 +6912,9 @@ impl Sidebar {
             .as_ref()
             .map(|metadata| metadata.folder_paths().clone())
             .or_else(|| match workspace {
-                ThreadEntryWorkspace::Open(workspace) => {
-                    Some(PathList::new(&workspace.read(cx).root_paths(cx)))
-                }
+                ThreadEntryWorkspace::Open(workspace) => workspace
+                    .upgrade()
+                    .map(|workspace| PathList::new(&workspace.read(cx).root_paths(cx))),
                 ThreadEntryWorkspace::Closed { folder_paths, .. } => Some(folder_paths.clone()),
             });
         let draft_remote_connection = metadata
@@ -6927,7 +6970,7 @@ impl Sidebar {
 
         let draft_workspace_removed = matches!(
             workspace,
-            ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
+            ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.iter().any(|removed| removed == workspace)
         );
         let workspace = workspace.clone();
 
@@ -6975,7 +7018,7 @@ impl Sidebar {
         // draft was the active entry.
         let activate_panel_draft = activate_panel_draft && !(was_active && neighbor.is_some());
 
-        let removed_from_panel = if let ThreadEntryWorkspace::Open(workspace) = workspace {
+        let removed_from_panel = if let Some(workspace) = workspace.open_workspace() {
             workspace.update(cx, |workspace, cx| {
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
@@ -7078,7 +7121,7 @@ impl Sidebar {
             self.active_entry = Some(ActiveEntry::Thread {
                 thread_id: draft_id,
                 session_id: None,
-                workspace: workspace.clone(),
+                workspace: workspace.downgrade(),
             });
         }
     }
@@ -7283,8 +7326,9 @@ impl Sidebar {
                 let metadata = thread.metadata.clone();
                 match &thread.workspace {
                     ThreadEntryWorkspace::Open(workspace) => {
-                        let workspace = workspace.clone();
-                        self.activate_thread(metadata, &workspace, true, window, cx);
+                        if let Some(workspace) = workspace.upgrade() {
+                            self.activate_thread(metadata, &workspace, true, window, cx);
+                        }
                     }
                     ThreadEntryWorkspace::Closed {
                         folder_paths,

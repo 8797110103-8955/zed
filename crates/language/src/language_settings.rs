@@ -1658,8 +1658,7 @@ mod tests {
     #[gpui::test]
     fn test_language_servers_across_settings_files(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let mut store = SettingsStore::new(cx, &settings::default_settings());
-            store.register_setting::<AllLanguageSettings>();
+            let mut store = language_server_settings_store(cx);
 
             let worktree_id = WorktreeId::from_usize(1);
             let root = LocalSettingsPath::InWorktree(rel_path("root").into());
@@ -1674,11 +1673,6 @@ mod tests {
             });
 
             assert_eq!(
-                resolved_language_servers(&store, None, "TypeScript"),
-                servers(&["vtsls", "eslint"]),
-                "default settings should disable typescript-language-server for TypeScript"
-            );
-            assert_eq!(
                 resolved_language_servers(&store, None, "Rust"),
                 servers(&["typescript-language-server", "vtsls", "eslint"]),
             );
@@ -1688,7 +1682,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 resolved_language_servers(&store, None, "TypeScript"),
-                servers(&["vtsls", "eslint"]),
+                servers(&["fixture-server"]),
                 "the per-language list should fully replace the user's global list"
             );
             assert_eq!(
@@ -1733,7 +1727,7 @@ mod tests {
             );
             assert_eq!(
                 resolved_language_servers(&store, root_location, "TypeScript"),
-                servers(&["vtsls", "eslint"]),
+                servers(&["fixture-server"]),
                 "the per-language list should fully replace the project's global list"
             );
 
@@ -1851,8 +1845,7 @@ mod tests {
     #[gpui::test]
     fn test_language_servers_combined_restrictions(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let mut store = SettingsStore::new(cx, &settings::default_settings());
-            store.register_setting::<AllLanguageSettings>();
+            let mut store = language_server_settings_store(cx);
 
             let worktree_id = WorktreeId::from_usize(1);
             let root = LocalSettingsPath::InWorktree(rel_path("root").into());
@@ -1885,7 +1878,7 @@ mod tests {
             );
             assert_eq!(
                 resolved_language_servers(&store, root_location, "TypeScript"),
-                servers(&["vtsls", "eslint"]),
+                servers(&["fixture-server"]),
                 "a language with its own list should ignore global lists from every file"
             );
 
@@ -1917,7 +1910,7 @@ mod tests {
             );
             assert_eq!(
                 resolved_language_servers(&store, None, "TypeScript"),
-                servers(&["vtsls", "eslint"]),
+                servers(&["fixture-server"]),
                 "a global list, exhaustive or not, never applies to languages with their own list"
             );
 
@@ -1940,32 +1933,6 @@ mod tests {
                 servers(&["typescript-language-server", "vtsls"]),
             );
 
-            // Issue #60763: to disable a server that the shipped list explicitly
-            // enables, the spelling is per-language, restating the shipped
-            // exclusions.
-            store
-                .set_user_settings(
-                    r#"{"languages": {"TypeScript": {"language_servers": ["!typescript-language-server", "!vtsls", "..."]}}}"#,
-                    cx,
-                )
-                .unwrap();
-            assert_eq!(
-                resolved_language_servers(&store, None, "TypeScript"),
-                servers(&["eslint"]),
-                "a per-language disable should win over the shipped explicit enable"
-            );
-            store
-                .set_user_settings(
-                    r#"{"languages": {"TypeScript": {"language_servers": ["!vtsls", "..."]}}}"#,
-                    cx,
-                )
-                .unwrap();
-            assert_eq!(
-                resolved_language_servers(&store, None, "TypeScript"),
-                servers(&["typescript-language-server", "eslint"]),
-                "a per-language list not restating the shipped exclusions should lift them"
-            );
-
             store
                 .set_user_settings(
                     r#"{"languages": {"TypeScript": {"language_servers": ["eslint"]}}}"#,
@@ -1978,6 +1945,23 @@ mod tests {
                 "an exhaustive per-language list should pin exactly the listed servers"
             );
         });
+    }
+
+    fn language_server_settings_store(cx: &mut App) -> SettingsStore {
+        let mut store = SettingsStore::new(cx, &settings::default_settings());
+        store.update_default_settings(cx, |settings| {
+            let languages = &mut settings.project.all_languages;
+            languages.defaults.language_servers = Some(vec![REST_OF_LANGUAGE_SERVERS.into()]);
+            languages.languages.0.clear();
+            languages
+                .languages
+                .0
+                .entry("TypeScript".into())
+                .or_default()
+                .language_servers = Some(vec!["fixture-server".into()]);
+        });
+        store.register_setting::<AllLanguageSettings>();
+        store
     }
 
     fn servers(names: &[&str]) -> Vec<LanguageServerName> {

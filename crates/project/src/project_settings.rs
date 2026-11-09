@@ -1353,7 +1353,7 @@ impl SettingsObserver {
             settings_contents.push(async move {
                 if kind == LocalSettingsKind::Settings {
                     return match load_folder_settings(fs, abs_path).await {
-                        Ok(content) => (settings_dir, kind, Some(Ok(content)), None),
+                        Ok(content) => (settings_dir, kind, content.map(Ok), None),
                         Err((settings_file, error)) => {
                             (settings_dir, kind, Some(Err(error)), Some(settings_file))
                         }
@@ -1813,13 +1813,13 @@ impl SettingsObserver {
 async fn load_folder_settings(
     fs: Arc<dyn Fs>,
     changed_path: PathBuf,
-) -> Result<String, (&'static RelPath, anyhow::Error)> {
+) -> Result<Option<String>, (&'static RelPath, anyhow::Error)> {
     let directory = changed_path
         .parent()
         .and_then(std::path::Path::parent)
         .context("Settings file has no project directory")
         .map_err(|error| (local_settings_file_relative_path(), error))?;
-    let mut merged = empty_object();
+    let mut merged = None;
     for relative_path in [
         local_vscode_settings_file_relative_path(),
         local_settings_file_relative_path(),
@@ -1828,10 +1828,12 @@ async fn load_folder_settings(
             .await
             .map_err(|error| (relative_path, error))?;
         if let Some(value) = value {
-            merge_non_null_json_value_into(value, &mut merged);
+            merge_non_null_json_value_into(value, merged.get_or_insert_with(empty_object));
         }
     }
-    serde_json::to_string(&merged)
+    merged
+        .map(|settings| serde_json::to_string(&settings))
+        .transpose()
         .map_err(|error| (local_settings_file_relative_path(), error.into()))
 }
 

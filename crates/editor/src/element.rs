@@ -1,10 +1,12 @@
 mod header;
+mod minimap_regions;
 mod mouse;
 
 #[cfg(test)]
 pub(crate) use header::StickyHeader;
 pub use header::file_status_label_color;
 pub(crate) use header::{header_jump_data, render_buffer_header};
+pub(super) use minimap_regions::MinimapRegions;
 
 use crate::{
     BUFFER_HEADER_PADDING, BlockId, ChunkRendererContext, ChunkReplacement, CodeActionSource,
@@ -1696,7 +1698,7 @@ impl EditorElement {
             .size_full()
             .shadow_xs()
             .px(PADDING_OFFSET)
-            .child(minimap_editor)
+            .child(minimap_editor.clone())
             .into_any_element();
 
         let extended_bounds = minimap_bounds.extend(Edges {
@@ -1709,8 +1711,32 @@ impl EditorElement {
             minimap.prepaint(window, cx)
         });
 
+        let region_overlay = minimap_editor
+            .update(cx, |editor, cx| {
+                let positions = editor.last_position_map.as_ref()?;
+                let snapshot = &positions.snapshot.display_snapshot;
+                let buffer = snapshot.buffer_snapshot().as_singleton()?;
+                let regions = editor.minimap_regions.get_or_insert_default();
+                regions.refresh(buffer, self.editor.downgrade(), cx);
+                regions.overlay(
+                    snapshot,
+                    positions.visible_row_range.clone(),
+                    positions.scroll_position.y,
+                    positions.line_height,
+                    cx,
+                )
+            })
+            .map(|mut overlay| {
+                overlay.layout_as_root(minimap_bounds.size.into(), window, cx);
+                window.with_absolute_element_offset(minimap_bounds.origin, |window| {
+                    overlay.prepaint(window, cx)
+                });
+                overlay
+            });
+
         Some(MinimapLayout {
             minimap,
+            region_overlay,
             thumb_layout: layout,
             thumb_border_style: minimap_settings.thumb_border,
             minimap_line_height,
@@ -6758,6 +6784,11 @@ impl EditorElement {
                             ));
                         });
                     }
+                    if let Some(mut overlay) = layout.region_overlay.take() {
+                        window.paint_layer(minimap_hitbox.bounds, |window| {
+                            overlay.paint(window, cx);
+                        });
+                    }
                 });
             });
 
@@ -10701,6 +10732,7 @@ impl ScrollbarLayout {
 
 struct MinimapLayout {
     pub minimap: AnyElement,
+    region_overlay: Option<AnyElement>,
     pub thumb_layout: ScrollbarLayout,
     pub minimap_scroll_top: ScrollOffset,
     pub minimap_line_height: Pixels,
