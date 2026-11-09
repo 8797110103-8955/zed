@@ -7095,6 +7095,7 @@ dependencies = [
  "tree-sitter-md",
  "ui",
  "ui_input",
+ "unicode-width 0.2.2",
  "unindent",
  "url",
  "util",
@@ -13372,8 +13373,11 @@ dependencies = [
  "project",
  "rope",
  "settings",
+ "theme",
+ "theme_settings",
  "ui",
  "util",
+ "workspace",
 ]
 
 [[package]]
@@ -13894,6 +13898,7 @@ dependencies = [
  "tempfile",
  "terminal",
  "text",
+ "time",
  "toml 0.9.8",
  "tracing",
  "unindent",
@@ -13931,6 +13936,29 @@ dependencies = [
  "semver",
  "settings",
  "watch",
+]
+
+[[package]]
+name = "project_bookmarks"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "futures 0.3.34",
+ "fuzzy_nucleo",
+ "gpui",
+ "language",
+ "menu",
+ "picker",
+ "picker_preview",
+ "project",
+ "serde_json",
+ "text",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "zlog",
 ]
 
 [[package]]
@@ -22479,6 +22507,7 @@ dependencies = [
  "pretty_assertions",
  "profiling",
  "project",
+ "project_bookmarks",
  "project_panel",
  "project_symbols",
  "prompt_store",
