@@ -5968,6 +5968,10 @@ impl RepositoryId {
 }
 
 impl RepositorySnapshot {
+    pub fn is_head_loading(&self) -> bool {
+        self.scan_id == 0 && self.branch.is_none() && self.head_commit.is_none()
+    }
+
     fn empty(
         id: RepositoryId,
         work_directory_abs_path: Arc<Path>,
@@ -9801,7 +9805,7 @@ impl Repository {
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let status_msg = if let Some(ref base) = base_branch {
-            format!("git switch -c {branch_name} {base}").into()
+            format!("git switch -c {branch_name} --no-track {base}").into()
         } else {
             format!("git switch -c {branch_name}").into()
         };
@@ -9826,6 +9830,36 @@ impl Repository {
                         Ok(())
                     }
                 }
+            },
+        )
+    }
+
+    pub fn set_branch_upstream(
+        &mut self,
+        branch_name: String,
+        upstream: String,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<()>> {
+        let updates_tx = self
+            .git_store()
+            .and_then(|store| match &store.read(cx).state {
+                GitStoreState::Local { downstream, .. } => downstream
+                    .as_ref()
+                    .map(|downstream| downstream.updates_tx.clone()),
+                _ => None,
+            });
+        let this = cx.weak_entity();
+        self.send_job(
+            "set_branch_upstream",
+            Some(format!("git branch --set-upstream-to {upstream} -- {branch_name}").into()),
+            move |state, mut cx| async move {
+                let RepositoryState::Local(LocalRepositoryState { backend, .. }) = state else {
+                    anyhow::bail!(
+                        "Setting the tracking branch is only supported for local repositories"
+                    );
+                };
+                backend.set_branch_upstream(branch_name, upstream).await?;
+                Self::refresh_branch_list(&this, backend, updates_tx, &mut cx).await
             },
         )
     }
@@ -9969,7 +10003,10 @@ impl Repository {
             .head_commit_details
             .as_ref()
             .map(proto_to_commit_details);
-        if self.snapshot.branch != new_branch || self.snapshot.head_commit != new_head_commit {
+        if self.snapshot.branch != new_branch
+            || self.snapshot.head_commit != new_head_commit
+            || (self.snapshot.is_head_loading() && update.is_last_update && update.scan_id > 0)
+        {
             cx.emit(RepositoryEvent::HeadChanged)
         }
         self.snapshot.branch = new_branch;
@@ -13151,7 +13188,18 @@ async fn compute_snapshot(
 
     let branches_future = {
         let backend = backend.clone();
-        async move { backend.branches().await.log_err().unwrap_or_default() }
+        async move {
+            match backend.branches().await {
+                Ok(branches) => branches,
+                Err(error) => {
+                    log::error!("Failed to read repository branches: {error:#}");
+                    BranchesScanResult {
+                        branches: Vec::new(),
+                        error: Some(error.to_string().into()),
+                    }
+                }
+            }
+        }
     };
     let head_commit_future = {
         let backend = backend.clone();
@@ -13190,8 +13238,9 @@ async fn compute_snapshot(
     log::debug!("fetched remotes");
 
     let snapshot = this.update(cx, |this, cx| {
-        let head_changed =
-            branch != this.snapshot.branch || head_commit != this.snapshot.head_commit;
+        let head_changed = this.snapshot.is_head_loading()
+            || branch != this.snapshot.branch
+            || head_commit != this.snapshot.head_commit;
         let branch_list_changed = *branch_list != *this.snapshot.branch_list;
         let branch_list_error_changed = branch_list_error != this.snapshot.branch_list_error;
         let worktrees_changed = *linked_worktrees != *this.snapshot.linked_worktrees;

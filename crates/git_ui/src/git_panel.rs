@@ -5067,6 +5067,66 @@ impl GitPanel {
             .detach();
     }
 
+    fn select_tracking_branch(
+        &self,
+        repository: Entity<Repository>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(branch) = repository.read(cx).branch.as_ref() else {
+            return;
+        };
+        let branch_name = branch.name().to_owned();
+        let selected_branch = branch
+            .upstream
+            .as_ref()
+            .map(|upstream| upstream.ref_name.clone());
+        let on_select: branch_picker::SelectBranchCallback = Arc::new({
+            let repository = repository.clone();
+            move |upstream, window, cx| {
+                let repository = repository.clone();
+                let branch_name = branch_name.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        repository
+                            .update(cx, |repository, cx| {
+                                repository.set_branch_upstream(
+                                    branch_name,
+                                    upstream.ref_name.to_string(),
+                                    cx,
+                                )
+                            })
+                            .await??;
+                        anyhow::Ok(())
+                    })
+                    .detach_and_prompt_err(
+                        "Failed to set tracking branch",
+                        window,
+                        cx,
+                        |error, _, _| Some(error.to_string()),
+                    );
+            }
+        });
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    let workspace_handle = workspace.weak_handle();
+                    workspace.toggle_modal(window, cx, |window, cx| {
+                        branch_picker::tracking_modal(
+                            workspace_handle,
+                            repository,
+                            selected_branch,
+                            on_select,
+                            window,
+                            cx,
+                        )
+                    });
+                })
+                .log_err();
+        });
+    }
+
     fn repository_menu_action(
         &mut self,
         repository: Entity<Repository>,
@@ -5107,25 +5167,35 @@ impl GitPanel {
                 self.create_branch_from(repository, window, cx);
                 return;
             }
+            RepositoryMenuAction::SetTrackingBranch => {
+                self.select_tracking_branch(repository, window, cx);
+                return;
+            }
+            RepositoryMenuAction::DeleteBranch => {
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            let workspace_handle = workspace.weak_handle();
+                            workspace.toggle_modal(window, cx, |window, cx| {
+                                branch_picker::delete_modal(
+                                    workspace_handle,
+                                    repository,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .log_err();
+                });
+                return;
+            }
             _ => {}
         }
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 match action {
-                    RepositoryMenuAction::DeleteBranch => {
-                        let scan = repository.update(cx, |repository, _| repository.branches()).await??;
-                        if let Some(error) = scan.error { anyhow::bail!("{error}"); }
-                        let branches: Vec<_> = scan.branches.into_iter().filter(|branch| !branch.is_head && !branch.is_remote()).collect();
-                        let labels = branches.iter().map(|branch| branch.name().to_owned().into()).collect();
-                        let selection = cx.update(|window, cx| picker_prompt::prompt("Delete which local branch?", labels, workspace, window, cx))?.await;
-                        let Some(branch) = selection.and_then(|index| branches.get(index)) else { return Ok(()); };
-                        let name = branch.name().to_owned();
-                        let confirmation = cx.update(|window, cx| window.prompt(PromptLevel::Warning, &format!("Delete branch {name}?"), Some("Unmerged branches will be kept."), &["Delete", "Cancel"], cx))?.await?;
-                        if confirmation == 0 {
-                            repository.update(cx, |repository, _| repository.delete_branch(false, name, false)).await??;
-                        }
-                    }
                     RepositoryMenuAction::AddRemote => {
                         let input = cx.update(|window, cx| repository_input("Add Remote", "Confirm", &["Remote name (for example, origin)", "Remote URL"], workspace, window, cx))?.await;
                         let Some(mut values) = input else { return Ok(()); };
@@ -5172,7 +5242,9 @@ impl GitPanel {
                     | RepositoryMenuAction::PullFrom
                     | RepositoryMenuAction::PushTo
                     | RepositoryMenuAction::CreateBranch
-                    | RepositoryMenuAction::CreateBranchFrom => {}
+                    | RepositoryMenuAction::CreateBranchFrom
+                    | RepositoryMenuAction::SetTrackingBranch
+                    | RepositoryMenuAction::DeleteBranch => {}
                 }
                 anyhow::Ok(())
             }.await;
@@ -5359,16 +5431,9 @@ impl GitPanel {
                         )
                     })?
                     .await?;
-                let Some(selected_branch) = selection else {
+                let Some(branch_name) = selection else {
                     return Ok(());
                 };
-                let prefix = format!("refs/remotes/{}/", remote.name);
-                let branch_name: SharedString = selected_branch
-                    .ref_name
-                    .strip_prefix(&prefix)
-                    .context("Selected branch does not belong to the remote")?
-                    .to_owned()
-                    .into();
                 let askpass = this.update_in(cx, |this, window, cx| {
                     this.pending_remote_operation = Some(if is_push {
                         RemoteOperationKind::Push
@@ -5391,8 +5456,8 @@ impl GitPanel {
                     let output = repository
                         .update(cx, |repository, cx| {
                             repository.push(
-                                source_branch.clone(),
-                                branch_name,
+                                branch.ref_name.clone(),
+                                format!("refs/heads/{branch_name}").into(),
                                 remote.name.clone(),
                                 options,
                                 askpass,
@@ -7799,6 +7864,7 @@ impl GitPanel {
             let display_name = repository_state.display_name();
             let summary = repository_state.status_summary();
             let (status_suffix, status_color) = repository_branch_status(summary);
+            let branch_loading = repository_state.is_head_loading();
             let branch_name = repository_state
                 .branch
                 .as_ref()
@@ -7809,7 +7875,16 @@ impl GitPanel {
                         .as_ref()
                         .map(|commit| commit.sha.chars().take(8).collect())
                 })
-                .unwrap_or_else(|| "No branch".to_owned());
+                .unwrap_or_else(|| {
+                    if branch_loading {
+                        "Loading branch…"
+                    } else if repository_state.branch_list_error.is_some() {
+                        "Branch unavailable"
+                    } else {
+                        "No branch"
+                    }
+                    .to_owned()
+                });
             let branch_name = format!("{branch_name}{status_suffix}");
             let tracking = repository_state
                 .branch
@@ -7827,6 +7902,7 @@ impl GitPanel {
                 .trigger_with_tooltip(
                     Button::new(("repository-branch-button", repository_id.0), branch_name)
                         .size(ButtonSize::None)
+                        .loading(branch_loading)
                         .label_size(LabelSize::Small)
                         .color(status_color)
                         .start_icon(
@@ -9804,9 +9880,19 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let context_menu =
-            git_panel_view_options_menu(self.focus_handle.clone(), cx.weak_entity(), window, cx);
-        self.set_context_menu(context_menu, position, None, window, cx);
+        let panel = cx.weak_entity();
+        let focus_handle = self.focus_handle.clone();
+        // The menu builder reads the panel, so wait for the mouse handler's update to finish.
+        window.defer(cx, move |window, cx| {
+            let Some(panel) = panel.upgrade() else {
+                return;
+            };
+            let context_menu =
+                git_panel_view_options_menu(focus_handle, panel.downgrade(), window, cx);
+            panel.update(cx, |panel, cx| {
+                panel.set_context_menu(context_menu, position, None, window, cx);
+            });
+        });
     }
 
     fn set_context_menu(
@@ -14876,6 +14962,112 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_set_tracking_branch_from_repository_menu(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (fs, _, workspace, panel, mut cx) =
+            setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+        let dot_git = Path::new(path!("/project/.git"));
+        fs.set_branch_name(dot_git, Some("main"));
+        fs.with_git_state(dot_git, true, |state| {
+            state
+                .branches
+                .extend(["main".into(), "origin/feature".into()]);
+        })
+        .expect("configure repository");
+        cx.run_until_parked();
+
+        let repository = panel.update_in(&mut cx, |panel, window, cx| {
+            let repository = panel.active_repository.clone().expect("active repository");
+            panel.repository_menu_action(
+                repository.clone(),
+                RepositoryMenuAction::SetTrackingBranch,
+                window,
+                cx,
+            );
+            repository
+        });
+        cx.run_until_parked();
+        let picker = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .active_modal::<branch_picker::BranchList>(cx)
+                .expect("tracking branch picker")
+                .read(cx)
+                .picker
+                .clone()
+        });
+        picker.update_in(&mut cx, |picker, _, _| {
+            assert_eq!(picker.delegate.match_count(), 1);
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        repository.read_with(&cx, |repository, _| {
+            let branch = repository.branch.as_ref().expect("current local branch");
+            assert_eq!(branch.name(), "main");
+            assert_eq!(
+                branch
+                    .upstream
+                    .as_ref()
+                    .map(|upstream| upstream.ref_name.as_ref()),
+                Some("refs/remotes/origin/feature")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_delete_branch_from_repository_menu_uses_branch_picker(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (fs, _, workspace, panel, mut cx) =
+            setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+        let dot_git = Path::new(path!("/project/.git"));
+        fs.set_branch_name(dot_git, Some("main"));
+        fs.with_git_state(dot_git, true, |state| {
+            state
+                .branches
+                .extend(["main".into(), "feature".into(), "origin/feature".into()]);
+        })
+        .expect("configure repository");
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let repository = panel.active_repository.clone().expect("active repository");
+            panel.repository_menu_action(
+                repository,
+                RepositoryMenuAction::DeleteBranch,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let picker = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .active_modal::<branch_picker::BranchList>(cx)
+                .expect("delete branch picker")
+                .read(cx)
+                .picker
+                .clone()
+        });
+        picker.update_in(&mut cx, |picker, window, cx| {
+            picker.set_query("feature", window, cx);
+        });
+        cx.run_until_parked();
+        picker.read_with(&cx, |picker, _| {
+            assert_eq!(picker.delegate.match_count(), 1)
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Delete");
+        cx.run_until_parked();
+        fs.with_git_state(dot_git, false, |state| {
+            assert_eq!(state.current_branch_name.as_deref(), Some("main"));
+            assert!(!state.branches.contains("feature"));
+            assert!(state.branches.contains("origin/feature"));
+        })
+        .expect("read repository branches");
+    }
+
+    #[gpui::test]
     async fn test_pull_from_cancellation_reenables_panel(cx: &mut TestAppContext) {
         init_test(cx);
         for cancel_branch_picker in [false, true] {
@@ -16170,6 +16362,34 @@ mod tests {
             assert!(context.contains("menu"));
             assert!(!context.contains("CommitEditor"));
         })
+    }
+
+    #[gpui::test]
+    async fn test_right_click_empty_changes_opens_view_options(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_, _, workspace, panel, mut cx) =
+            setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        panel.read_with(&cx, |panel, _| {
+            assert!(panel.active_repository.is_some());
+            assert!(panel.entries.is_empty());
+        });
+
+        cx.simulate_resize(gpui::size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let position = gpui::point(px(700.), px(400.));
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        panel.read_with(&cx, |panel, _| {
+            let context_menu = panel.context_menu.as_ref().expect("View Options menu");
+            assert_eq!(context_menu.position, position);
+        });
+        cx.dispatch_action(menu::Cancel);
+        assert!(panel.read_with(&cx, |panel, _| panel.context_menu.is_none()));
     }
 
     #[gpui::test]

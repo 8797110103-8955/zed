@@ -199,20 +199,9 @@ fn get_open_folders(workspace: &Workspace, cx: &App) -> Vec<OpenFolderEntry> {
         return Vec::new();
     }
 
-    let active_worktree_id = if let Some(repo) = project.active_repository(cx) {
-        let repo = repo.read(cx);
-        let repo_path = &repo.work_directory_abs_path;
-        project.visible_worktrees(cx).find_map(|worktree| {
-            let worktree_path = worktree.read(cx).abs_path();
-            (worktree_path == *repo_path || worktree_path.starts_with(repo_path.as_ref()))
-                .then(|| worktree.read(cx).id())
-        })
-    } else {
-        project
-            .visible_worktrees(cx)
-            .next()
-            .map(|wt| wt.read(cx).id())
-    };
+    let active_worktree_id = workspace
+        .current_folder(cx)
+        .map(|folder| folder.read(cx).id());
 
     let mut all_paths: Vec<PathBuf> = visible_worktrees
         .iter()
@@ -1157,10 +1146,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                 let worktree_id = folder.worktree_id;
                 if let Some(workspace) = self.workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
-                        let git_store = workspace.project().read(cx).git_store().clone();
-                        git_store.update(cx, |git_store, cx| {
-                            git_store.set_active_repo_for_worktree(worktree_id, cx);
-                        });
+                        workspace.select_folder(worktree_id, cx);
                     });
                 }
                 cx.emit(DismissEvent);

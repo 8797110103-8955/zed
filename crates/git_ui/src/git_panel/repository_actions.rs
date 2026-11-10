@@ -167,6 +167,7 @@ pub(crate) fn prompt_create_branch(
 pub(super) enum RepositoryMenuAction {
     CreateBranch,
     CreateBranchFrom,
+    SetTrackingBranch,
     DeleteBranch,
     AddRemote,
     RemoveRemote,
@@ -233,6 +234,9 @@ pub(super) fn repository_action_submenus(
     let state = repository.read(cx);
     let has_branch = state.branch.is_some();
     let has_stash = !state.cached_stash().entries.is_empty();
+    let is_local = state
+        .git_store()
+        .is_some_and(|store| store.read(cx).is_local());
     let writable = panel
         .read_with(cx, |panel, cx| panel.has_write_access(cx))
         .unwrap_or(false);
@@ -284,11 +288,6 @@ pub(super) fn repository_action_submenus(
                     !remote_enabled || !has_branch,
                 )
             })
-            .action_disabled_when(
-                !remote_enabled || !has_branch,
-                "Force Push",
-                Box::new(git::ForcePush),
-            )
             .separator()
             .action_disabled_when(!remote_enabled, "Fetch From…", Box::new(git::FetchFrom))
             .action_disabled_when(
@@ -326,6 +325,16 @@ pub(super) fn repository_action_submenus(
                 "Rename Branch…",
                 Box::new(git::RenameBranch::default()),
             )
+            .when(is_local, |menu| {
+                repository_menu_entry(
+                    menu,
+                    "Set Tracking Branch…",
+                    panel.clone(),
+                    repository.clone(),
+                    RepositoryMenuAction::SetTrackingBranch,
+                    !writable || !has_branch,
+                )
+            })
             .map(|menu| {
                 repository_menu_entry(
                     menu,

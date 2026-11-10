@@ -365,6 +365,7 @@ impl MultiWorkspace {
         workspace.update(cx, |workspace, cx| {
             workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
         });
+        Self::set_language_server_start_deferred(&workspace, false, cx);
         Self {
             window_id: window.window_handle().window_id(),
             held: vec![HeldWorkspace {
@@ -1309,6 +1310,17 @@ impl MultiWorkspace {
         self.held.iter().map(|held| &held.workspace)
     }
 
+    fn set_language_server_start_deferred(
+        workspace: &Entity<Workspace>,
+        deferred: bool,
+        cx: &mut App,
+    ) {
+        let lsp_store = workspace.read(cx).project().read(cx).lsp_store();
+        lsp_store.update(cx, |lsp_store, cx| {
+            lsp_store.set_automatic_language_server_start_deferred(deferred, cx);
+        });
+    }
+
     /// Adds a workspace to this window as persistent without changing which
     /// workspace is active. Unlike `activate()`, this always inserts into the
     /// persistent list regardless of sidebar state — it's used for system-
@@ -1316,6 +1328,9 @@ impl MultiWorkspace {
     pub fn add(&mut self, workspace: Entity<Workspace>, window: &Window, cx: &mut Context<Self>) {
         if self.is_workspace_retained(&workspace) {
             return;
+        }
+        if self.workspace() != &workspace {
+            Self::set_language_server_start_deferred(&workspace, true, cx);
         }
         let key = workspace.read(cx).project_group_key(cx);
         let index = self.hold(workspace, window, cx);
@@ -1359,6 +1374,8 @@ impl MultiWorkspace {
         // Publish the new active workspace before anyone reads the shared cell
         // to decide who owns the window chrome.
         self.active_workspace_id.set(workspace.entity_id());
+        Self::set_language_server_start_deferred(&old_active_workspace, true, cx);
+        Self::set_language_server_start_deferred(&workspace, false, cx);
 
         let stamp = self
             .held

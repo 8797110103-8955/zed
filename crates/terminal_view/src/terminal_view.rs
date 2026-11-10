@@ -2297,6 +2297,12 @@ pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<Path
 }
 
 fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+    if let Some(directory) = workspace
+        .selected_folder(cx)
+        .and_then(|folder| worktree_directory(folder.read(cx)))
+    {
+        return Some(directory);
+    }
     workspace
         .project()
         .read(cx)
@@ -2309,6 +2315,10 @@ fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf>
 ///Gets the first project's home directory, or the home directory
 fn first_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let worktree = workspace.worktrees(cx).next()?.read(cx);
+    worktree_directory(worktree)
+}
+
+fn worktree_directory(worktree: &project::Worktree) -> Option<PathBuf> {
     let worktree_path = worktree.abs_path();
     if worktree.root_entry()?.is_dir() {
         Some(worktree_path.to_path_buf())
@@ -2969,6 +2979,27 @@ mod tests {
             assert_eq!(res, Some(Path::new("/root2/").to_path_buf()));
             let res = first_project_directory(workspace, cx);
             assert_eq!(res, Some(Path::new("/root1/").to_path_buf()));
+        });
+    }
+
+    #[gpui::test]
+    async fn selected_folder_sets_terminal_directory(cx: &mut TestAppContext) {
+        let (project, workspace) = init_test(cx).await;
+        let (first_folder, first_entry) = create_folder_wt(project.clone(), "/root1/", cx).await;
+        let (selected_folder, _) = create_folder_wt(project.clone(), "/root2/", cx).await;
+        insert_active_entry_for(first_folder, first_entry, project, cx);
+
+        let selected_folder_id = selected_folder.read_with(cx, |worktree, _| worktree.id());
+        workspace.update(cx, |workspace, cx| {
+            assert_eq!(
+                default_working_directory(workspace, cx),
+                Some(PathBuf::from("/root1/"))
+            );
+            workspace.select_folder(selected_folder_id, cx);
+            assert_eq!(
+                default_working_directory(workspace, cx),
+                Some(PathBuf::from("/root2/"))
+            );
         });
     }
 

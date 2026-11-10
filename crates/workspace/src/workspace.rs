@@ -1652,6 +1652,7 @@ pub struct Workspace {
     /// use this instead of going through the `multi_workspace` field to avoid
     /// reading it as we might end up in a double lease otherwise.
     active_workspace_id: Option<Rc<Cell<EntityId>>>,
+    selected_folder: Option<WorktreeId>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
     persisted_recent_navigation_history: Vec<PathBuf>,
@@ -2156,6 +2157,7 @@ impl Workspace {
             sidebar_focus_handle: None,
             multi_workspace,
             active_workspace_id: None,
+            selected_folder: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
             open_in_dev_container: false,
             _dev_container_task: None,
@@ -2936,6 +2938,42 @@ impl Workspace {
 
     pub fn app_state(&self) -> &Arc<AppState> {
         &self.app_state
+    }
+
+    pub fn select_folder(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
+        self.selected_folder = Some(worktree_id);
+        let git_store = self.project.read(cx).git_store().clone();
+        git_store.update(cx, |git_store, cx| {
+            git_store.set_active_repo_for_worktree(worktree_id, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn selected_folder(&self, cx: &App) -> Option<Entity<Worktree>> {
+        self.project
+            .read(cx)
+            .worktree_for_id(self.selected_folder?, cx)
+            .filter(|worktree| worktree.read(cx).is_visible())
+    }
+
+    pub fn current_folder(&self, cx: &App) -> Option<Entity<Worktree>> {
+        if let Some(folder) = self.selected_folder(cx) {
+            return Some(folder);
+        }
+
+        let project = self.project.read(cx);
+        if let Some(repository) = project.active_repository(cx) {
+            let repository_path = &repository.read(cx).work_directory_abs_path;
+            if let Some(folder) = project.visible_worktrees(cx).find(|worktree| {
+                let worktree = worktree.read(cx);
+                worktree
+                    .path_style()
+                    .starts_with(&worktree.abs_path(), repository_path.as_ref())
+            }) {
+                return Some(folder);
+            }
+        }
+        project.visible_worktrees(cx).next()
     }
 
     pub fn is_restoring(&self) -> bool {
@@ -6886,6 +6924,10 @@ impl Workspace {
                 .active_item(cx)
                 .is_some_and(|item| item.buffer_kind(cx) == ItemBufferKind::Singleton)
         {
+            if active_project_path_changed && self.selected_folder != Some(project_path.worktree_id)
+            {
+                self.selected_folder = None;
+            }
             let git_store_entity = self.project.read(cx).git_store().clone();
             git_store_entity.update(cx, |git_store, cx| {
                 git_store.set_active_repo_for_path(project_path, cx);

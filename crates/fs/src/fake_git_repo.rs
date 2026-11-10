@@ -1121,6 +1121,23 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    fn set_branch_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>> {
+        self.with_state_async(true, move |state| {
+            state.branch_upstreams.insert(
+                branch,
+                git::repository::Upstream {
+                    ref_name: upstream.into(),
+                    tracking: git::repository::UpstreamTrackingStatus {
+                        ahead: 0,
+                        behind: 0,
+                    }
+                    .into(),
+                },
+            );
+            Ok(())
+        })
+    }
+
     fn delete_branch(
         &self,
         _is_remote: bool,

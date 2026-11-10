@@ -856,6 +856,7 @@ pub trait GitRepository: Send + Sync {
     fn change_branch(&self, name: String) -> BoxFuture<'_, Result<()>>;
     fn create_branch(&self, name: String, base_branch: Option<String>)
     -> BoxFuture<'_, Result<()>>;
+    fn set_branch_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>>;
     fn rename_branch(&self, branch: String, new_name: String) -> BoxFuture<'_, Result<()>>;
 
     fn delete_branch(
@@ -2449,14 +2450,88 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let git_binary = git_binary?;
                 let mut args = vec!["switch", "-c", &name];
-                let base_branch_str;
-                if let Some(ref base) = base_branch {
-                    base_branch_str = base.clone();
-                    args.push(&base_branch_str);
-                }
+                let upstream = if let Some(base) = &base_branch {
+                    args.extend(["--no-track", base]);
+                    let base_remote = if let Some(remote_ref) = base.strip_prefix("refs/remotes/") {
+                        remote_ref
+                            .split_once('/')
+                            .map(|(remote, _)| remote.to_owned())
+                    } else if base.starts_with("refs/heads/") {
+                        Some(
+                            git_binary
+                                .run(&[
+                                    "for-each-ref",
+                                    "--format=%(upstream:remotename)",
+                                    "--",
+                                    base,
+                                ])
+                                .await?,
+                        )
+                    } else {
+                        None
+                    };
+                    let refs = git_binary
+                        .run(&[
+                            "for-each-ref",
+                            "--format=%(refname)%09%(symref)",
+                            "refs/remotes",
+                        ])
+                        .await?;
+                    let mut matching_refs = refs
+                        .lines()
+                        .filter_map(|line| {
+                            let (reference, symbolic_target) =
+                                line.split_once('\t').unwrap_or((line, ""));
+                            let (remote, branch) =
+                                reference.strip_prefix("refs/remotes/")?.split_once('/')?;
+                            (symbolic_target.is_empty() && branch == name)
+                                .then_some((remote, reference))
+                        })
+                        .peekable();
+                    matching_refs
+                        .clone()
+                        .find(|(remote, _)| Some(*remote) == base_remote.as_deref().map(str::trim))
+                        .or_else(|| {
+                            matching_refs
+                                .clone()
+                                .find(|(remote, _)| *remote == "origin")
+                        })
+                        .or_else(|| {
+                            let only_match = matching_refs.next()?;
+                            matching_refs.peek().is_none().then_some(only_match)
+                        })
+                        .map(|(_, reference)| reference.to_owned())
+                } else {
+                    None
+                };
 
                 git_binary.run(&args).await?;
+                if let Some(upstream) = upstream {
+                    git_binary
+                        .run(&["branch", "--set-upstream-to", &upstream, "--", &name])
+                        .await
+                        .with_context(|| {
+                            format!("Created {name}, but could not set {upstream} as its upstream")
+                        })?;
+                }
                 anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn set_branch_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary_in_worktree();
+        self.executor
+            .spawn(async move {
+                anyhow::ensure!(
+                    upstream.starts_with("refs/remotes/"),
+                    "Select a remote branch to track"
+                );
+                let git_binary = git_binary?;
+                git_binary
+                    .run(&["branch", "--set-upstream-to", &upstream, "--", &branch])
+                    .await?;
+                Ok(())
             })
             .boxed()
     }
@@ -5084,6 +5159,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[gpui::test]
+    async fn test_create_branch_from_tracks_same_name_and_can_change_upstream(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().expect("create test directory");
+        let (_, clone_directory) = clone_remote_repository_with_main_and_feature(temp_dir.path());
+        let repository = RealGitRepository::new(
+            &clone_directory.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .expect("open test repository");
+        let git = repository.git_binary_in_worktree().expect("get Git binary");
+        git.run(&["config", "branch.autoSetupMerge", "always"])
+            .await
+            .expect("configure automatic tracking");
+        repository
+            .create_branch("feature".into(), Some("refs/remotes/origin/main".into()))
+            .await
+            .expect("create feature from remote main");
+        assert_eq!(
+            git.run(&["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                .await
+                .expect("resolve feature upstream"),
+            "refs/remotes/origin/feature"
+        );
+
+        repository
+            .set_branch_upstream("feature".into(), "refs/remotes/origin/main".into())
+            .await
+            .expect("set feature upstream");
+        assert_eq!(
+            git.run(&["branch", "--show-current"])
+                .await
+                .expect("read current branch"),
+            "feature"
+        );
+        assert_eq!(
+            git.run(&["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                .await
+                .expect("resolve changed upstream"),
+            "refs/remotes/origin/main"
+        );
+
+        repository
+            .create_branch("local-only".into(), Some("refs/remotes/origin/main".into()))
+            .await
+            .expect("create branch without a remote counterpart");
+        assert!(
+            git.run(&["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                .await
+                .is_err()
+        );
     }
 
     #[gpui::test]

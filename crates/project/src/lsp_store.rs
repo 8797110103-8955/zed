@@ -386,6 +386,7 @@ pub struct LocalLspStore {
     >,
     restricted_worktrees_tasks: HashMap<WorktreeId, (Subscription, watch::Receiver<bool>)>,
     auto_start_language_servers: bool,
+    defer_automatic_language_server_start: bool,
     language_server_start_overrides: HashMap<LanguageServerName, bool>,
     language_server_restart_tasks: Vec<Task<()>>,
 
@@ -430,10 +431,12 @@ impl LocalLspStore {
     }
 
     fn can_start_language_server(&self, name: &LanguageServerName) -> bool {
-        self.language_server_start_overrides
-            .get(name)
-            .copied()
-            .unwrap_or(self.auto_start_language_servers)
+        !self.defer_automatic_language_server_start
+            && self
+                .language_server_start_overrides
+                .get(name)
+                .copied()
+                .unwrap_or(self.auto_start_language_servers)
     }
 
     fn get_or_insert_language_server(
@@ -4950,6 +4953,7 @@ impl LspStore {
                 workspace_pull_diagnostics_result_ids: HashMap::default(),
                 restricted_worktrees_tasks: HashMap::default(),
                 auto_start_language_servers: true,
+                defer_automatic_language_server_start: false,
                 language_server_start_overrides: HashMap::default(),
                 language_server_restart_tasks: Vec::new(),
                 watched_manifest_filenames: ManifestProvidersStore::global(cx)
@@ -12914,6 +12918,52 @@ impl LspStore {
             cx.emit(LspStoreEvent::LanguageServerRemoved(server_id));
         }
         Task::ready(())
+    }
+
+    pub fn set_automatic_language_server_start_deferred(
+        &mut self,
+        deferred: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(local) = self.as_local_mut() else {
+            return;
+        };
+        let was_deferred =
+            std::mem::replace(&mut local.defer_automatic_language_server_start, deferred);
+        if deferred || !was_deferred {
+            return;
+        }
+
+        // Activation can run inside an editor update; registration may update its buffers.
+        let lsp_store = cx.weak_entity();
+        cx.defer(move |cx| {
+            let Some(lsp_store) = lsp_store.upgrade() else {
+                return;
+            };
+            lsp_store.update(cx, |store, cx| {
+                let buffers = store.buffer_store.read(cx).buffers().collect::<Vec<_>>();
+                let Some(local) = store.as_local_mut() else {
+                    return;
+                };
+                if local.defer_automatic_language_server_start {
+                    return;
+                }
+
+                for buffer in buffers {
+                    if local
+                        .registered_buffers
+                        .contains_key(&buffer.read(cx).remote_id())
+                    {
+                        local.register_buffer_with_language_servers(
+                            &buffer,
+                            HashSet::default(),
+                            LanguageServerStartMode::Automatic,
+                            cx,
+                        );
+                    }
+                }
+            });
+        });
     }
 
     pub fn stop_all_language_servers(&mut self, cx: &mut Context<Self>) {

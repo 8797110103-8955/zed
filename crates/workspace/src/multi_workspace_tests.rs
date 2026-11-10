@@ -6,6 +6,7 @@ use agent_settings::AgentSettings;
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, VisualTestContext};
+use language::{FakeLspAdapter, rust_lang};
 use project::DisableAiSettings;
 use serde_json::json;
 use settings::{Settings, SettingsStore};
@@ -44,6 +45,52 @@ fn setup_multi_workspace<'a>(
     cx.run_until_parked();
 
     (multi_workspace, cx)
+}
+
+#[gpui::test]
+async fn test_background_workspace_defers_language_server_start(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/rust"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let foreground_project = Project::test(fs.clone(), [], cx).await;
+    let background_project = Project::test(fs, [path!("/rust").as_ref()], cx).await;
+    let languages = background_project.read_with(cx, |project, _| project.languages().clone());
+    languages.add(rust_lang());
+    let mut fake_servers = languages.register_fake_lsp("Rust", FakeLspAdapter::default());
+    let lsp_store = background_project.read_with(cx, |project, _| project.lsp_store());
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(foreground_project, window, cx));
+    let background_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(background_project.clone(), window, cx));
+        multi_workspace.add(workspace.clone(), window, cx);
+        workspace
+    });
+    let (_buffer, _registration) = background_project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/rust/main.rs"), cx)
+        })
+        .await
+        .expect("open the restored Rust buffer");
+    cx.run_until_parked();
+
+    assert!(fake_servers.try_recv().is_err());
+    lsp_store.read_with(cx, |store, _| {
+        assert_eq!(store.language_server_statuses().count(), 0)
+    });
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.activate(background_workspace, None, window, cx);
+    });
+    cx.run_until_parked();
+
+    let _server = fake_servers
+        .try_recv()
+        .expect("start the Rust server on activation");
+    lsp_store.read_with(cx, |store, _| {
+        assert_eq!(store.language_server_statuses().count(), 1)
+    });
 }
 
 #[gpui::test]
