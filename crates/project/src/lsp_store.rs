@@ -12904,7 +12904,12 @@ impl LspStore {
                 Self::shutdown_language_server(server_state, name.clone(), cx).await;
                 lsp_store
                     .update(cx, |lsp_store, cx| {
-                        if let Some(local) = lsp_store.as_local() {
+                        if let Some(local) = lsp_store.as_local()
+                            && !local
+                                .language_server_ids
+                                .keys()
+                                .any(|seed| seed.name == name)
+                        {
                             local.update_binary_status(name, BinaryStatus::Stopped);
                         }
                         cx.emit(LspStoreEvent::LanguageServerRemoved(server_id));
@@ -12920,35 +12925,40 @@ impl LspStore {
         Task::ready(())
     }
 
-    pub fn set_automatic_language_server_start_deferred(
-        &mut self,
-        deferred: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_language_servers_suspended(&mut self, suspended: bool, cx: &mut Context<Self>) {
         let Some(local) = self.as_local_mut() else {
             return;
         };
-        let was_deferred =
-            std::mem::replace(&mut local.defer_automatic_language_server_start, deferred);
-        if deferred || !was_deferred {
+        let was_suspended =
+            std::mem::replace(&mut local.defer_automatic_language_server_start, suspended);
+        if was_suspended == suspended {
             return;
         }
 
-        // Activation can run inside an editor update; registration may update its buffers.
+        // Workspace switches can run inside an editor update; stopping or registering servers can update its buffers.
         let lsp_store = cx.weak_entity();
         cx.defer(move |cx| {
             let Some(lsp_store) = lsp_store.upgrade() else {
                 return;
             };
             lsp_store.update(cx, |store, cx| {
+                let Some(local) = store.as_local() else {
+                    return;
+                };
+                if local.defer_automatic_language_server_start != suspended {
+                    return;
+                }
+                if suspended {
+                    if store.downstream_client.is_none() {
+                        store.shutdown_all_language_servers(cx).detach();
+                    }
+                    return;
+                }
+
                 let buffers = store.buffer_store.read(cx).buffers().collect::<Vec<_>>();
                 let Some(local) = store.as_local_mut() else {
                     return;
                 };
-                if local.defer_automatic_language_server_start {
-                    return;
-                }
-
                 for buffer in buffers {
                     if local
                         .registered_buffers

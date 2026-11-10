@@ -22,7 +22,7 @@ use crate::solo_diff_view::SoloDiffView;
 use crate::staged_diff::StagedDiff;
 use crate::unstaged_diff::UnstagedDiff;
 use crate::{
-    branch_picker::{self, RemoteBranchOperation},
+    branch_picker::{self, RemoteBranchOperation, RepositoryBranchPickerMode},
     picker_prompt, render_remote_button,
 };
 use crate::{
@@ -97,7 +97,6 @@ use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
@@ -431,6 +430,7 @@ fn git_panel_view_options_menu(
         let state = view_options_menu_state.get();
         let uncommitted_panel = panel.clone();
         let branch_panel = panel.clone();
+        let view_options_menu = cx.weak_entity();
 
         context_menu
             .context(focus_handle.clone())
@@ -446,9 +446,20 @@ fn git_panel_view_options_menu(
                             .log_err();
                     }),
             )
-            .submenu("Compare Against Base", move |menu, window, cx| {
-                GitPanel::compare_against_base_submenu(menu, branch_panel.clone(), window, cx)
-            })
+            .item(
+                ContextMenuEntry::new("Compare Against Base").handler(move |window, cx| {
+                    let branch_panel = branch_panel.clone();
+                    let view_options_menu = view_options_menu.clone();
+                    window.defer(cx, move |window, cx| {
+                        if let Some(menu) = view_options_menu.upgrade() {
+                            menu.update(cx, |_, cx| cx.emit(DismissEvent));
+                        }
+                        branch_panel
+                            .update(cx, |panel, cx| panel.choose_branch_base(window, cx))
+                            .log_err();
+                    });
+                }),
+            )
             .separator()
             .header("View")
             .item({
@@ -619,7 +630,11 @@ pub fn register(workspace: &mut Workspace) {
     });
     workspace.register_action(|workspace, _: &CompareAgainstBase, window, cx| {
         if let Some(panel) = workspace.focus_panel::<GitPanel>(window, cx) {
-            panel.update(cx, |panel, cx| panel.choose_branch_base(window, cx));
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| {
+                    panel.update(cx, |panel, cx| panel.choose_branch_base(window, cx));
+                });
+            });
         }
     });
     workspace.register_action(|workspace, _: &git::Init, window, cx| {
@@ -1373,6 +1388,7 @@ pub struct GitPanel {
     remote_action_menu_handle: PopoverMenuHandle<ContextMenu>,
     changes_mode: ChangesMode,
     changes_mode_menu_handle: PopoverMenuHandle<ContextMenu>,
+    repository_branch_picker_handle: PopoverMenuHandle<branch_picker::BranchList>,
     branch_base: BranchBase,
     /// Uncommitted files, one per path. Staging, discarding and committing
     /// act on these regardless of which mode `entries` shows.
@@ -1758,6 +1774,7 @@ impl GitPanel {
                 remote_action_menu_handle: PopoverMenuHandle::default(),
                 changes_mode: ChangesMode::Uncommitted,
                 changes_mode_menu_handle: PopoverMenuHandle::default(),
+                repository_branch_picker_handle: PopoverMenuHandle::default(),
                 branch_base: BranchBase::new(),
                 change_entries: Vec::new(),
                 change_entry_indices: HashMap::default(),
@@ -5006,65 +5023,31 @@ impl GitPanel {
         else {
             return;
         };
-        let short_sha: String = sha.chars().take(7).collect();
-        prompt_create_branch(
-            self.workspace.clone(),
+        self.open_repository_branch_picker(
             repository,
-            format!("Create Branch at {short_sha}"),
-            Some(sha),
+            RepositoryBranchPickerMode::Create {
+                base: Some(sha.into()),
+            },
             window,
             cx,
         );
     }
 
-    fn create_branch_from(
+    fn open_repository_branch_picker(
         &self,
         repository: Entity<Repository>,
+        mode: RepositoryBranchPickerMode,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
-        let workspace = self.workspace.clone();
-        let selected_branch = repository
-            .read(cx)
-            .branch
-            .as_ref()
-            .map(|branch| branch.ref_name.clone());
-        let on_select: branch_picker::SelectBranchCallback = Arc::new({
-            let repository = repository.clone();
-            let workspace = workspace.clone();
-            move |branch, window, cx| {
-                let title = format!("Create Branch From {}", branch.name());
-                let base = branch.ref_name.to_string();
-                // Let the branch picker dismiss before opening the name prompt.
-                prompt_create_branch(
-                    workspace.clone(),
-                    repository.clone(),
-                    title,
-                    Some(base),
-                    window,
-                    cx,
-                );
-            }
-        });
-        window
-            .spawn(cx, async move |cx| {
-                let workspace_handle = workspace.clone();
-                workspace
-                    .update_in(cx, |workspace, window, cx| {
-                        workspace.toggle_modal(window, cx, |window, cx| {
-                            branch_picker::select_modal(
-                                workspace_handle,
-                                Some(repository),
-                                selected_branch,
-                                on_select,
-                                window,
-                                cx,
-                            )
-                        });
-                    })
-                    .log_err();
-            })
-            .detach();
+        branch_picker::open_repository_popover(
+            self.repository_branch_picker_handle.clone(),
+            self.workspace.clone(),
+            repository,
+            mode,
+            window,
+            cx,
+        );
     }
 
     fn select_tracking_branch(
@@ -5153,18 +5136,21 @@ impl GitPanel {
                 return;
             }
             RepositoryMenuAction::CreateBranch => {
-                prompt_create_branch(
-                    self.workspace.clone(),
+                self.open_repository_branch_picker(
                     repository,
-                    "Create Branch",
-                    None,
+                    RepositoryBranchPickerMode::Create { base: None },
                     window,
                     cx,
                 );
                 return;
             }
             RepositoryMenuAction::CreateBranchFrom => {
-                self.create_branch_from(repository, window, cx);
+                self.open_repository_branch_picker(
+                    repository,
+                    RepositoryBranchPickerMode::CreateFrom,
+                    window,
+                    cx,
+                );
                 return;
             }
             RepositoryMenuAction::SetTrackingBranch => {
@@ -5172,22 +5158,12 @@ impl GitPanel {
                 return;
             }
             RepositoryMenuAction::DeleteBranch => {
-                let workspace = self.workspace.clone();
-                window.defer(cx, move |window, cx| {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            let workspace_handle = workspace.weak_handle();
-                            workspace.toggle_modal(window, cx, |window, cx| {
-                                branch_picker::delete_modal(
-                                    workspace_handle,
-                                    repository,
-                                    window,
-                                    cx,
-                                )
-                            });
-                        })
-                        .log_err();
-                });
+                self.open_repository_branch_picker(
+                    repository,
+                    RepositoryBranchPickerMode::Delete,
+                    window,
+                    cx,
+                );
                 return;
             }
             _ => {}
@@ -7826,6 +7802,9 @@ impl GitPanel {
         });
 
         let mut rows = Vec::new();
+        let show_rows = !self.repositories_collapsed
+            && (!self.commit_editor_expanded || self.active_tab == GitPanelTab::History);
+        let mut branch_picker_attached = false;
         let mut ancestors: Vec<(Arc<Path>, bool)> = Vec::new();
         for (index, repository) in repositories.iter().enumerate() {
             let repository_state = repository.read(cx);
@@ -7899,6 +7878,10 @@ impl GitPanel {
                 !self.has_write_access(cx) || repository_state.head_commit.is_none();
 
             let branch_selector = PopoverMenu::new(("repository-branch", repository_id.0))
+                .when(selected && show_rows, |popover| {
+                    branch_picker_attached = true;
+                    popover.with_handle(self.repository_branch_picker_handle.clone())
+                })
                 .trigger_with_tooltip(
                     Button::new(("repository-branch-button", repository_id.0), branch_name)
                         .size(ButtonSize::None)
@@ -8052,6 +8035,9 @@ impl GitPanel {
                     )
                     .child(
                         div()
+                            .when(selected, |this| {
+                                this.debug_selector(|| "repository-branch-trigger".to_owned())
+                            })
                             .min_w_0()
                             .max_w(relative(0.4))
                             .overflow_hidden()
@@ -8168,21 +8154,25 @@ impl GitPanel {
                             )
                             .child(Label::new("Repositories").size(LabelSize::Small)),
                     )
-                    .child(self.render_repositories_menu(cx)),
+                    .child(self.render_repositories_menu(cx))
+                    .when(!branch_picker_attached, |this| {
+                        this.child(
+                            PopoverMenu::new("repository-branch-picker-anchor")
+                                .with_handle(self.repository_branch_picker_handle.clone())
+                                .menu(|_, _| None)
+                                .anchor(Anchor::TopRight),
+                        )
+                    }),
             )
-            .when(
-                !self.repositories_collapsed
-                    && (!self.commit_editor_expanded || self.active_tab == GitPanelTab::History),
-                |this| {
-                    this.child(
-                        v_flex()
-                            .id("repositories-list")
-                            .max_h(rems(18.))
-                            .overflow_y_scroll()
-                            .children(rows),
-                    )
-                },
-            )
+            .when(show_rows, |this| {
+                this.child(
+                    v_flex()
+                        .id("repositories-list")
+                        .max_h(rems(18.))
+                        .overflow_y_scroll()
+                        .children(rows),
+                )
+            })
     }
 
     fn render_changes_header(
@@ -14911,10 +14901,36 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    async fn test_create_branch_from_prompts_for_name_after_branch_selection(
-        cx: &mut TestAppContext,
+    fn draw_branch_picker(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    fn mount_git_panel(
+        workspace: &Entity<Workspace>,
+        panel: &Entity<GitPanel>,
+        cx: &mut VisualTestContext,
     ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        draw_branch_picker(cx);
+    }
+
+    fn click_branch_picker_control(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        draw_branch_picker(cx);
+    }
+
+    #[gpui::test]
+    async fn test_repository_branch_picker_creates_and_selects_base(cx: &mut TestAppContext) {
         init_test(cx);
         let (fs, _, workspace, panel, mut cx) =
             setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
@@ -14925,38 +14941,30 @@ mod tests {
         })
         .expect("configure repository");
         cx.run_until_parked();
+        mount_git_panel(&workspace, &panel, &mut cx);
 
         let run_menu_action = |action, cx: &mut VisualTestContext| {
             panel.update_in(cx, |panel, window, cx| {
                 let repository = panel.active_repository.clone().expect("active repository");
                 panel.repository_menu_action(repository, action, window, cx);
             });
-            cx.run_until_parked();
+            draw_branch_picker(cx);
+            assert!(cx.debug_bounds("branch-picker").is_some());
         };
         run_menu_action(RepositoryMenuAction::CreateBranch, &mut cx);
         cx.simulate_input("from-head");
-        cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        draw_branch_picker(&mut cx);
 
         run_menu_action(RepositoryMenuAction::CreateBranchFrom, &mut cx);
-        let branch_picker = workspace.read_with(&cx, |workspace, cx| {
-            workspace
-                .active_modal::<branch_picker::BranchList>(cx)
-                .expect("base branch picker")
-        });
-        let picker = branch_picker.read_with(&cx, |list, _| list.picker.clone());
-        picker.update_in(&mut cx, |picker, window, cx| {
-            picker.set_query("feature", window, cx);
-        });
+        cx.simulate_input("feature");
         cx.run_until_parked();
         cx.dispatch_action(menu::Confirm);
-        cx.run_until_parked();
-        assert!(workspace.read_with(&cx, |workspace, cx| {
-            workspace
-                .active_modal::<branch_picker::BranchList>(cx)
-                .is_none()
-        }));
+        draw_branch_picker(&mut cx);
+        assert!(cx.debug_bounds("branch-picker").is_some());
         cx.simulate_input("from-feature");
+        cx.run_until_parked();
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
 
@@ -15021,7 +15029,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_delete_branch_from_repository_menu_uses_branch_picker(cx: &mut TestAppContext) {
+    async fn test_delete_branch_from_repository_menu_uses_same_popover(cx: &mut TestAppContext) {
         init_test(cx);
         let (fs, _, workspace, panel, mut cx) =
             setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;
@@ -15034,6 +15042,15 @@ mod tests {
         })
         .expect("configure repository");
         cx.run_until_parked();
+        mount_git_panel(&workspace, &panel, &mut cx);
+        click_branch_picker_control("repository-branch-trigger", &mut cx);
+        let switch_picker_bounds = cx.debug_bounds("branch-picker").expect("switch popover");
+        let switch_query_bounds = cx
+            .debug_bounds("branch-picker-query")
+            .expect("switch query");
+        assert!(cx.debug_bounds("branch-picker-delete-1").is_none());
+        cx.dispatch_action(menu::Cancel);
+        draw_branch_picker(&mut cx);
 
         panel.update_in(&mut cx, |panel, window, cx| {
             let repository = panel.active_repository.clone().expect("active repository");
@@ -15044,23 +15061,20 @@ mod tests {
                 cx,
             );
         });
-        cx.run_until_parked();
-        let picker = workspace.read_with(&cx, |workspace, cx| {
-            workspace
-                .active_modal::<branch_picker::BranchList>(cx)
-                .expect("delete branch picker")
-                .read(cx)
-                .picker
-                .clone()
-        });
-        picker.update_in(&mut cx, |picker, window, cx| {
-            picker.set_query("feature", window, cx);
-        });
-        cx.run_until_parked();
-        picker.read_with(&cx, |picker, _| {
-            assert_eq!(picker.delegate.match_count(), 1)
-        });
-        cx.dispatch_action(menu::Confirm);
+        draw_branch_picker(&mut cx);
+        assert_eq!(cx.debug_bounds("branch-picker"), Some(switch_picker_bounds));
+        assert_eq!(
+            cx.debug_bounds("branch-picker-query"),
+            Some(switch_query_bounds)
+        );
+        cx.simulate_input("feature");
+        draw_branch_picker(&mut cx);
+        let branch_row = cx
+            .debug_bounds("branch-picker-entry-0")
+            .expect("feature branch row");
+        cx.simulate_mouse_move(branch_row.center(), None, gpui::Modifiers::default());
+        draw_branch_picker(&mut cx);
+        click_branch_picker_control("branch-picker-delete-0", &mut cx);
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Delete");
@@ -19270,72 +19284,31 @@ mod tests {
         );
     }
 
-    struct MenuHost(Entity<ContextMenu>);
-
-    impl Render for MenuHost {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.0.clone())
-        }
-    }
-
     #[gpui::test]
-    async fn test_compare_against_base_submenu_picks_base(cx: &mut TestAppContext) {
+    async fn test_compare_against_base_menu_opens_repository_branch_picker(
+        cx: &mut TestAppContext,
+    ) {
         let (test, mut cx) = setup_branch_mode_test(cx, Some("refs/remotes/origin/main")).await;
-        let cx = &mut cx;
         let panel = test.panel.clone();
         test.fs.insert_branches(
             Path::new(path!("/project/.git")),
             &["feature", "develop", "release"],
         );
-        settle_branch_mode(cx);
+        settle_branch_mode(&mut cx);
+        mount_git_panel(&test.workspace, &panel, &mut cx);
 
-        // The submenu is placed using its trigger's bounds from the previous
-        // frame, so it takes a couple of frames to appear.
-        let draw = |cx: &mut VisualTestContext| {
-            for _ in 0..3 {
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                cx.run_until_parked();
-            }
-        };
-        // Hosts the menu in its own window so the test can focus it directly;
-        // a popover only takes focus on a later platform frame.
-        let open_menu = |cx: &mut VisualTestContext| {
-            let panel = panel.downgrade();
-            let mut menu = None;
-            let window = cx.cx.add_window(|window, cx| {
-                let focus_handle = panel
-                    .read_with(cx, |panel, _| panel.focus_handle.clone())
-                    .expect("git panel");
-                let context_menu = git_panel_view_options_menu(focus_handle, panel, window, cx);
-                menu = Some(context_menu.clone());
-                MenuHost(context_menu)
-            });
-            let menu = menu.unwrap();
-            let mut menu_cx = VisualTestContext::from_window(window.into(), &cx.cx);
-            menu_cx.update(|window, cx| window.focus(&menu.focus_handle(cx), cx));
-            draw(&mut menu_cx);
-            // "Compare Against Base" is the second item; opening it from the
-            // keyboard must hand focus to the picker's search field.
-            menu_cx.dispatch_action(menu::SelectFirst);
-            menu_cx.dispatch_action(menu::SelectNext);
-            menu_cx.dispatch_action(menu::SelectChild);
-            draw(&mut menu_cx);
-            (menu, menu_cx)
-        };
+        let view_options = panel.read_with(&cx, |panel, _| panel.changes_mode_menu_handle.clone());
+        cx.update(|window, cx| view_options.show(window, cx));
+        draw_branch_picker(&mut cx);
+        click_branch_picker_control("MENU_ITEM-Compare Against Base", &mut cx);
+        assert!(cx.debug_bounds("branch-picker-query").is_some());
+        assert!(cx.debug_bounds("branch-picker-delete-1").is_none());
+        cx.simulate_input("develop");
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        settle_branch_mode(&mut cx);
 
-        let (menu, mut menu_cx) = open_menu(cx);
-        menu_cx.dispatch_action(menu::Cancel);
-        draw(&mut menu_cx);
-        let parent_focused = menu_cx.update(|window, cx| menu.focus_handle(cx).is_focused(window));
-        assert!(parent_focused, "escape returns to the parent menu");
-
-        let (_menu, mut menu_cx) = open_menu(cx);
-        menu_cx.simulate_input("develop");
-        draw(&mut menu_cx);
-        menu_cx.dispatch_action(menu::Confirm);
-        settle_branch_mode(cx);
-
-        panel.read_with(cx, |panel, _| {
+        panel.read_with(&cx, |panel, _| {
             assert!(panel.is_branch_mode());
             assert_eq!(panel.branch_base.effective().as_deref(), Some("develop"));
         });
@@ -19344,23 +19317,13 @@ mod tests {
     #[gpui::test]
     async fn test_compare_against_base_action_opens_picker(cx: &mut TestAppContext) {
         let (test, mut cx) = setup_branch_mode_test(cx, Some("refs/remotes/origin/main")).await;
-        let cx = &mut cx;
-        let panel = test.panel.clone();
-        test.workspace.update_in(cx, |workspace, window, cx| {
-            workspace.add_panel(panel.clone(), window, cx);
+        test.workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(test.panel.clone(), window, cx);
         });
 
-        // Workspace actions run while the workspace is being updated, so
-        // opening the picker must not update the workspace again.
         cx.dispatch_action(CompareAgainstBase);
-        cx.run_until_parked();
-
-        let picker_opened = test.workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .active_modal::<branch_picker::BranchList>(cx)
-                .is_some()
-        });
-        assert!(picker_opened);
+        draw_branch_picker(&mut cx);
+        assert!(cx.debug_bounds("branch-picker-query").is_some());
     }
 
     #[gpui::test]
@@ -19423,6 +19386,7 @@ mod tests {
         assert!(!base_picker_open(&test.workspace, cx));
         panel.read_with(cx, |panel, _| assert!(!panel.is_branch_mode()));
 
+        mount_git_panel(&test.workspace, &panel, cx);
         panel.update_in(cx, |panel, window, cx| {
             panel.default_branch_may_have_changed(window, cx);
             panel.show_branch_changes(&ShowBranchChanges, window, cx);
@@ -19431,7 +19395,14 @@ mod tests {
         settle_branch_mode(cx);
         assert!(!base_picker_open(&test.workspace, cx));
         panel.read_with(cx, |panel, _| {
-            assert_eq!(panel.active_tab, GitPanelTab::History);
+            assert_eq!(panel.active_tab, GitPanelTab::Changes);
+        });
+        test.workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .active_item_as::<crate::git_graph::GitGraph>(cx)
+                    .is_some()
+            );
         });
 
         panel.update_in(cx, |panel, window, cx| {
@@ -19439,14 +19410,14 @@ mod tests {
             panel.show_branch_changes(&ShowBranchChanges, window, cx);
             panel.choose_branch_base(window, cx);
         });
-        settle_branch_mode(cx);
+        draw_branch_picker(cx);
         assert!(
-            base_picker_open(&test.workspace, cx),
+            cx.debug_bounds("branch-picker-query").is_some(),
             "the pending request must not toggle the picker closed"
         );
         cx.dispatch_action(menu::Cancel);
-        cx.run_until_parked();
-        assert!(!base_picker_open(&test.workspace, cx));
+        draw_branch_picker(cx);
+        assert!(cx.debug_bounds("branch-picker-query").is_none());
 
         panel.update_in(cx, |panel, window, cx| {
             panel.default_branch_may_have_changed(window, cx);

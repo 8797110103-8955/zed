@@ -302,9 +302,19 @@ impl GitPanel {
         // Otherwise the pending request could open its own picker once the
         // lookup finishes, which toggles this one closed.
         self.cancel_pending_branch_changes();
-        self.choose_branch_base_for(
-            ShowBranchChangesRequest {
-                from_empty_state: false,
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        self.open_repository_branch_picker(
+            repository,
+            RepositoryBranchPickerMode::Compare {
+                selected_branch: self.branch_base.effective(),
+                on_select: Arc::new(Self::on_base_picked(
+                    cx.weak_entity(),
+                    ShowBranchChangesRequest {
+                        from_empty_state: false,
+                    },
+                )),
             },
             window,
             cx,
@@ -348,7 +358,7 @@ impl GitPanel {
     /// A request waiting on the default branch lookup runs once the lookup
     /// finishes, so anything the user does in the meantime that it would undo
     /// has to drop it. The lookup itself keeps running.
-    pub(super) fn cancel_pending_branch_changes(&mut self) {
+    pub(crate) fn cancel_pending_branch_changes(&mut self) {
         // A request can adopt the active tab's base before it waits, and
         // outside branch mode that base would outlive it.
         if self.branch_base.pending_show.take().is_some() && !self.is_branch_mode() {
@@ -700,69 +710,6 @@ impl GitPanel {
             });
             Some(())
         });
-    }
-
-    pub(super) fn compare_against_base_submenu(
-        menu: ContextMenu,
-        panel: WeakEntity<GitPanel>,
-        window: &mut Window,
-        cx: &mut Context<ContextMenu>,
-    ) -> ContextMenu {
-        let Ok((workspace, repository, selected_branch, menu_handle)) =
-            panel.update(cx, |panel, _| {
-                // The user is choosing the base now, so a waiting request shouldn't.
-                panel.cancel_pending_branch_changes();
-                (
-                    panel.workspace.clone(),
-                    panel.active_repository.clone(),
-                    panel.branch_base.effective(),
-                    panel.changes_mode_menu_handle.clone(),
-                )
-            })
-        else {
-            return menu;
-        };
-        let picked = Arc::new(AtomicBool::new(false));
-        let on_select: branch_picker::SelectBranchCallback = Arc::new({
-            let picked = picked.clone();
-            let show_branch_changes_since = Self::on_base_picked(
-                panel,
-                ShowBranchChangesRequest {
-                    from_empty_state: false,
-                },
-            );
-            move |branch: Branch, window: &mut Window, cx: &mut App| {
-                picked.store(true, Ordering::Relaxed);
-                show_branch_changes_since(branch, window, cx);
-            }
-        });
-        let branch_list = cx.new(|cx| {
-            branch_picker::select_embedded(
-                workspace,
-                repository,
-                selected_branch,
-                on_select,
-                window,
-                cx,
-            )
-        });
-
-        cx.subscribe_in(
-            &branch_list,
-            window,
-            move |menu, _, _: &DismissEvent, window, cx| {
-                if picked.load(Ordering::Relaxed) {
-                    menu_handle.hide(cx);
-                } else {
-                    menu.select_submenu_parent(&menu::SelectParent, window, cx);
-                }
-            },
-        )
-        .detach();
-
-        let picker_focus_handle = branch_list.focus_handle(cx);
-        menu.embedded_view(branch_list)
-            .focus_content(picker_focus_handle)
     }
 
     pub(super) fn render_no_branch_changes_ui(&self, cx: &Context<Self>) -> AnyElement {

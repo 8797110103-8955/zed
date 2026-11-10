@@ -1247,6 +1247,14 @@ pub fn init(cx: &mut App) {
                                     };
                                     let selected_repo_id = repo.read(cx).id;
 
+                                    if let Some(panel) =
+                                        workspace.panel::<crate::git_panel::GitPanel>(cx)
+                                    {
+                                        panel.update(cx, |panel, _| {
+                                            panel.cancel_pending_branch_changes();
+                                        });
+                                    }
+
                                     let git_store =
                                         workspace.project().read(cx).git_store().clone();
                                     open_or_reuse_graph(
