@@ -986,6 +986,9 @@ pub struct BranchListDelegate {
     style: BranchListStyle,
     selected_index: usize,
     last_query: String,
+    /// In `CreateFrom` mode the query is the new branch's name rather than a
+    /// filter, and it has to be known as soon as it's typed.
+    new_branch_name: String,
     modifiers: Modifiers,
     branch_filter: BranchFilter,
     branch_filter_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1375,6 +1378,7 @@ impl BranchListDelegate {
             default_branch: None,
             selected_index: 0,
             last_query: Default::default(),
+            new_branch_name: String::new(),
             modifiers: Default::default(),
             branch_filter,
             branch_filter_menu_handle: PopoverMenuHandle::default(),
@@ -1501,7 +1505,11 @@ impl BranchListDelegate {
                 .matches
                 .get(index)
                 .and_then(Entry::as_branch)
-                .is_some_and(|branch| !branch.is_head && !branch.is_remote())
+                .is_some_and(|branch| {
+                    !branch.is_head
+                        && (!branch.is_remote()
+                            || remote_branch_short_name(branch).is_some_and(|name| name != "HEAD"))
+                })
     }
 
     fn create_branch(
@@ -1565,7 +1573,6 @@ impl BranchListDelegate {
         };
 
         let workspace = self.workspace.clone();
-        let confirm_delete = matches!(self.repository_mode, RepositoryBranchPickerMode::Delete);
 
         cx.spawn_in(window, async move |picker, cx| {
             let Entry::Branch { branch, .. } = &entry else {
@@ -1579,14 +1586,11 @@ impl BranchListDelegate {
 
             let is_remote = branch.is_remote();
             let branch_name = branch.name().to_string();
-            if confirm_delete {
-                if is_remote {
-                    return Ok(());
-                }
+            if is_remote {
                 let answer = cx.update(|window, cx| {
                     window.prompt(
                         PromptLevel::Warning,
-                        &format!("Delete branch {branch_name}?"),
+                        &format!("Delete remote branch {branch_name}?"),
                         None,
                         &["Delete", "Cancel"],
                         cx,
@@ -1730,16 +1734,13 @@ impl PickerDelegate for BranchListDelegate {
                 RepositoryBranchPickerMode::Create { .. } => {
                     return "Type a new branch name…".into();
                 }
-                RepositoryBranchPickerMode::CreateFrom => {
-                    return "Choose a branch to create from…".into();
-                }
                 RepositoryBranchPickerMode::Delete => {
-                    return "Search for a local branch to delete…".into();
+                    return "Search for a branch to delete…".into();
                 }
                 RepositoryBranchPickerMode::Compare { .. } => {
                     return "Search for a base branch…".into();
                 }
-                RepositoryBranchPickerMode::Switch => {}
+                RepositoryBranchPickerMode::CreateFrom | RepositoryBranchPickerMode::Switch => {}
             }
         }
         if let BranchSelectionBehavior::PromptRemote { operation, .. } =
@@ -1927,6 +1928,15 @@ impl PickerDelegate for BranchListDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Task<()> {
+        let is_create_from = matches!(self.repository_mode, RepositoryBranchPickerMode::CreateFrom);
+        // The query names the branch to create, so every branch stays listed
+        // as a possible base and the selected base survives each keystroke.
+        let query = if is_create_from {
+            self.new_branch_name = query;
+            String::new()
+        } else {
+            query
+        };
         let all_branches = self.all_branches.clone();
         let branch_selection_context = matches!(
             self.branch_selection_behavior,
@@ -2070,10 +2080,7 @@ impl PickerDelegate for BranchListDelegate {
                             });
                         }
                     } else if !picker.delegate.is_select_only()
-                        && !matches!(
-                            picker.delegate.repository_mode,
-                            RepositoryBranchPickerMode::CreateFrom
-                        )
+                        && !is_create_from
                         && !query.is_empty()
                         && !all_branches.iter().any(|branch| branch.name() == query)
                     {
@@ -2109,6 +2116,9 @@ impl PickerDelegate for BranchListDelegate {
                     }
                     if delegate.matches.is_empty() {
                         delegate.selected_index = 0;
+                    } else if is_create_from {
+                        delegate.selected_index =
+                            core::cmp::min(delegate.selected_index, delegate.matches.len() - 1);
                     } else if is_push && delegate.last_query != query {
                         delegate.restore_selected_branch = None;
                         delegate.selected_index = 0;
@@ -2164,17 +2174,35 @@ impl PickerDelegate for BranchListDelegate {
             Entry::Branch { branch, .. } => {
                 match self.repository_mode {
                     RepositoryBranchPickerMode::CreateFrom => {
-                        self.repository_mode = RepositoryBranchPickerMode::Create {
-                            base: Some(branch.ref_name.clone()),
-                        };
-                        cx.defer_in(window, |picker, window, cx| {
-                            picker.set_query("", window, cx);
-                            picker.refresh_placeholder(window, cx);
-                            cx.notify();
-                        });
+                        let new_branch_name = self.new_branch_name.trim();
+                        if new_branch_name.is_empty() {
+                            let suggested_name = if branch.is_remote() {
+                                remote_branch_short_name(branch).unwrap_or_else(|| branch.name())
+                            } else {
+                                branch.name()
+                            }
+                            .to_owned();
+                            cx.defer_in(window, move |picker, window, cx| {
+                                picker.set_query(&suggested_name, window, cx);
+                            });
+                            return;
+                        }
+                        let new_branch_name = SharedString::from(new_branch_name.to_owned());
+                        self.create_branch(
+                            Some(branch.ref_name.clone()),
+                            new_branch_name,
+                            window,
+                            cx,
+                        );
                         return;
                     }
                     RepositoryBranchPickerMode::Create { .. } => return,
+                    RepositoryBranchPickerMode::Delete => {
+                        if self.can_delete_at(self.selected_index) {
+                            self.delete_at(self.selected_index, false, window, cx);
+                        }
+                        return;
+                    }
                     _ => {}
                 }
                 if let BranchSelectionBehavior::Select { on_select, .. }
@@ -2582,7 +2610,6 @@ impl PickerDelegate for BranchListDelegate {
             .when(self.can_delete_at(ix), |this| {
                 let is_remote = entry.as_branch().is_some_and(|branch| branch.is_remote());
                 this.end_slot(deleted_branch_icon(ix, is_remote))
-                    .show_end_slot_on_hover()
             })
             .when_some(
                 if is_new_items {
@@ -2672,7 +2699,17 @@ impl PickerDelegate for BranchListDelegate {
                             }))
                     });
 
-                let switch_branch = Button::new("switch_branch", "Switch")
+                let confirm_label = match self.repository_mode {
+                    RepositoryBranchPickerMode::CreateFrom => "Create",
+                    RepositoryBranchPickerMode::Delete => "Delete",
+                    _ => "Switch",
+                };
+                let confirm_disabled = match self.repository_mode {
+                    RepositoryBranchPickerMode::Delete => !self.can_delete_at(self.selected_index),
+                    _ => false,
+                };
+                let switch_branch = Button::new("switch_branch", confirm_label)
+                    .disabled(confirm_disabled)
                     .key_binding(
                         KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
                             .map(|kb| kb.size(rems_from_px(12_f32))),
@@ -3680,6 +3717,9 @@ mod tests {
                 branch_to_delete
             })
         });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
 
         let expected_branches = [

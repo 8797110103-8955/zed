@@ -165,7 +165,6 @@ pub(crate) fn prompt_create_branch(
 
 #[derive(Clone, Copy)]
 pub(super) enum RepositoryMenuAction {
-    CreateBranch,
     CreateBranchFrom,
     SetTrackingBranch,
     DeleteBranch,
@@ -224,6 +223,21 @@ fn repository_menu_entry(
     )
 }
 
+pub(super) fn fetch_menu_entries(
+    menu: ContextMenu,
+    repository: Option<&Entity<Repository>>,
+    cx: &App,
+) -> ContextMenu {
+    let has_multiple_remotes =
+        repository.is_some_and(|repository| repository.read(cx).remote_urls.len() > 1);
+    if has_multiple_remotes {
+        menu.action("Fetch All Remotes", Box::new(git::Fetch))
+            .action("Fetch From…", Box::new(git::FetchFrom))
+    } else {
+        menu.action("Fetch", Box::new(git::Fetch))
+    }
+}
+
 pub(super) fn repository_action_submenus(
     menu: ContextMenu,
     panel: WeakEntity<GitPanel>,
@@ -251,50 +265,32 @@ pub(super) fn repository_action_submenus(
         let repository = repository.clone();
         let focus_handle = focus_handle.clone();
         move |menu, _, _| {
-            repository_menu_entry(
-                menu.context(focus_handle.clone()),
-                "Sync",
-                panel.clone(),
-                repository.clone(),
-                RepositoryMenuAction::Sync,
-                !remote_enabled || !has_branch,
-            )
-            .separator()
-            .action_disabled_when(!remote_enabled || !has_branch, "Pull", Box::new(git::Pull))
-            .action_disabled_when(
-                !remote_enabled || !has_branch,
-                "Pull (Rebase)",
-                Box::new(git::PullRebase),
-            )
-            .map(|menu| {
-                repository_menu_entry(
-                    menu,
-                    "Pull From…",
-                    panel.clone(),
-                    repository.clone(),
-                    RepositoryMenuAction::PullFrom,
+            menu.context(focus_handle.clone())
+                .action_disabled_when(
                     !remote_enabled || !has_branch,
+                    "Pull (Rebase)",
+                    Box::new(git::PullRebase),
                 )
-            })
-            .separator()
-            .action_disabled_when(!remote_enabled || !has_branch, "Push", Box::new(git::Push))
-            .map(|menu| {
-                repository_menu_entry(
-                    menu,
-                    "Push To…",
-                    panel.clone(),
-                    repository.clone(),
-                    RepositoryMenuAction::PushTo,
-                    !remote_enabled || !has_branch,
-                )
-            })
-            .separator()
-            .action_disabled_when(!remote_enabled, "Fetch From…", Box::new(git::FetchFrom))
-            .action_disabled_when(
-                !remote_enabled,
-                "Fetch All Remotes",
-                Box::new(git::Fetch),
-            )
+                .map(|menu| {
+                    repository_menu_entry(
+                        menu,
+                        "Pull From…",
+                        panel.clone(),
+                        repository.clone(),
+                        RepositoryMenuAction::PullFrom,
+                        !remote_enabled || !has_branch,
+                    )
+                })
+                .map(|menu| {
+                    repository_menu_entry(
+                        menu,
+                        "Push To…",
+                        panel.clone(),
+                        repository.clone(),
+                        RepositoryMenuAction::PushTo,
+                        !remote_enabled || !has_branch,
+                    )
+                })
         }
     })
     .submenu("Branch", {
@@ -304,22 +300,12 @@ pub(super) fn repository_action_submenus(
         move |menu, _, _| {
             repository_menu_entry(
                 menu.context(focus_handle.clone()),
-                "Create Branch…",
+                "Create Branch From…",
                 panel.clone(),
                 repository.clone(),
-                RepositoryMenuAction::CreateBranch,
+                RepositoryMenuAction::CreateBranchFrom,
                 !writable,
             )
-            .map(|menu| {
-                repository_menu_entry(
-                    menu,
-                    "Create Branch From…",
-                    panel.clone(),
-                    repository.clone(),
-                    RepositoryMenuAction::CreateBranchFrom,
-                    !writable,
-                )
-            })
             .action_disabled_when(
                 !writable || !has_branch,
                 "Rename Branch…",

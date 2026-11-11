@@ -3,7 +3,8 @@ mod repository_actions;
 
 pub(crate) use self::repository_actions::prompt_create_branch;
 use self::repository_actions::{
-    RepositoryMenuAction, repository_action_submenus, repository_branch_status, repository_input,
+    RepositoryMenuAction, fetch_menu_entries, repository_action_submenus, repository_branch_status,
+    repository_input,
 };
 use git_ui_core::askpass_modal::AskPassModal;
 pub(crate) use git_ui_core::notifications::{open_output, show_error_toast};
@@ -5135,15 +5136,6 @@ impl GitPanel {
                 self.prompt_repository_branch(repository, RemoteBranchOperation::Push, window, cx);
                 return;
             }
-            RepositoryMenuAction::CreateBranch => {
-                self.open_repository_branch_picker(
-                    repository,
-                    RepositoryBranchPickerMode::Create { base: None },
-                    window,
-                    cx,
-                );
-                return;
-            }
             RepositoryMenuAction::CreateBranchFrom => {
                 self.open_repository_branch_picker(
                     repository,
@@ -5217,7 +5209,6 @@ impl GitPanel {
                     RepositoryMenuAction::Sync
                     | RepositoryMenuAction::PullFrom
                     | RepositoryMenuAction::PushTo
-                    | RepositoryMenuAction::CreateBranch
                     | RepositoryMenuAction::CreateBranchFrom
                     | RepositoryMenuAction::SetTrackingBranch
                     | RepositoryMenuAction::DeleteBranch => {}
@@ -7936,9 +7927,7 @@ impl GitPanel {
                         });
                         Some(ContextMenu::build(window, cx, |menu, _, cx| {
                             menu.context(focus_handle.clone())
-                                .action("Fetch", Box::new(git::Fetch))
-                                .action("Pull", Box::new(git::Pull))
-                                .action("Push", Box::new(git::Push))
+                                .map(|menu| fetch_menu_entries(menu, Some(&repository), cx))
                                 .separator()
                                 .map(|menu| {
                                     repository_action_submenus(
@@ -8528,31 +8517,27 @@ impl GitPanel {
                 let focus_handle = self.focus_handle.clone();
                 let panel = cx.weak_entity();
                 move |window, cx| {
+                    let active_repository = panel
+                        .read_with(cx, |panel, _| panel.active_repository.clone())
+                        .ok()
+                        .flatten();
                     Some(ContextMenu::build(window, cx, |menu, _, cx| {
                         menu.context(focus_handle.clone())
                             .action("Show Changes", Box::new(ActivateChangesTab))
                             .action("View History", Box::new(crate::git_graph::Open))
                             .separator()
                             .action("Switch Repository", Box::new(zed_actions::git::SelectRepo))
-                            .action("Fetch", Box::new(git::Fetch))
-                            .action("Pull", Box::new(git::Pull))
-                            .action("Push", Box::new(git::Push))
+                            .map(|menu| fetch_menu_entries(menu, active_repository.as_ref(), cx))
                             .separator()
-                            .when_some(
-                                panel
-                                    .read_with(cx, |panel, _| panel.active_repository.clone())
-                                    .ok()
-                                    .flatten(),
-                                |menu, repository| {
-                                    repository_action_submenus(
-                                        menu,
-                                        panel.clone(),
-                                        repository,
-                                        focus_handle.clone(),
-                                        cx,
-                                    )
-                                },
-                            )
+                            .when_some(active_repository.clone(), |menu, repository| {
+                                repository_action_submenus(
+                                    menu,
+                                    panel.clone(),
+                                    repository,
+                                    focus_handle.clone(),
+                                    cx,
+                                )
+                            })
                             .separator()
                             .action("Show / Hide Commit Editor", Box::new(ToggleCommitEditor))
                             .action(
@@ -14951,26 +14936,37 @@ mod tests {
             draw_branch_picker(cx);
             assert!(cx.debug_bounds("branch-picker").is_some());
         };
-        run_menu_action(RepositoryMenuAction::CreateBranch, &mut cx);
-        cx.simulate_input("from-head");
-        cx.run_until_parked();
-        cx.dispatch_action(menu::Confirm);
-        draw_branch_picker(&mut cx);
-
+        // With an empty query, confirming a base only fills in its name.
         run_menu_action(RepositoryMenuAction::CreateBranchFrom, &mut cx);
-        cx.simulate_input("feature");
-        cx.run_until_parked();
         cx.dispatch_action(menu::Confirm);
         draw_branch_picker(&mut cx);
         assert!(cx.debug_bounds("branch-picker").is_some());
+        cx.simulate_input("-fix");
+        draw_branch_picker(&mut cx);
+        cx.dispatch_action(menu::Confirm);
+        draw_branch_picker(&mut cx);
+        assert!(cx.debug_bounds("branch-picker").is_none());
+
+        // A typed name doesn't filter the bases, so any branch can be picked.
+        run_menu_action(RepositoryMenuAction::CreateBranchFrom, &mut cx);
         cx.simulate_input("from-feature");
+        draw_branch_picker(&mut cx);
+        assert!(cx.debug_bounds("branch-picker-entry-1").is_some());
+        click_branch_picker_control("branch-picker-entry-1", &mut cx);
         cx.run_until_parked();
+
+        run_menu_action(RepositoryMenuAction::CreateBranchFrom, &mut cx);
+        click_branch_picker_control("branch-picker-entry-1", &mut cx);
+        assert!(cx.debug_bounds("branch-picker").is_some());
+        cx.simulate_input("-copy");
+        draw_branch_picker(&mut cx);
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
 
         fs.with_git_state(dot_git, false, |state| {
-            assert!(state.branches.contains("from-head"));
+            assert!(state.branches.contains("main-fix"));
             assert!(state.branches.contains("from-feature"));
+            assert!(state.branches.contains("feature-copy"));
         })
         .expect("read repository branches");
     }
@@ -15069,20 +15065,27 @@ mod tests {
         );
         cx.simulate_input("feature");
         draw_branch_picker(&mut cx);
-        let branch_row = cx
-            .debug_bounds("branch-picker-entry-0")
-            .expect("feature branch row");
-        cx.simulate_mouse_move(branch_row.center(), None, gpui::Modifiers::default());
+        assert!(cx.debug_bounds("branch-picker-delete-1").is_some());
+
+        // Local branches are deleted without asking.
+        click_branch_picker_control("branch-picker-delete-0", &mut cx);
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
         draw_branch_picker(&mut cx);
+        fs.with_git_state(dot_git, false, |state| {
+            assert_eq!(state.current_branch_name.as_deref(), Some("main"));
+            assert!(!state.branches.contains("feature"));
+            assert!(state.branches.contains("origin/feature"));
+        })
+        .expect("read repository branches");
+
         click_branch_picker_control("branch-picker-delete-0", &mut cx);
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         fs.with_git_state(dot_git, false, |state| {
-            assert_eq!(state.current_branch_name.as_deref(), Some("main"));
-            assert!(!state.branches.contains("feature"));
-            assert!(state.branches.contains("origin/feature"));
+            assert!(!state.branches.contains("origin/feature"));
         })
         .expect("read repository branches");
     }
