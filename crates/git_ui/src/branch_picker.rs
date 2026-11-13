@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use askpass::AskPassDelegate;
 use editor::Editor;
 use futures::channel::oneshot;

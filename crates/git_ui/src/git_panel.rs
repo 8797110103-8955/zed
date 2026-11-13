@@ -1312,26 +1312,6 @@ struct GitPanelContextMenu {
     _subscription: Subscription,
 }
 
-/// The label for `repository`, disambiguated against every other repository in
-/// the project.
-fn repository_display_name(
-    repository: Option<&Entity<Repository>>,
-    project: &Entity<Project>,
-    cx: &App,
-) -> SharedString {
-    let Some(repository) = repository else {
-        return SharedString::default();
-    };
-    let id = repository.read(cx).id;
-    project
-        .read(cx)
-        .git_store()
-        .read(cx)
-        .display_names(cx)
-        .remove(&id)
-        .unwrap_or_else(|| repository.read(cx).display_name())
-}
-
 pub struct GitPanel {
     pub(crate) active_repository: Option<Entity<Repository>>,
     pub(crate) commit_editor: Entity<Editor>,
