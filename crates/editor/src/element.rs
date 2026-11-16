@@ -6731,6 +6731,11 @@ impl EditorElement {
 
             window.with_element_namespace("minimap", |window| {
                 layout.minimap.paint(window, cx);
+                if let Some(mut overlay) = layout.region_overlay.take() {
+                    window.paint_layer(|window| {
+                        overlay.paint(window, cx);
+                    });
+                }
                 if let Some(thumb_bounds) = layout.thumb_layout.thumb_bounds {
                     let minimap_thumb_color = match layout.thumb_layout.thumb_state {
                         ScrollbarThumbState::Idle => cx.theme().colors().minimap_thumb_background,
@@ -6771,11 +6776,6 @@ impl EditorElement {
                             cx.theme().colors().minimap_thumb_border,
                             BorderStyle::Solid,
                         ));
-                    });
-                }
-                if let Some(mut overlay) = layout.region_overlay.take() {
-                    window.paint_layer(|window| {
-                        overlay.paint(window, cx);
                     });
                 }
             });

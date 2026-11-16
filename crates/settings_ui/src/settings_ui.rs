@@ -457,6 +457,9 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
+    cx.on_action(|_: &zed_actions::OpenUserSettings, cx| {
+        open_settings_editor_at_target(None, Some(SettingsFileTarget::User), None, cx);
+    });
     cx.on_action(|_: &zed_actions::assistant::OpenSkillCreator, cx| {
         open_skill_creator(pages::SkillCreatorOpenMode::Form, None, cx);
     });
@@ -489,6 +492,15 @@ pub fn init(cx: &mut App) {
                 let window_handle = window.window_handle().downcast::<MultiWorkspace>();
                 let target_worktree_id = workspace.active_folder_worktree_id(cx);
                 open_settings_editor(None, target_worktree_id, window_handle, cx);
+            })
+            .register_action(|_, _: &zed_actions::OpenUserSettings, window, cx| {
+                let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+                open_settings_editor_at_target(
+                    None,
+                    Some(SettingsFileTarget::User),
+                    window_handle,
+                    cx,
+                );
             })
             .register_action(
                 |_, _: &zed_actions::assistant::OpenSkillCreator, window, cx| {

@@ -5,7 +5,10 @@ use extension::{ExtensionManifest, SchemaVersion};
 use extension_host::{ExtensionOperation, ExtensionStatus, ExtensionStore};
 use gpui::{Anchor, ElementId, Entity, Point, SharedString, prelude::*};
 use release_channel::ReleaseChannel;
-use ui::{Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*, utils::format_number_with_commas};
+use ui::{
+    ButtonLike, Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*,
+    utils::format_number_with_commas,
+};
 
 type ContextMenuBuilder = Box<
     dyn Fn(Arc<str>, SharedString, &mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static,
@@ -775,10 +778,9 @@ impl RenderOnce for ExtensionCard {
                                 .when_some(repository_url, |this, repository_url| {
                                     let repository_url_for_tooltip = repository_url.clone();
                                     this.child(
-                                        Button::new(repository_button_id, "")
+                                        ButtonLike::new(repository_button_id)
                                             .aria_label("Visit extension homepage")
-                                            .size(ButtonSize::Compact)
-                                            .start_icon(repository_icon.size(IconSize::Small))
+                                            .child(repository_icon.size(IconSize::Small))
                                             .tooltip(move |_, cx| {
                                                 Tooltip::with_meta(
                                                     "Visit Extension Homepage",

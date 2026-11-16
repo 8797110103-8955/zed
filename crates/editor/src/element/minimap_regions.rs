@@ -175,9 +175,8 @@ impl MinimapRegions {
             return None;
         }
         let settings = theme::theme_settings(cx);
-        let colors = cx.theme().colors();
         // The minimap scales rems down with its code glyphs.
-        let title_font_size = settings.ui_font_size(cx);
+        let title_font_size = settings.ui_font_size(cx) * 1.15;
         let title_height = title_font_size * 1.35;
         let mut next_title_top = px(0.);
         let mut overlay = div().relative().size_full().overflow_hidden();
@@ -203,26 +202,15 @@ impl MinimapRegions {
                     .gap(px(4.))
                     .font(settings.ui_font(cx).clone())
                     .line_height(relative(1.))
-                    .bg(colors.editor_background)
                     .child(
                         div()
-                            .flex_none()
-                            .text_size(title_font_size * 0.85)
-                            .text_color(colors.text_muted)
-                            .debug_selector(|| "minimap-region-prefix".into())
-                            .child("#region"),
-                    )
-                    .when_some(marker.title.clone(), |label, title| {
-                        label.child(
-                            div()
-                                .text_size(title_font_size)
-                                .text_color(colors.text)
-                                .min_w_0()
-                                .truncate()
-                                .debug_selector(|| "minimap-region-title".into())
-                                .child(title),
-                        )
-                    }),
+                            .text_size(title_font_size)
+                            .text_color(cx.theme().colors().text)
+                            .min_w_0()
+                            .truncate()
+                            .debug_selector(|| "minimap-region-title".into())
+                            .child(marker.title.clone().unwrap_or_else(|| "region".into())),
+                    ),
             );
         }
         (next_title_top > px(0.)).then(|| overlay.into_any_element())
@@ -299,14 +287,10 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let prefix = cx
-            .debug_bounds("minimap-region-prefix")
-            .expect("#region prefix should be drawn directly in the minimap");
         let title = cx
             .debug_bounds("minimap-region-title")
             .expect("title should be drawn directly in the minimap");
-        assert!(title.left() >= prefix.right());
-        assert!(title.size.height >= px(12.) && title.size.height > prefix.size.height);
+        assert!(title.size.height >= px(12.));
         editor.read_with(cx, |editor, cx| {
             let minimap = editor
                 .minimap()

@@ -45,6 +45,8 @@ actions!(
             "zed_actions::OpenProjectSettings"
         ])]
         OpenSettings,
+        /// Opens the settings editor, showing the user settings.
+        OpenUserSettings,
         /// Opens the settings JSON file of the current folder, or the user settings
         /// file when no folder is open.
         #[action(deprecated_aliases = ["zed_actions::OpenSettings", "zed::OpenProjectSettingsFile"])]

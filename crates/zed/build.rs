@@ -220,7 +220,8 @@ fn main() {
 fn icon_path() -> std::path::PathBuf {
     use std::str::FromStr;
 
-    let release_channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
+    let release_channel =
+        option_env!("RELEASE_CHANNEL").unwrap_or(include_str!("RELEASE_CHANNEL").trim());
     let channel = match release_channel {
         "stable" => "",
         "preview" => "-preview",

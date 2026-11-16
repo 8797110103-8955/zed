@@ -27,8 +27,8 @@ use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
 
-const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
 
 actions!(
@@ -57,12 +57,8 @@ pub struct AssetQuery<'a> {
 pub enum AutoUpdateStatus {
     Idle,
     Checking,
-    UpdateAvailable {
-        version: Version,
-    },
-    Errored {
-        error: Arc<anyhow::Error>,
-    },
+    UpdateAvailable { version: Version },
+    Errored { error: Arc<anyhow::Error> },
 }
 
 impl PartialEq for AutoUpdateStatus {
@@ -230,7 +226,11 @@ pub fn available_update_url(cx: &mut App) -> Option<String> {
     ))
 }
 
-fn release_page_url(release_channel: ReleaseChannel, mut version: Version, client: &Client) -> String {
+fn release_page_url(
+    release_channel: ReleaseChannel,
+    mut version: Version,
+    client: &Client,
+) -> String {
     match release_channel {
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
             version.pre = semver::Prerelease::EMPTY;
@@ -295,7 +295,7 @@ impl AutoUpdater {
     }
 
     fn restart_after_wake(&mut self, cx: &mut Context<Self>) {
-        if self.pending_poll.is_none() {
+        if self.pending_poll.is_none() || !matches!(self.status, AutoUpdateStatus::Checking) {
             return;
         }
 
@@ -344,13 +344,10 @@ impl AutoUpdater {
                 this.pending_poll = None;
                 if let Err(error) = result {
                     match check_type {
-                        // Be quiet if the check was automated (e.g. when offline), and keep
-                        // showing an update found by an earlier check.
+                        // Be quiet if the check was automated (e.g. when offline).
                         UpdateCheckType::Automatic => {
                             log::info!("auto-update check failed: error:{:?}", error);
-                            if this.status == AutoUpdateStatus::Checking {
-                                this.status = AutoUpdateStatus::Idle;
-                            }
+                            this.status = AutoUpdateStatus::Idle;
                         }
                         UpdateCheckType::Manual => {
                             log::error!("auto-update failed: error:{:?}", error);
@@ -538,20 +535,19 @@ impl AutoUpdater {
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (installed_version, release_channel) = this.update(cx, |this, cx| {
-            // Automatic checks keep the current status so an available update stays visible.
-            if this.update_check_type.is_manual() {
-                this.status = AutoUpdateStatus::Checking;
-                cx.notify();
-            }
+        let (installed_version, previous_status, release_channel) =
+            this.read_with(cx, |this, cx| {
+                (
+                    this.current_version.clone(),
+                    this.status.clone(),
+                    ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
+                )
+            });
+
+        this.update(cx, |this, cx| {
+            this.status = AutoUpdateStatus::Checking;
             log::info!("Auto Update: checking for updates");
-            (
-                this.current_version.clone(),
-                match ReleaseChannel::try_global(cx) {
-                    Some(ReleaseChannel::Dev) | None => ReleaseChannel::Stable,
-                    Some(channel) => channel,
-                },
-            )
+            cx.notify();
         });
 
         let fetched_release_data =
@@ -562,17 +558,23 @@ impl AutoUpdater {
             app_commit_sha,
             installed_version,
             fetched_release_data.version,
+            previous_status.clone(),
         )?;
 
         this.update(cx, |this, cx| {
             this.status = match newer_version {
                 Some(version) => AutoUpdateStatus::UpdateAvailable { version },
-                None => {
-                    if this.update_check_type.is_manual() {
-                        cx.emit(AutoUpdateEvent::UpToDate);
+                None => match previous_status {
+                    AutoUpdateStatus::UpdateAvailable { version } => {
+                        AutoUpdateStatus::UpdateAvailable { version }
                     }
-                    AutoUpdateStatus::Idle
-                }
+                    _ => {
+                        if this.update_check_type.is_manual() {
+                            cx.emit(AutoUpdateEvent::UpToDate);
+                        }
+                        AutoUpdateStatus::Idle
+                    }
+                },
             };
             cx.notify();
         });
@@ -584,22 +586,35 @@ impl AutoUpdater {
         app_commit_sha: Result<Option<String>>,
         installed_version: Version,
         fetched_version: String,
+        status: AutoUpdateStatus,
     ) -> Result<Option<Version>> {
         let fetched_version = fetched_version.parse::<Version>()?;
 
         match release_channel {
             ReleaseChannel::Nightly => {
-                let fetched_sha = fetched_version.build.as_str().rsplit('.').next();
-                let is_newer = app_commit_sha
-                    .ok()
-                    .flatten()
-                    .is_none_or(|sha| fetched_sha != Some(sha.as_str()));
-                Ok(is_newer.then_some(fetched_version))
+                let should_report = if let AutoUpdateStatus::UpdateAvailable { version } = status {
+                    fetched_version != version
+                } else {
+                    let fetched_sha = fetched_version.build.as_str().rsplit('.').next();
+                    app_commit_sha
+                        .ok()
+                        .flatten()
+                        .is_none_or(|sha| fetched_sha != Some(sha.as_str()))
+                };
+                Ok(should_report.then_some(fetched_version))
             }
-            _ => Ok(Self::check_if_fetched_version_is_newer_non_nightly(
-                installed_version,
-                fetched_version,
-            )),
+            _ => {
+                let current_version = if let AutoUpdateStatus::UpdateAvailable { version } = status
+                {
+                    version
+                } else {
+                    installed_version
+                };
+                Ok(Self::check_if_fetched_version_is_newer_non_nightly(
+                    current_version,
+                    fetched_version,
+                ))
+            }
         }
     }
 
@@ -795,7 +810,10 @@ mod tests {
             request_count.load(atomic::Ordering::SeqCst) >= 1 && updater.pending_poll.is_none()
         })
         .await;
-        assert_eq!(updater.read_with(cx, |updater, _| updater.status()), AutoUpdateStatus::Idle);
+        assert_eq!(
+            updater.read_with(cx, |updater, _| updater.status()),
+            AutoUpdateStatus::Idle
+        );
 
         release_available.store(true, atomic::Ordering::SeqCst);
         cx.background_executor.advance_clock(POLL_INTERVAL);
@@ -803,14 +821,22 @@ mod tests {
             updater.status().is_update_available() && updater.pending_poll.is_none()
         })
         .await;
-        assert_eq!(updater.read_with(cx, |updater, _| updater.status()), available);
-        assert!(!cx.has_pending_prompt(), "updates must not open a modal prompt");
+        assert_eq!(
+            updater.read_with(cx, |updater, _| updater.status()),
+            available
+        );
+        assert!(
+            !cx.has_pending_prompt(),
+            "updates must not open a modal prompt"
+        );
         assert_eq!(
             updater.read_with(cx, |updater, _| updater.current_version()),
             Version::new(0, 100, 0)
         );
 
-        updater.update(cx, |updater, cx| updater.dismiss_status(available.clone(), cx));
+        updater.update(cx, |updater, cx| {
+            updater.dismiss_status(available.clone(), cx)
+        });
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.condition(&updater, |updater, _| {
             request_count.load(atomic::Ordering::SeqCst) >= 3 && updater.pending_poll.is_none()
@@ -851,7 +877,10 @@ mod tests {
                     async move { Ok(Response::builder().status(500).body("".into())?) }
                 }
             });
-            crate::init(Client::new(Arc::new(FakeSystemClock::new()), client, cx), cx);
+            crate::init(
+                Client::new(Arc::new(FakeSystemClock::new()), client, cx),
+                cx,
+            );
         });
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.run_until_parked();
@@ -865,6 +894,7 @@ mod tests {
             Ok(Some("a".to_string())),
             Version::new(1, 0, 0),
             "1.0.0".to_string(),
+            AutoUpdateStatus::Idle,
         );
 
         assert_eq!(newer_version.unwrap(), None);
@@ -877,6 +907,7 @@ mod tests {
             Ok(Some("a".to_string())),
             Version::new(1, 0, 0),
             "1.0.1".to_string(),
+            AutoUpdateStatus::Idle,
         );
 
         assert_eq!(newer_version.unwrap(), Some(Version::new(1, 0, 1)));
@@ -889,6 +920,7 @@ mod tests {
             Ok(Some("a".to_string())),
             Version::new(1, 0, 0),
             "1.0.0+a".to_string(),
+            AutoUpdateStatus::Idle,
         );
 
         assert_eq!(newer_version.unwrap(), None);
@@ -901,6 +933,7 @@ mod tests {
             Ok(Some("a".to_string())),
             Version::new(1, 0, 0),
             "1.0.0+b".to_string(),
+            AutoUpdateStatus::Idle,
         );
 
         assert_eq!(newer_version.unwrap(), Some("1.0.0+b".parse().unwrap()));
@@ -913,6 +946,7 @@ mod tests {
             Ok(None),
             Version::new(1, 0, 0),
             "1.0.0+a".to_string(),
+            AutoUpdateStatus::Idle,
         );
 
         assert_eq!(newer_version.unwrap(), Some("1.0.0+a".parse().unwrap()));

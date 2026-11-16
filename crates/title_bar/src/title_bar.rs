@@ -1374,7 +1374,13 @@ impl TitleBar {
 
                         this.separator()
                     })
-                    .action("Settings", zed_actions::OpenSettings.boxed_clone())
+                    .entry(
+                        "Settings",
+                        Some(zed_actions::OpenSettings.boxed_clone()),
+                        |window, cx| {
+                            window.dispatch_action(zed_actions::OpenUserSettings.boxed_clone(), cx);
+                        },
+                    )
                     .action("Keymap", Box::new(zed_actions::OpenKeymap))
                     .action(
                         "Themes…",

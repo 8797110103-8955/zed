@@ -908,12 +908,23 @@ impl ExtensionsPage {
                         "Install"
                     },
                 )
+                .when_else(
+                    installed,
+                    |button| button.style(ButtonStyle::OutlinedGhost),
+                    |button| {
+                        button
+                            .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                            .start_icon(
+                                Icon::new(IconName::Download)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                    },
+                )
                 .disabled(busy || !checked)
                 .when_some(
                     state.and_then(|state| state.error.clone()),
-                    |button, error| {
-                        button.tooltip(move |_, cx| ui::Tooltip::text(error.clone(), cx))
-                    },
+                    |button, error| button.tooltip(ui::Tooltip::text(error)),
                 )
                 .on_click({
                     let name = name.clone();
@@ -1077,7 +1088,7 @@ impl ExtensionsPage {
                         )),
                         cx,
                     );
-                })?,
+                }),
             }
             anyhow::Ok(())
         })

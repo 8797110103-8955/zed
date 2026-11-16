@@ -51,6 +51,15 @@
         "procMacro": {
           "processes": 4,
         },
+        "cargo": {
+          "cfgs": ["!debug_assertions"],
+        },
+        "check": {
+          "extraArgs": ["--release"],
+        },
+        "runnables": {
+          "extraArgs": ["--release"],
+        },
       },
     },
   },

@@ -22,7 +22,8 @@ fn git_sha() -> Option<String> {
 fn product_version() -> String {
     let commit_sha = git_sha();
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
-    let channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".into());
+    let channel = std::env::var("RELEASE_CHANNEL")
+        .unwrap_or_else(|_| include_str!("../../zed/RELEASE_CHANNEL").trim().to_owned());
     let build_id = std::env::var("GITHUB_RUN_NUMBER").ok();
 
     let mut metadata = channel;
@@ -42,7 +43,8 @@ const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/resources/wi
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/manifest.xml");
 
 pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
+    let channel =
+        option_env!("RELEASE_CHANNEL").unwrap_or(include_str!("../../zed/RELEASE_CHANNEL").trim());
     let (icon_filename, product_name) = match channel {
         "stable" => ("app-icon.ico", "Zed"),
         "preview" => ("app-icon-preview.ico", "Zed Preview"),
