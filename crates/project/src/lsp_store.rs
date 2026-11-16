@@ -451,6 +451,19 @@ impl LocalLspStore {
         if disposition.settings.enabled == Some(false) {
             return None;
         }
+        if self
+            .languages
+            .adapter_for_name(&disposition.server_name)
+            .is_some_and(|adapter| adapter.adapter.server_source().is_some())
+            && self
+                .languages
+                .language_server_download_dir(&disposition.server_name)
+                .is_some_and(|directory| {
+                    language::language_server_uninstalled_marker(&directory).is_file()
+                })
+        {
+            return None;
+        }
         if !worktree_handle.read(cx).is_visible() {
             let mut visible_worktrees = self
                 .worktree_store
@@ -858,7 +871,7 @@ impl LocalLspStore {
         }
 
         #[cfg(any(test, feature = "test-support"))]
-        if !adapter.adapter.is_extension() && self.languages.has_fake_lsp_server(&adapter.name) {
+        if self.languages.has_fake_lsp_server(&adapter.name) {
             let language_server_name = adapter.name.clone();
             return cx.spawn(async move |_| {
                 if let Some(mut wait_until_worktree_trust) = wait_until_worktree_trust {
@@ -1737,7 +1750,7 @@ impl LocalLspStore {
         logger: zlog::Logger,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        let (adapters_and_servers, settings, request_timeout) =
+        let (mut adapters_and_servers, settings, request_timeout) =
             lsp_store.update(cx, |lsp_store, cx| {
                 buffer.handle.update(cx, |buffer, cx| {
                     let adapters_and_servers =
@@ -1760,6 +1773,7 @@ impl LocalLspStore {
                     (adapters_and_servers, settings, request_timeout)
                 })
             })?;
+        adapters_and_servers.sort_by_key(|(adapter, _)| !adapter.adapter.is_extension());
         let had_existing_line_endings = buffer
             .handle
             .read_with(cx, |buffer, _| buffer.max_point().row > 0);
@@ -1883,7 +1897,7 @@ impl LocalLspStore {
         for formatter in formatters {
             let is_auto = formatter == &Formatter::Auto;
             let formatter = if is_auto {
-                zlog::trace!(logger => "Formatter set to auto: defaulting to primary language server");
+                zlog::trace!(logger => "Formatter set to auto: preferring extension language servers");
                 &Formatter::LanguageServer(settings::LanguageServerFormatterSpecifier::Current)
             } else {
                 formatter
@@ -4895,6 +4909,10 @@ impl LspStore {
         cx: &mut Context<Self>,
     ) -> Self {
         let yarn = YarnPathStore::new(fs.clone(), cx);
+        let weak_store = cx.weak_entity();
+        cx.default_global::<crate::built_in_language_servers::LocalLanguageServerStores>()
+            .0
+            .push(weak_store);
         cx.subscribe(&buffer_store, Self::on_buffer_store_event)
             .detach();
         cx.subscribe(&worktree_store, Self::on_worktree_store_event)
@@ -12982,6 +13000,19 @@ impl LspStore {
             local.language_server_start_overrides.clear();
         }
         self.shutdown_all_language_servers(cx).detach();
+    }
+
+    pub(crate) fn restart_managed_language_server(
+        &mut self,
+        name: LanguageServerName,
+        cx: &mut Context<Self>,
+    ) {
+        let buffers = self.buffer_store.read(cx).buffers().collect();
+        self.restart_language_servers_for_buffers(
+            buffers,
+            HashSet::from_iter([LanguageServerSelector::Name(name)]),
+            cx,
+        );
     }
 
     pub fn shutdown_all_language_servers(&mut self, cx: &mut Context<Self>) -> Task<()> {

@@ -363,6 +363,10 @@ impl Debug for CachedLspAdapter {
 }
 
 impl CachedLspAdapter {
+    pub async fn lock_binary(&self) -> OwnedMutexGuard<Option<(bool, LanguageServerBinary)>> {
+        self.cached_binary.clone().lock_owned().await
+    }
+
     pub fn new(adapter: Arc<dyn LspAdapter>) -> Arc<Self> {
         let name = adapter.name();
         let disk_based_diagnostic_sources = adapter.disk_based_diagnostic_sources();
@@ -519,9 +523,41 @@ pub trait LspAdapterDelegate: Send + Sync {
     async fn try_exec(&self, binary: LanguageServerBinary) -> Result<()>;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum LanguageServerSourceKind {
+    PackageManager {
+        package: &'static str,
+        version_requirement: Option<&'static str>,
+    },
+    Github {
+        repository: &'static str,
+    },
+    Other,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LanguageServerSource {
+    pub kind: LanguageServerSourceKind,
+    pub description: &'static str,
+    pub author: &'static str,
+    pub homepage: &'static str,
+}
+
+pub fn language_server_uninstalled_marker(container_dir: &Path) -> PathBuf {
+    container_dir.with_extension("zed-uninstalled")
+}
+
+pub fn language_server_pinned_version(container_dir: &Path) -> PathBuf {
+    container_dir.join(".zed-pinned-version")
+}
+
 #[async_trait(?Send)]
 pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
     fn name(&self) -> LanguageServerName;
+
+    fn server_source(&self) -> Option<LanguageServerSource> {
+        None
+    }
 
     fn process_diagnostics(&self, _: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {}
 
@@ -757,6 +793,14 @@ pub trait LspInstaller {
 
 #[async_trait(?Send)]
 pub trait DynLspInstaller {
+    async fn managed_cached_binary(
+        &self,
+        _container_dir: PathBuf,
+        _delegate: &dyn LspAdapterDelegate,
+    ) -> Option<LanguageServerBinary> {
+        None
+    }
+
     async fn try_fetch_server_binary(
         &self,
         delegate: &Arc<dyn LspAdapterDelegate>,
@@ -781,6 +825,14 @@ where
     BinaryVersion: Send + Sync,
     LI: LspInstaller<BinaryVersion = BinaryVersion> + LspAdapter,
 {
+    async fn managed_cached_binary(
+        &self,
+        container_dir: PathBuf,
+        delegate: &dyn LspAdapterDelegate,
+    ) -> Option<LanguageServerBinary> {
+        self.cached_server_binary(container_dir, delegate).await
+    }
+
     async fn try_fetch_server_binary(
         &self,
         delegate: &Arc<dyn LspAdapterDelegate>,
@@ -827,6 +879,22 @@ where
     ) -> LanguageServerBinaryLocations {
         async move {
             let cached_binary_deref = cached_binary.deref_mut();
+            let managed_container = if self.server_source().is_some() {
+                let container = delegate.language_server_download_dir(&self.name()).await;
+                if container.as_ref().is_some_and(|container| {
+                    language_server_uninstalled_marker(container).is_file()
+                }) {
+                    return (
+                        Err(anyhow::anyhow!(
+                            "language server is uninstalled; install it from Extensions"
+                        )),
+                        None,
+                    );
+                }
+                container
+            } else {
+                None
+            };
             // First we check whether the adapter can give us a user-installed binary.
             // If so, we do *not* want to cache that, because each worktree might give us a different
             // binary:
@@ -872,7 +940,11 @@ where
                 .context(
                     "did not find existing language server binary, falling back to downloading",
                 );
-            if !binary_options.allow_binary_download {
+            if !binary_options.allow_binary_download
+                || managed_container
+                    .as_ref()
+                    .is_some_and(|container| language_server_pinned_version(container).is_file())
+            {
                 // A server Zed downloaded earlier stays usable; only fetching updates is disabled.
                 return match last_downloaded_binary {
                     Ok(binary) => {
@@ -944,6 +1016,7 @@ pub struct LanguageScope {
 #[cfg(any(test, feature = "test-support"))]
 pub struct FakeLspAdapter {
     pub name: &'static str,
+    pub is_extension: bool,
     pub initialization_options: Option<Value>,
     pub additional_initialization_options: HashMap<LanguageServerName, Value>,
     pub additional_workspace_configuration: HashMap<LanguageServerName, Value>,
@@ -1624,6 +1697,7 @@ impl Default for FakeLspAdapter {
     fn default() -> Self {
         Self {
             name: "the-fake-language-server",
+            is_extension: false,
             capabilities: lsp::LanguageServer::full_capabilities(),
             initializer: None,
             disk_based_diagnostics_progress_token: None,
@@ -1754,7 +1828,7 @@ impl LspAdapter for FakeLspAdapter {
     }
 
     fn is_extension(&self) -> bool {
-        false
+        self.is_extension
     }
 }
 

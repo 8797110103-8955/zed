@@ -2,6 +2,7 @@ pub mod agent_registry_store;
 pub mod agent_server_store;
 pub mod bookmark_store;
 pub mod buffer_store;
+pub mod built_in_language_servers;
 pub mod color_extractor;
 pub mod connection_manager;
 pub mod context_server_store;

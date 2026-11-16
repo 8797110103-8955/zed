@@ -859,6 +859,18 @@ impl LspInstaller for TypeScriptLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for TypeScriptLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: Self::PACKAGE_NAME,
+                version_requirement: Some("^7"),
+            },
+            description: "TypeScript Native language service for JavaScript and TypeScript.",
+            author: "Microsoft Corp.",
+            homepage: "https://www.typescriptlang.org/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }

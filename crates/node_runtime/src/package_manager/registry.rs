@@ -24,9 +24,65 @@ pub(super) fn should_install_package_version(
 pub struct PackageInfo {
     #[serde(default)]
     pub(super) dist_tags: PackageDistTags,
-    versions: Vec<Version>,
+    pub versions: Vec<Version>,
+    #[serde(default, deserialize_with = "deserialize_optional_text")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_maintainers")]
+    pub maintainers: Vec<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_text")]
+    pub homepage: Option<String>,
     #[serde(default, deserialize_with = "deserialize_package_info_time")]
     time: HashMap<String, String>,
+}
+
+fn deserialize_optional_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .map(str::to_owned))
+}
+
+fn deserialize_maintainers<'de, D>(deserializer: D) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(maintainers) => maintainers,
+        serde_json::Value::Null => Vec::new(),
+        maintainer => vec![maintainer],
+    })
+}
+
+impl PackageInfo {
+    pub fn author_info(&self) -> Option<String> {
+        fn person(value: &serde_json::Value) -> Option<String> {
+            if let Some(person) = value.as_str() {
+                return (!person.trim().is_empty()).then(|| person.to_owned());
+            }
+            let name = value.get("name").and_then(serde_json::Value::as_str);
+            let email = value.get("email").and_then(serde_json::Value::as_str);
+            let url = value.get("url").and_then(serde_json::Value::as_str);
+            let parts = name
+                .into_iter()
+                .map(str::to_owned)
+                .chain(email.map(|email| format!("<{email}>")))
+                .chain(url.map(|url| format!("({url})")))
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        person(&self.author).or_else(|| {
+            let maintainers = self
+                .maintainers
+                .iter()
+                .filter_map(person)
+                .collect::<Vec<_>>();
+            (!maintainers.is_empty()).then(|| maintainers.join(", "))
+        })
+    }
 }
 
 /// Parse PackageInfo from npm info --json output, handling both v11 and >= v12 formats.
@@ -192,6 +248,65 @@ fn package_version_was_published_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_package_metadata_preserves_author_contact_in_registry_responses() -> Result<()> {
+        let metadata = serde_json::json!({
+            "versions": ["1.0.0", "2.0.0"],
+            "description": "Python type checking",
+            "author": {"name": "Example", "email": "maintainer@example.com", "url": "https://example.com"},
+            "homepage": "https://example.com/docs"
+        });
+        let expected_author = "Example <maintainer@example.com> (https://example.com)";
+        for response in [
+            metadata.clone(),
+            serde_json::json!([metadata.clone()]),
+            serde_json::json!({"type": "inspect", "data": metadata}),
+        ] {
+            let info = deserialize_package_info_from_response(&serde_json::to_vec(&response)?)?;
+            assert_eq!(info.author_info().as_deref(), Some(expected_author));
+            assert_eq!(info.description.as_deref(), Some("Python type checking"));
+            assert_eq!(info.homepage.as_deref(), Some("https://example.com/docs"));
+            assert_eq!(info.versions.len(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_package_metadata_uses_maintainers_when_author_is_missing() -> Result<()> {
+        let info = deserialize_package_info_from_response(
+            br#"{
+            "versions": ["1.0.0"],
+            "maintainers": ["First", {"name": "Second", "email": "second@example.com"}]
+        }"#,
+        )?;
+        assert_eq!(
+            info.author_info().as_deref(),
+            Some("First, Second <second@example.com>")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_optional_metadata_does_not_prevent_version_resolution() -> Result<()> {
+        let info = deserialize_package_info_from_response(
+            br#"{
+            "dist-tags": {"latest": "1.0.0"},
+            "versions": ["1.0.0"],
+            "description": {"unexpected": true},
+            "homepage": ["https://example.com"],
+            "maintainers": null
+        }"#,
+        )?;
+        assert!(info.author_info().is_none());
+        assert!(info.description.is_none());
+        assert!(info.homepage.is_none());
+        assert_eq!(
+            select_package_version("example", info, None, None)?,
+            Version::parse("1.0.0")?
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_latest_version_strategy_accepts_newer_installed_versions() -> Result<()> {

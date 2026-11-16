@@ -173,6 +173,18 @@ impl LspInstaller for BashLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for BashLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: Self::PACKAGE_NAME,
+                version_requirement: None,
+            },
+            description: "Bash language intelligence, diagnostics, and navigation powered by bash-language-server.",
+            author: "Mads Hartmann",
+            homepage: "https://github.com/bash-lsp/bash-language-server",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         LanguageServerName::new_static(Self::PACKAGE_NAME)
     }

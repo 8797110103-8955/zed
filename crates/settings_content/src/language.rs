@@ -1155,7 +1155,7 @@ impl AsRef<[Formatter]> for FormatterList {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum Formatter {
-    /// Format files using a language server.
+    /// Format files using the first capable language server, preferring installed extensions.
     #[default]
     #[serde(alias = "prettier")]
     Auto,

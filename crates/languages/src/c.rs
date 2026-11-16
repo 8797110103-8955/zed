@@ -174,6 +174,17 @@ fn ensure_arch_compatibility() -> Result<()> {
 
 #[async_trait(?Send)]
 impl super::LspAdapter for CLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "clangd/clangd",
+            },
+            description: "C and C++ completion, compiler diagnostics, navigation, and refactoring based on Clang.",
+            author: "LLVM Project",
+            homepage: "https://clangd.llvm.org/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }

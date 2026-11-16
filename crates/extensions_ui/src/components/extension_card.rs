@@ -46,13 +46,14 @@ struct ExtensionCardDetails {
     description: Option<SharedString>,
     authors: SharedString,
     repository_url: Option<SharedString>,
-    repository_icon: IconName,
+    repository_icon: Icon,
     provided_features: Vec<&'static str>,
     source: ExtensionCardSource,
 }
 
 #[derive(Clone)]
 enum ExtensionCardSource {
+    BuiltIn,
     Dev,
     Installed,
     Remote {
@@ -75,7 +76,7 @@ impl ExtensionCardSource {
     fn download_count(&self) -> Option<u64> {
         match self {
             Self::Remote { download_count, .. } => Some(*download_count),
-            Self::Dev | Self::Installed => None,
+            Self::BuiltIn | Self::Dev | Self::Installed => None,
         }
     }
 
@@ -102,6 +103,48 @@ pub struct ExtensionCard {
 }
 
 impl ExtensionCard {
+    pub fn for_builtin(
+        name: &str,
+        source: language::LanguageServerSource,
+        state: Option<&project::built_in_language_servers::BuiltInServerState>,
+        actions: [Option<Button>; 3],
+    ) -> Self {
+        Self {
+            details: ExtensionCardDetails {
+                id: format!("builtin:{name}").into(),
+                name: name.to_owned().into(),
+                version: state
+                    .and_then(|state| state.version.as_deref())
+                    .unwrap_or_default()
+                    .into(),
+                description: Some(
+                    state
+                        .and_then(|state| state.description.as_deref())
+                        .unwrap_or(source.description)
+                        .to_owned()
+                        .into(),
+                ),
+                authors: state
+                    .and_then(|state| state.author.as_deref())
+                    .unwrap_or(source.author)
+                    .to_owned()
+                    .into(),
+                repository_url: Some(
+                    state
+                        .and_then(|state| state.homepage.as_deref())
+                        .unwrap_or(source.homepage)
+                        .to_owned()
+                        .into(),
+                ),
+                repository_icon: Icon::from_path("icons/file_icons/ai.svg"),
+                provided_features: vec!["Built-in", "Language Servers"],
+                source: ExtensionCardSource::BuiltIn,
+            },
+            actions,
+            context_menu: None,
+        }
+    }
+
     pub fn for_dev(extension: Arc<ExtensionManifest>, extension_store: &ExtensionStore) -> Self {
         let status = extension_store.extension_status(&extension.id);
         Self::manifest(extension, status, LocalExtensionKind::Dev)
@@ -137,7 +180,7 @@ impl ExtensionCard {
             description: extension.description.clone().map(Into::into),
             authors: extension.authors.join(", ").into(),
             repository_url: extension.repository.clone().map(Into::into),
-            repository_icon: IconName::Link,
+            repository_icon: Icon::new(IconName::Link),
             provided_features: provided_feature_labels(extension.provides()),
             source: match kind {
                 LocalExtensionKind::Dev => ExtensionCardSource::Dev,
@@ -161,7 +204,7 @@ impl ExtensionCard {
             description: extension.manifest.description.clone().map(Into::into),
             authors: extension.manifest.authors.join(", ").into(),
             repository_url: Some(extension.manifest.repository.clone().into()),
-            repository_icon: IconName::Link,
+            repository_icon: Icon::new(IconName::Link),
             provided_features: provided_feature_labels(extension.manifest.provides.iter().copied()),
             source: ExtensionCardSource::Remote {
                 state,
@@ -399,8 +442,8 @@ impl ExtensionCard {
         }
     }
 
-    pub fn repository_icon(mut self, icon: IconName) -> Self {
-        self.details.repository_icon = icon;
+    pub fn repository_icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.details.repository_icon = icon.into();
         self
     }
 
@@ -502,6 +545,16 @@ impl Component for ExtensionCard {
         }
 
         let examples = vec![
+            single_example(
+                "Built-in Language Server",
+                ExtensionCard::for_builtin("rust-analyzer", language::LanguageServerSource {
+                    kind: language::LanguageServerSourceKind::Github { repository: "rust-lang/rust-analyzer" },
+                    description: "Rust language intelligence, completion, diagnostics, and navigation.",
+                    author: "rust-analyzer contributors",
+                    homepage: "https://rust-analyzer.github.io/",
+                }, None, [Some(Button::new("install-rust-analyzer", "Install")), None, None])
+                    .into_any_element(),
+            ),
             single_example(
                 "Available to Install",
                 ExtensionCard::remote(
@@ -612,6 +665,7 @@ impl RenderOnce for ExtensionCard {
         let installed_version = source.installed_version(&version);
         let download_count = source.download_count();
         let is_dev = source.is_dev();
+        let is_builtin = matches!(source, ExtensionCardSource::BuiltIn);
         let is_overridden = source.is_overridden();
         let repository_button_id = SharedString::from(format!("repository-{id}"));
         let context_menu_button_id = SharedString::from(format!("more-{id}"));
@@ -641,15 +695,17 @@ impl RenderOnce for ExtensionCard {
                                 .whitespace_nowrap()
                                 .gap_2()
                                 .child(Headline::new(name).size(HeadlineSize::Small))
-                                .child(
-                                    Headline::new(if is_dev {
-                                        format!("v{version} (dev)")
-                                    } else {
-                                        format!("v{version}")
-                                    })
-                                    .size(HeadlineSize::XSmall)
-                                    .color(Color::Muted),
-                                )
+                                .when(!version.is_empty(), |this| {
+                                    this.child(
+                                        Headline::new(if is_dev {
+                                            format!("v{version} (dev)")
+                                        } else {
+                                            format!("v{version}")
+                                        })
+                                        .size(HeadlineSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                                })
                                 .children(installed_version.map(|installed_version| {
                                     Headline::new(format!("(v{installed_version} installed)"))
                                         .size(HeadlineSize::XSmall)
@@ -697,9 +753,13 @@ impl RenderOnce for ExtensionCard {
                                 .min_w_0()
                                 .gap_1()
                                 .child(
-                                    Icon::new(IconName::Person)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Muted),
+                                    (if is_builtin {
+                                        Icon::new(IconName::VerifiedFilled)
+                                    } else {
+                                        Icon::new(IconName::Person)
+                                    })
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
                                 )
                                 .child(
                                     Label::new(authors)
@@ -715,11 +775,13 @@ impl RenderOnce for ExtensionCard {
                                 .when_some(repository_url, |this, repository_url| {
                                     let repository_url_for_tooltip = repository_url.clone();
                                     this.child(
-                                        IconButton::new(repository_button_id, repository_icon)
-                                            .icon_size(IconSize::Small)
+                                        Button::new(repository_button_id, "")
+                                            .aria_label("Visit extension homepage")
+                                            .size(ButtonSize::Compact)
+                                            .start_icon(repository_icon.size(IconSize::Small))
                                             .tooltip(move |_, cx| {
                                                 Tooltip::with_meta(
-                                                    "Visit Extension Repository",
+                                                    "Visit Extension Homepage",
                                                     None,
                                                     repository_url_for_tooltip.clone(),
                                                     cx,

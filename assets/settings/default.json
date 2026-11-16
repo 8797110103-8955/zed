@@ -2412,7 +2412,7 @@
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
   "auto_install_extensions": {
-    "html": true,
+    "html": false,
   },
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,

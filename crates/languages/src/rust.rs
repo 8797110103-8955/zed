@@ -252,6 +252,17 @@ impl ManifestProvider for CargoManifestProvider {
 
 #[async_trait(?Send)]
 impl LspAdapter for RustLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "rust-lang/rust-analyzer",
+            },
+            description: "Rust language intelligence, completion, diagnostics, and navigation.",
+            author: "rust-analyzer contributors",
+            homepage: "https://rust-analyzer.github.io/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         SERVER_NAME
     }

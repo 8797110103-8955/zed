@@ -264,6 +264,18 @@ impl LspInstaller for JsonLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for JsonLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: Self::PACKAGE_NAME,
+                version_requirement: None,
+            },
+            description: "JSON validation, completion, and formatting with JSON Schema support.",
+            author: "hrsh7th",
+            homepage: "https://github.com/hrsh7th/vscode-langservers-extracted",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         LanguageServerName("json-language-server".into())
     }
@@ -661,6 +673,17 @@ impl LspInstaller for NodeVersionAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for NodeVersionAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "zed-industries/package-version-server",
+            },
+            description: "Package version information on hover in package.json files.",
+            author: "Zed Industries",
+            homepage: "https://github.com/zed-industries/package-version-server",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }

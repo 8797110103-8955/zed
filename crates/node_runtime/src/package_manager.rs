@@ -481,6 +481,27 @@ impl PackageManagerRuntime {
             .await
     }
 
+    pub async fn package_manager_package_info(&self, name: &str) -> Result<PackageInfo> {
+        let output = self
+            .run_package_manager_subcommand(
+                None,
+                "info",
+                &[
+                    name,
+                    "--json",
+                    "--fetch-retry-mintimeout",
+                    "2000",
+                    "--fetch-retry-maxtimeout",
+                    "5000",
+                    "--fetch-timeout",
+                    "5000",
+                ],
+            )
+            .await?;
+        registry::deserialize_package_info_from_response(&output.stdout)
+            .with_context(|| format!("reading package metadata for {name}"))
+    }
+
     pub async fn package_manager_latest_version_with_requirement(
         &self,
         name: &str,

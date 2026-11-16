@@ -209,6 +209,15 @@ impl LspInstaller for GoLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for GoLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Other,
+            description: "Go completion, diagnostics, navigation, and refactoring, installed with the Go toolchain.",
+            author: "The Go Authors",
+            homepage: "https://go.dev/gopls/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }

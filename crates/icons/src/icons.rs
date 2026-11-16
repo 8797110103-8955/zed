@@ -294,6 +294,7 @@ pub enum IconName {
     UserCheck,
     UserGroup,
     UserRoundPen,
+    VerifiedFilled,
     Warning,
     WholeWord,
     XCircle,

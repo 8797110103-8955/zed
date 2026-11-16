@@ -1,3 +1,4 @@
+mod built_in_version_selector;
 mod components;
 mod extension_suggestions;
 mod extension_version_selector;
@@ -19,9 +20,13 @@ use gpui::{
     InteractiveElement, KeyContext, ParentElement, Render, Styled, Task, TaskExt, TextStyle,
     UniformListScrollHandle, WeakEntity, Window, actions, point, uniform_list,
 };
+use language::{
+    LanguageRegistry, LanguageServerName, LanguageServerSource, LanguageServerSourceKind,
+};
 
 use picker::{Picker, PickerDelegate};
 use project::DirectoryLister;
+use project::built_in_language_servers::{BuiltInLanguageServers, BuiltInServerEvent};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -365,6 +370,7 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
 
 #[derive(Clone, Copy)]
 enum DisplayedExtension {
+    BuiltIn(usize),
     /// Index into the installed search results. `remote_index` points to the
     /// extension's metadata from the latest fetch, if it was part of it.
     Installed {
@@ -373,6 +379,58 @@ enum DisplayedExtension {
     },
     /// Index into the remote extensions.
     Remote(usize),
+}
+
+struct BuiltInLanguageServer {
+    name: String,
+    languages: Vec<String>,
+    source: Option<LanguageServerSource>,
+}
+
+impl BuiltInLanguageServer {
+    fn registered(registry: &LanguageRegistry) -> Vec<Self> {
+        let mut servers = BTreeMap::<String, BTreeSet<String>>::default();
+        for language in registry.language_names() {
+            for adapter in registry.lsp_adapters(&language) {
+                if !adapter.adapter.is_extension() {
+                    servers
+                        .entry(adapter.name.to_string())
+                        .or_default()
+                        .insert(language.to_string());
+                }
+            }
+        }
+        servers
+            .into_iter()
+            .map(|(name, languages)| Self {
+                source: registry
+                    .adapter_for_name(&LanguageServerName(name.clone().into()))
+                    .and_then(|adapter| adapter.adapter.server_source()),
+                name,
+                languages: languages.into_iter().collect(),
+            })
+            .collect()
+    }
+
+    fn matches_search(&self, search: Option<&str>) -> bool {
+        search.is_none_or(|search| {
+            if let Some(id) = search.strip_prefix("id:") {
+                self.name == id
+            } else {
+                let search = search.to_lowercase();
+                self.name.to_lowercase().contains(&search)
+                    || self
+                        .languages
+                        .iter()
+                        .any(|language| language.to_lowercase().contains(&search))
+                    || "built-in".contains(&search)
+                    || self.source.is_some_and(|source| {
+                        source.author.to_lowercase().contains(&search)
+                            || source.description.to_lowercase().contains(&search)
+                    })
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -398,13 +456,15 @@ pub struct ExtensionsPage {
     filter: ExtensionFilter,
     /// Installed extensions matching the current search.
     installed_search_results: Vec<ExtensionIndexEntry>,
+    built_in_language_servers: Vec<BuiltInLanguageServer>,
+    built_in_server_store: Entity<BuiltInLanguageServers>,
     /// Results of the latest fetch, empty if it failed.
     remote_extensions: Vec<ExtensionMetadata>,
     displayed_extensions: Vec<DisplayedExtension>,
     query_editor: Entity<Editor>,
     query_contains_error: bool,
     provides_filter: Option<ExtensionProvides>,
-    _subscriptions: [gpui::Subscription; 2],
+    _subscriptions: [gpui::Subscription; 4],
     extension_fetch_task: Option<Task<()>>,
     local_search_task: Option<Task<()>>,
     upsells: BTreeSet<Feature>,
@@ -418,10 +478,30 @@ impl ExtensionsPage {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
+        let built_in_server_store = workspace.project().update(cx, |project, cx| {
+            BuiltInLanguageServers::global(project, cx)
+        });
         cx.new(|cx| {
             let extension_store = ExtensionStore::global(cx);
             let workspace_handle = workspace.weak_handle();
             let subscriptions = [
+                cx.observe(&built_in_server_store, |this: &mut Self, _, cx| {
+                    this.rebuild_displayed_extensions(cx);
+                }),
+                cx.subscribe(&built_in_server_store, {
+                    let workspace = workspace.weak_handle();
+                    move |_: &mut Self, _, event, cx| {
+                        let BuiltInServerEvent::OperationFailed(message) = event;
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                workspace.show_error(
+                                    workspace::workspace_error::PortalError::new(message.clone()),
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                    }
+                }),
                 cx.observe(&extension_store, |_: &mut Self, _, cx| cx.notify()),
                 cx.subscribe_in(
                     &extension_store,
@@ -463,6 +543,10 @@ impl ExtensionsPage {
                 fetch_state: ExtensionFetchState::Fetching,
                 filter: ExtensionFilter::All,
                 installed_search_results: Vec::new(),
+                built_in_language_servers: BuiltInLanguageServer::registered(
+                    workspace.project().read(cx).languages(),
+                ),
+                built_in_server_store,
                 remote_extensions: Vec::new(),
                 displayed_extensions: Vec::new(),
                 query_contains_error: false,
@@ -479,10 +563,34 @@ impl ExtensionsPage {
         })
     }
 
-    fn get_repository_icon(&self, repository_url: &str) -> IconName {
-        parse_git_remote_url(Arc::clone(&self.provider_registry), repository_url)
-            .map(|(provider, _)| ui::git_hosting_provider_icon(provider.name().as_str()))
-            .unwrap_or(IconName::Link)
+    fn get_repository_icon(&self, repository_url: &str) -> Icon {
+        if let Ok(url) = http_client::Url::parse(repository_url) {
+            let path = match url.host_str().unwrap_or_default() {
+                "github.com" | "www.github.com" => Some("icons/github.svg"),
+                "gitlab.com" | "www.gitlab.com" => Some("icons/gitlab.svg"),
+                "bitbucket.org" => Some("icons/bitbucket.svg"),
+                "codeberg.org" => Some("icons/codeberg.svg"),
+                "rust-analyzer.github.io" | "rust-lang.org" | "www.rust-lang.org" => {
+                    Some("icons/file_icons/rust.svg")
+                }
+                "go.dev" | "pkg.go.dev" | "golang.org" => Some("icons/file_icons/go.svg"),
+                "typescriptlang.org" | "www.typescriptlang.org" => {
+                    Some("icons/file_icons/typescript.svg")
+                }
+                "python.org" | "www.python.org" => Some("icons/file_icons/python.svg"),
+                "zed.dev" | "www.zed.dev" => Some("icons/ai_zed.svg"),
+                _ => None,
+            };
+            if let Some(path) = path {
+                return Icon::from_path(path);
+            }
+        }
+        let icon = parse_git_remote_url(Arc::clone(&self.provider_registry), repository_url)
+            .map(|(provider, _)| ui::git_hosting_provider_icon(provider.name().as_str()));
+        match icon {
+            Some(icon) if icon != IconName::Link => Icon::new(icon),
+            _ => Icon::from_path("icons/file_icons/ai.svg"),
+        }
     }
 
     fn on_extension_installed(
@@ -593,6 +701,7 @@ impl ExtensionsPage {
     }
 
     fn rebuild_displayed_extensions(&mut self, cx: &mut Context<Self>) {
+        let search = self.search_query(cx);
         let installed_extensions = self.extension_store.read(cx).installed_extensions();
         let provides_filter = self.provides_filter;
 
@@ -632,9 +741,12 @@ impl ExtensionsPage {
                 installed_rows.map(installed_row).collect()
             }
             ExtensionFilter::All => installed_rows
-                .filter(|(_, extension)| extension.dev)
                 .map(installed_row)
-                .chain(remote_rows.map(remote_row))
+                .chain(
+                    remote_rows
+                        .filter(|(_, extension)| !installed_extensions.contains_key(&extension.id))
+                        .map(remote_row),
+                )
                 .collect(),
             ExtensionFilter::Installed => installed_rows.map(installed_row).collect(),
             ExtensionFilter::NotInstalled => remote_rows
@@ -642,6 +754,34 @@ impl ExtensionsPage {
                 .map(remote_row)
                 .collect(),
         };
+        if provides_filter.is_none_or(|provides| provides == ExtensionProvides::LanguageServers) {
+            let built_in_rows = self
+                .built_in_language_servers
+                .iter()
+                .enumerate()
+                .filter(|(_, server)| server.matches_search(search.as_deref()))
+                .filter(|(_, server)| {
+                    let state = self
+                        .built_in_server_store
+                        .read(cx)
+                        .state(&LanguageServerName(server.name.clone().into()));
+                    let installed = state.is_some_and(|state| state.installed);
+                    let checked = state.is_some_and(|state| state.checked);
+                    match self.filter {
+                        ExtensionFilter::All => true,
+                        ExtensionFilter::Installed => checked && installed,
+                        ExtensionFilter::NotInstalled => checked && !installed,
+                    }
+                })
+                .map(|(index, _)| DisplayedExtension::BuiltIn(index));
+            let first_remote = self
+                .displayed_extensions
+                .iter()
+                .position(|row| matches!(row, DisplayedExtension::Remote(_)))
+                .unwrap_or(self.displayed_extensions.len());
+            self.displayed_extensions
+                .splice(first_remote..first_remote, built_in_rows);
+        }
         cx.notify();
     }
 
@@ -747,6 +887,93 @@ impl ExtensionsPage {
         cx: &Context<Self>,
     ) -> Option<ExtensionCard> {
         let remote_index = match row {
+            DisplayedExtension::BuiltIn(index) => {
+                let server = self.built_in_language_servers.get(index)?;
+                let source = server.source?;
+                let name = LanguageServerName(server.name.clone().into());
+                let state = self.built_in_server_store.read(cx).state(&name);
+                let installed = state.is_some_and(|state| state.installed);
+                let busy = state.is_some_and(|state| state.busy);
+                let checked = state.is_some_and(|state| state.checked);
+                let store = self.built_in_server_store.clone();
+                let button = Button::new(
+                    SharedString::from(format!("manage-builtin-{}", server.name)),
+                    if !checked {
+                        "Checking..."
+                    } else if busy {
+                        "Working..."
+                    } else if installed {
+                        "Uninstall"
+                    } else {
+                        "Install"
+                    },
+                )
+                .disabled(busy || !checked)
+                .when_some(
+                    state.and_then(|state| state.error.clone()),
+                    |button, error| {
+                        button.tooltip(move |_, cx| ui::Tooltip::text(error.clone(), cx))
+                    },
+                )
+                .on_click({
+                    let name = name.clone();
+                    move |_, _, cx| {
+                        store.update(cx, |store, cx| {
+                            if installed {
+                                store.uninstall(name.clone(), cx);
+                            } else {
+                                store.install(name.clone(), None, cx);
+                            }
+                        })
+                    }
+                });
+                let homepage = state
+                    .and_then(|state| state.homepage.as_deref())
+                    .unwrap_or(source.homepage);
+                let weak_self = cx.weak_entity();
+                return Some(
+                    ExtensionCard::for_builtin(
+                        &server.name,
+                        source,
+                        state,
+                        [Some(button), None, None],
+                    )
+                    .repository_icon(self.get_repository_icon(homepage))
+                    .context_menu(move |_, authors, window, cx| {
+                        let this = weak_self.upgrade()?;
+                        Some(ContextMenu::build(window, cx, |menu, window, _| {
+                            menu.when(
+                                !busy
+                                    && matches!(
+                                        source.kind,
+                                        LanguageServerSourceKind::PackageManager { .. }
+                                    ),
+                                |menu| {
+                                    menu.entry(
+                                        "Install Another Version...",
+                                        None,
+                                        window.handler_for(&this, {
+                                            let name = name.clone();
+                                            move |this, window, cx| {
+                                                this.show_builtin_versions(name.clone(), window, cx)
+                                            }
+                                        }),
+                                    )
+                                },
+                            )
+                            .entry(
+                                "Copy Author Info",
+                                None,
+                                move |_, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        authors.to_string(),
+                                    ));
+                                },
+                            )
+                        }))
+                    }),
+                );
+            }
             DisplayedExtension::Installed {
                 index,
                 remote_index: None,
@@ -821,6 +1048,40 @@ impl ExtensionsPage {
                     cx.write_to_clipboard(ClipboardItem::new_string(authors.to_string()));
                 })
         })
+    }
+
+    fn show_builtin_versions(
+        &mut self,
+        name: LanguageServerName,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let store = self.built_in_server_store.clone();
+        let versions = store.update(cx, |store, cx| store.fetch_versions(name.clone(), cx));
+        cx.spawn_in(window, async move |_, cx| {
+            match versions.await {
+                Ok(versions) => workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.toggle_modal(window, cx, |window, cx| {
+                        built_in_version_selector::BuiltInVersionSelector::new(
+                            store, name, versions, window, cx,
+                        )
+                    });
+                })?,
+                Err(error) => workspace.update(cx, |workspace, cx| {
+                    workspace.show_error(
+                        workspace::workspace_error::PortalError::new(format!(
+                            "Failed to load language server versions: {error:#}"
+                        )),
+                        cx,
+                    );
+                })?,
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn show_extension_version_list(
@@ -1663,5 +1924,50 @@ impl Item for ExtensionsPage {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         f(*event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use language::{FakeLspAdapter, rust_lang};
+
+    #[gpui::test]
+    fn test_builtin_language_server_catalog(cx: &mut gpui::TestAppContext) {
+        let registry = LanguageRegistry::new(cx.executor());
+        registry.add(rust_lang());
+        for name in ["zed-native", "another-native", "zed-native"] {
+            registry.register_fake_lsp_adapter(
+                "Rust",
+                FakeLspAdapter {
+                    name,
+                    ..Default::default()
+                },
+            );
+        }
+        registry.register_fake_lsp_adapter(
+            "Rust",
+            FakeLspAdapter {
+                name: "user-extension",
+                is_extension: true,
+                ..Default::default()
+            },
+        );
+
+        let servers = BuiltInLanguageServer::registered(&registry);
+        assert_eq!(
+            servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            ["another-native", "zed-native"],
+        );
+        let server = servers.first().expect("native server");
+        assert_eq!(server.languages, ["Rust"]);
+        assert!(server.matches_search(None));
+        assert!(server.matches_search(Some("RUST")));
+        assert!(server.matches_search(Some("id:another-native")));
+        assert!(!server.matches_search(Some("id:another")));
+        assert!(!server.matches_search(Some("user-extension")));
     }
 }

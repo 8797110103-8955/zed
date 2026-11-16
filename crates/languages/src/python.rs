@@ -32,7 +32,6 @@ use serde_json::{Value, json};
 use settings::{SemanticTokenRules, Settings};
 use terminal::terminal_settings::TerminalSettings;
 
-use smol::lock::OnceCell;
 use std::cmp::{Ordering, Reverse};
 use std::env::consts;
 use util::command::Stdio;
@@ -372,6 +371,17 @@ impl TyLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for TyLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "astral-sh/ty",
+            },
+            description: "Python type checking and language intelligence, written in Rust.",
+            author: "Astral",
+            homepage: "https://docs.astral.sh/ty/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }
@@ -670,6 +680,18 @@ impl PyrightLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for PyrightLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: "pyright",
+                version_requirement: None,
+            },
+            description: "Static type checking and language intelligence for Python.",
+            author: "Microsoft Corporation",
+            homepage: "https://github.com/microsoft/pyright",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }
@@ -1747,15 +1769,11 @@ impl pet_core::os_environment::Environment for EnvironmentApi<'_> {
     }
 }
 
-pub(crate) struct PyLspAdapter {
-    python_venv_base: OnceCell<Result<Arc<Path>, String>>,
-}
+pub(crate) struct PyLspAdapter;
 impl PyLspAdapter {
     const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("pylsp");
     pub(crate) fn new() -> Self {
-        Self {
-            python_venv_base: OnceCell::new(),
-        }
+        Self
     }
     async fn ensure_venv(delegate: &dyn LspAdapterDelegate) -> Result<Arc<Path>> {
         let python_path = Self::find_base_python(delegate)
@@ -1810,17 +1828,6 @@ impl PyLspAdapter {
         }
         None
     }
-
-    async fn base_venv(&self, delegate: &dyn LspAdapterDelegate) -> Result<Arc<Path>, String> {
-        self.python_venv_base
-            .get_or_init(move || async move {
-                Self::ensure_venv(delegate)
-                    .await
-                    .map_err(|e| format!("{e}"))
-            })
-            .await
-            .clone()
-    }
 }
 
 const BINARY_DIR: &str = if cfg!(target_os = "windows") {
@@ -1831,6 +1838,15 @@ const BINARY_DIR: &str = if cfg!(target_os = "windows") {
 
 #[async_trait(?Send)]
 impl LspAdapter for PyLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Other,
+            description: "Python completion, linting, and refactoring, installed in a dedicated Python environment.",
+            author: "Spyder IDE team and python-lsp contributors",
+            homepage: "https://github.com/python-lsp/python-lsp-server",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }
@@ -2050,11 +2066,13 @@ impl LspInstaller for PyLspAdapter {
 
     async fn cached_server_binary(
         &self,
-        _: PathBuf,
+        container_dir: PathBuf,
         delegate: &dyn LspAdapterDelegate,
     ) -> Option<LanguageServerBinary> {
-        let venv = self.base_venv(delegate).await.ok()?;
-        let pylsp = venv.join(BINARY_DIR).join("pylsp");
+        let pylsp = container_dir
+            .join("pylsp-venv")
+            .join(BINARY_DIR)
+            .join("pylsp");
         delegate.which(pylsp.as_os_str()).await?;
         Some(LanguageServerBinary {
             path: pylsp,
@@ -2098,6 +2116,18 @@ impl BasedPyrightLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for BasedPyrightLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: "basedpyright",
+                version_requirement: None,
+            },
+            description: "Python type checking and language intelligence with additional checks and improved defaults.",
+            author: "detachhead",
+            homepage: "https://docs.basedpyright.com/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }
@@ -2507,6 +2537,17 @@ impl RuffLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for RuffLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "astral-sh/ruff",
+            },
+            description: "Python linting, code formatting, and import organization, written in Rust.",
+            author: "Astral",
+            homepage: "https://docs.astral.sh/ruff/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }
@@ -2788,6 +2829,17 @@ impl PyreflyLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for PyreflyLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::Github {
+                repository: "facebook/pyrefly",
+            },
+            description: "Python type checking and language intelligence with fast incremental analysis.",
+            author: "Meta and Pyrefly contributors",
+            homepage: "https://pyrefly.org/",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         Self::SERVER_NAME
     }

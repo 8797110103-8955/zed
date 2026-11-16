@@ -138,6 +138,18 @@ impl LspInstaller for CssLspAdapter {
 
 #[async_trait(?Send)]
 impl LspAdapter for CssLspAdapter {
+    fn server_source(&self) -> Option<language::LanguageServerSource> {
+        Some(language::LanguageServerSource {
+            kind: language::LanguageServerSourceKind::PackageManager {
+                package: Self::PACKAGE_NAME,
+                version_requirement: None,
+            },
+            description: "CSS, SCSS, and Less completion, validation, and formatting from VS Code language services.",
+            author: "hrsh7th",
+            homepage: "https://github.com/hrsh7th/vscode-langservers-extracted",
+        })
+    }
+
     fn name(&self) -> LanguageServerName {
         LanguageServerName("vscode-css-language-server".into())
     }

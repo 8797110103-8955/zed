@@ -8559,6 +8559,155 @@ async fn test_supports_range_formatting_ignores_unrelated_language_servers(
 }
 
 #[gpui::test]
+async fn test_language_server_formatting_prefers_extensions(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "let value = 1;" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let registry = project.read_with(cx, |project, _| project.languages().clone());
+    registry.add(rust_lang());
+    let mut builtin_servers = registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "builtin-formatter",
+            capabilities: lsp::ServerCapabilities {
+                document_formatting_provider: Some(lsp::OneOf::Left(true)),
+                document_range_formatting_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let mut lint_servers = registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "extension-linter",
+            is_extension: true,
+            capabilities: lsp::ServerCapabilities::default(),
+            ..Default::default()
+        },
+    );
+    let mut extension_servers = registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "extension-formatter",
+            is_extension: true,
+            capabilities: lsp::ServerCapabilities {
+                document_formatting_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .expect("open buffer");
+    let builtin_server = builtin_servers.next().await.expect("builtin server");
+    let _lint_server = lint_servers.next().await.expect("lint server");
+    let extension_server = extension_servers.next().await.expect("extension server");
+    cx.executor().run_until_parked();
+
+    let builtin_requests = Arc::new(atomic::AtomicUsize::new(0));
+    let _builtin_handler = builtin_server.set_request_handler::<lsp::request::Formatting, _, _>({
+        let builtin_requests = builtin_requests.clone();
+        move |_, _| {
+            builtin_requests.fetch_add(1, atomic::Ordering::SeqCst);
+            async { Ok(None) }
+        }
+    });
+    let builtin_range_requests = Arc::new(atomic::AtomicUsize::new(0));
+    let _builtin_range_handler = builtin_server
+        .set_request_handler::<lsp::request::RangeFormatting, _, _>({
+            let builtin_range_requests = builtin_range_requests.clone();
+            move |_, _| {
+                builtin_range_requests.fetch_add(1, atomic::Ordering::SeqCst);
+                async { Ok(None) }
+            }
+        });
+    let extension_requests = Arc::new(atomic::AtomicUsize::new(0));
+    let _extension_handler = extension_server
+        .set_request_handler::<lsp::request::Formatting, _, _>({
+            let extension_requests = extension_requests.clone();
+            move |_, _| {
+                extension_requests.fetch_add(1, atomic::Ordering::SeqCst);
+                async { Ok(None) }
+            }
+        });
+
+    for (formatter, selection, expected_builtin, expected_extension, expected_range) in [
+        (Formatter::Auto, false, 0, 1, 0),
+        (
+            Formatter::LanguageServer(settings::LanguageServerFormatterSpecifier::Current),
+            false,
+            0,
+            2,
+            0,
+        ),
+        (
+            Formatter::LanguageServer(settings::LanguageServerFormatterSpecifier::Specific {
+                name: "builtin-formatter".to_owned(),
+            }),
+            false,
+            1,
+            2,
+            0,
+        ),
+        (Formatter::Auto, true, 1, 2, 1),
+    ] {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.defaults.formatter =
+                        Some(FormatterList::Single(formatter));
+                });
+            });
+        });
+        let target = if selection {
+            let (buffer_id, range) = buffer.read_with(cx, |buffer, _| {
+                (
+                    buffer.remote_id(),
+                    buffer.anchor_before(0)..buffer.anchor_after(buffer.len()),
+                )
+            });
+            project::lsp_store::LspFormatTarget::Ranges(std::collections::BTreeMap::from_iter([(
+                buffer_id,
+                vec![range],
+            )]))
+        } else {
+            project::lsp_store::LspFormatTarget::Buffers
+        };
+        project
+            .update(cx, |project, cx| {
+                project.format(
+                    HashSet::from_iter([buffer.clone()]),
+                    target,
+                    false,
+                    project::lsp_store::FormatTrigger::Manual,
+                    cx,
+                )
+            })
+            .await
+            .expect("format buffer");
+        assert_eq!(
+            builtin_requests.load(atomic::Ordering::SeqCst),
+            expected_builtin
+        );
+        assert_eq!(
+            extension_requests.load(atomic::Ordering::SeqCst),
+            expected_extension
+        );
+        assert_eq!(
+            builtin_range_requests.load(atomic::Ordering::SeqCst),
+            expected_range
+        );
+    }
+}
+
+#[gpui::test]
 async fn test_range_formatting_prefers_range_capable_current_server(cx: &mut gpui::TestAppContext) {
     init_test(cx);
     cx.update(|cx| {
