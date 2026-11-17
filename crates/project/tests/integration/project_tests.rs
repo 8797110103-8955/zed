@@ -1506,6 +1506,102 @@ async fn test_invalid_local_tasks_shows_toast_with_doc_link(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
+async fn test_vscode_task_and_debug_load_errors_name_source_and_clear(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    TaskStore::init(None);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            ".vscode": {
+                "tasks.json": r#"{ "tasks": [] }"#,
+                "launch.json": r#"{ "configurations": [] }"#,
+            },
+            "file.rs": ""
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    cx.run_until_parked();
+    assert!(
+        !fs.is_file(Path::new(path!("/dir/.zed/settings.json")))
+            .await
+    );
+
+    let shown_toasts = Rc::new(RefCell::new(Vec::new()));
+    let hidden_toasts = Rc::new(RefCell::new(Vec::new()));
+    project.update(cx, |_, cx| {
+        let shown_toasts = shown_toasts.clone();
+        let hidden_toasts = hidden_toasts.clone();
+        cx.subscribe(&project, move |_, _, event: &Event, _| match event {
+            Event::Toast {
+                notification_id,
+                message,
+                ..
+            } => shown_toasts
+                .borrow_mut()
+                .push((notification_id.to_string(), message.clone())),
+            Event::HideToast { notification_id } => {
+                hidden_toasts.borrow_mut().push(notification_id.to_string())
+            }
+            _ => {}
+        })
+        .detach();
+    });
+
+    for (relative_path, notification_prefix, valid_content) in [
+        (".vscode/tasks.json", "local-tasks", r#"{ "tasks": [] }"#),
+        (
+            ".vscode/launch.json",
+            "local-debug-scenarios",
+            r#"{ "configurations": [] }"#,
+        ),
+    ] {
+        let absolute_path = Path::new(path!("/dir")).join(relative_path);
+        let notification_id = format!("{notification_prefix}-{:?}", Path::new(relative_path));
+        shown_toasts.borrow_mut().clear();
+        for remove_file in [false, true] {
+            hidden_toasts.borrow_mut().clear();
+            fs.save(&absolute_path, &"{".into(), Default::default())
+                .await
+                .expect("write invalid VS Code configuration");
+            cx.run_until_parked();
+
+            let (shown_id, message) = shown_toasts
+                .borrow()
+                .last()
+                .cloned()
+                .expect("invalid VS Code configuration should show a toast");
+            assert_eq!(shown_id, notification_id);
+            assert!(message.contains("parsing VSCode"), "{message}");
+            assert!(message.contains("line 1 column 1"), "{message}");
+            assert!(!message.contains("settings.json"), "{message}");
+            assert!(!hidden_toasts.borrow().contains(&notification_id));
+
+            if remove_file {
+                fs.remove_file(&absolute_path, Default::default())
+                    .await
+                    .expect("remove invalid VS Code configuration");
+            } else {
+                fs.save(&absolute_path, &valid_content.into(), Default::default())
+                    .await
+                    .expect("fix VS Code configuration");
+            }
+            cx.run_until_parked();
+            assert!(
+                hidden_toasts.borrow().contains(&notification_id),
+                "fixing or removing the configuration should hide {notification_id}"
+            );
+        }
+        assert_eq!(shown_toasts.borrow().len(), 2);
+    }
+}
+
+#[gpui::test]
 async fn test_invalid_vscode_settings_toast_names_vscode_file(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 

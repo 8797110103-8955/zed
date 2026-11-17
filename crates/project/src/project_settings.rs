@@ -1264,7 +1264,8 @@ impl SettingsObserver {
 
         let mut settings_contents = Vec::new();
         for (path, _, change) in changes.iter() {
-            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path())
+            let (settings_dir, kind): (Arc<RelPath>, _) = if path
+                .ends_with(local_settings_file_relative_path())
                 || path.ends_with(local_vscode_settings_file_relative_path())
             {
                 let settings_dir = path
@@ -1350,12 +1351,14 @@ impl SettingsObserver {
             let removed = change == &PathChange::Removed;
             let fs = fs.clone();
             let abs_path = worktree.read(cx).absolutize(path);
+            let settings_file = path.clone();
             settings_contents.push(async move {
                 if kind == LocalSettingsKind::Settings {
                     return match load_folder_settings(fs, abs_path).await {
-                        Ok(content) => (settings_dir, kind, content.map(Ok), None),
-                        Err((settings_file, error)) => {
-                            (settings_dir, kind, Some(Err(error)), Some(settings_file))
+                        Ok(content) => (settings_dir, kind, content.map(Ok), settings_file),
+                        Err((relative_path, error)) => {
+                            let settings_file = settings_dir.join(relative_path).into();
+                            (settings_dir, kind, Some(Err(error)), settings_file)
                         }
                     };
                 }
@@ -1409,7 +1412,7 @@ impl SettingsObserver {
                             .await,
                         )
                     },
-                    None,
+                    settings_file,
                 )
             });
         }
@@ -1424,28 +1427,67 @@ impl SettingsObserver {
                 futures::future::join_all(settings_contents).await;
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
-                    for (path, kind, content, failed_settings_file) in settings_contents {
+                    for (path, kind, content, settings_file) in settings_contents {
                         let content = match content.transpose() {
                             Ok(content) => content,
                             Err(error) => {
-                                let settings_file = failed_settings_file
-                                    .unwrap_or_else(local_settings_file_relative_path);
-                                cx.emit(SettingsObserverEvent::LocalSettingsUpdated(Err(
-                                    InvalidSettingsError::LocalSettings {
-                                        path: path.join(settings_file).into(),
-                                        message: error.to_string(),
-                                    },
-                                )));
+                                let message = format!("{error:#}");
+                                let event = match kind {
+                                    LocalSettingsKind::Settings => {
+                                        SettingsObserverEvent::LocalSettingsUpdated(Err(
+                                            InvalidSettingsError::LocalSettings {
+                                                path: settings_file,
+                                                message,
+                                            },
+                                        ))
+                                    }
+                                    LocalSettingsKind::Tasks => {
+                                        SettingsObserverEvent::LocalTasksUpdated(Err(
+                                            InvalidSettingsError::Tasks {
+                                                path: settings_file.as_std_path().to_path_buf(),
+                                                message,
+                                            },
+                                        ))
+                                    }
+                                    LocalSettingsKind::Debug => {
+                                        SettingsObserverEvent::LocalDebugScenariosUpdated(Err(
+                                            InvalidSettingsError::Debug {
+                                                path: settings_file.as_std_path().to_path_buf(),
+                                                message,
+                                            },
+                                        ))
+                                    }
+                                    LocalSettingsKind::Editorconfig => {
+                                        log::error!(
+                                            "Failed to load editorconfig in {settings_file:?}: {message}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                cx.emit(event);
                                 continue;
                             }
                         };
-                        if kind == LocalSettingsKind::Settings {
-                            // Applying the merged settings only reports `.zed/settings.json`,
-                            // so a previous `.vscode/settings.json` error is dismissed here.
-                            cx.emit(SettingsObserverEvent::LocalSettingsUpdated(Ok(path
-                                .join(local_vscode_settings_file_relative_path())
-                                .as_std_path()
-                                .to_path_buf())));
+                        match kind {
+                            LocalSettingsKind::Settings => {
+                                // Applying the merged settings only reports `.zed/settings.json`,
+                                // so a previous `.vscode/settings.json` error is dismissed here.
+                                cx.emit(SettingsObserverEvent::LocalSettingsUpdated(Ok(path
+                                    .join(local_vscode_settings_file_relative_path())
+                                    .as_std_path()
+                                    .to_path_buf())));
+                            }
+                            LocalSettingsKind::Tasks => {
+                                cx.emit(SettingsObserverEvent::LocalTasksUpdated(Ok(
+                                    settings_file.as_std_path().to_path_buf(),
+                                )));
+                            }
+                            LocalSettingsKind::Debug => {
+                                cx.emit(SettingsObserverEvent::LocalDebugScenariosUpdated(Ok(
+                                    settings_file.as_std_path().to_path_buf(),
+                                )));
+                            }
+                            LocalSettingsKind::Editorconfig => {}
                         }
                         this.update_settings(
                             worktree.clone(),

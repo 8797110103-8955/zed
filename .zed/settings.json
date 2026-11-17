@@ -5,37 +5,29 @@
     },
     "Markdown": {
       "tab_size": 2,
-      "formatter": "prettier",
     },
     "TOML": {
-      "formatter": "prettier",
       "format_on_save": "off",
     },
     "YAML": {
       "tab_size": 2,
-      "formatter": "prettier",
     },
     "JSON": {
       "tab_size": 2,
       "preferred_line_length": 120,
-      "formatter": "prettier",
     },
     "JSONC": {
       "tab_size": 2,
       "preferred_line_length": 120,
-      "formatter": "prettier",
     },
     "JavaScript": {
       "tab_size": 2,
-      "formatter": "prettier",
     },
     "TypeScript": {
       "tab_size": 2,
-      "formatter": "prettier",
     },
     "CSS": {
       "tab_size": 2,
-      "formatter": "prettier",
     },
     "Rust": {
       "tasks": {
@@ -53,8 +45,6 @@
         },
         "cargo": {
           "cfgs": ["!debug_assertions"],
-        },
-        "check": {
           "extraArgs": ["--release"],
         },
         "runnables": {

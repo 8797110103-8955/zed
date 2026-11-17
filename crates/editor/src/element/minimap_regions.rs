@@ -1,6 +1,6 @@
 use std::{ops::Range, time::Duration};
 
-use gpui::{AppContext as _, Task, WeakEntity};
+use gpui::{AppContext as _, FontWeight, Task, WeakEntity};
 use language::BufferSnapshot;
 use multi_buffer::MultiBufferRow;
 use text::{BufferId, Point};
@@ -10,6 +10,8 @@ use crate::{
     Editor,
     display_map::{DisplayRow, DisplaySnapshot, ToDisplayPoint},
 };
+
+const REGION_TITLE_HEIGHT: Pixels = px(20.);
 
 #[derive(Default)]
 struct RegionParser {
@@ -174,10 +176,6 @@ impl MinimapRegions {
         if first_marker >= end_marker {
             return None;
         }
-        let settings = theme::theme_settings(cx);
-        // The minimap scales rems down with its code glyphs.
-        let title_font_size = settings.ui_font_size(cx) * 1.15;
-        let title_height = title_font_size * 1.35;
         let mut next_title_top = px(0.);
         let mut overlay = div().relative().size_full().overflow_hidden();
         for marker in &self.markers[first_marker..end_marker] {
@@ -189,32 +187,49 @@ impl MinimapRegions {
             if !visible.contains(&row) || top < next_title_top {
                 continue;
             }
-            next_title_top = top + title_height;
-            overlay = overlay.child(
-                div()
-                    .absolute()
-                    .top(top)
-                    .left(px(2.))
-                    .right_0()
-                    .h(title_height)
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .font(settings.ui_font(cx).clone())
-                    .line_height(relative(1.))
-                    .child(
-                        div()
-                            .text_size(title_font_size)
-                            .text_color(cx.theme().colors().text)
-                            .min_w_0()
-                            .truncate()
-                            .debug_selector(|| "minimap-region-title".into())
-                            .child(marker.title.clone().unwrap_or_else(|| "region".into())),
-                    ),
-            );
+            next_title_top = top + REGION_TITLE_HEIGHT;
+            overlay = overlay.child(render_region_title(
+                marker.title.clone().unwrap_or_else(|| "region".into()),
+                top,
+                cx,
+            ));
         }
         (next_title_top > px(0.)).then(|| overlay.into_any_element())
     }
+}
+
+fn render_region_title(title: SharedString, top: Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    div()
+        .absolute()
+        .top(top)
+        .left_0()
+        .right_0()
+        .h(REGION_TITLE_HEIGHT)
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .font(theme::theme_settings(cx).ui_font(cx).clone())
+        .font_weight(FontWeight::MEDIUM)
+        // Pixel units keep titles readable independently of the minimap's rem scaling.
+        .text_size(px(9.))
+        .text_color(colors.text_muted)
+        .line_height(relative(1.2))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .debug_selector(|| "minimap-region-title".into())
+                .child(title),
+        )
+        .child(
+            div()
+                .h_px()
+                .min_w(px(10.))
+                .flex_1()
+                .flex_shrink_0()
+                .bg(colors.border_variant),
+        )
 }
 
 #[cfg(test)]
