@@ -121,9 +121,20 @@ fn get_open_folders(workspace: &Workspace, cx: &App) -> Vec<OpenFolderEntry> {
         return Vec::new();
     }
 
-    let active_worktree_id = workspace
-        .current_folder(cx)
-        .map(|folder| folder.read(cx).id());
+    let active_worktree_id = if let Some(repo) = project.active_repository(cx) {
+        let repo = repo.read(cx);
+        let repo_path = &repo.work_directory_abs_path;
+        project.visible_worktrees(cx).find_map(|worktree| {
+            let worktree_path = worktree.read(cx).abs_path();
+            (worktree_path == *repo_path || worktree_path.starts_with(repo_path.as_ref()))
+                .then(|| worktree.read(cx).id())
+        })
+    } else {
+        project
+            .visible_worktrees(cx)
+            .next()
+            .map(|wt| wt.read(cx).id())
+    };
 
     let mut all_paths: Vec<PathBuf> = visible_worktrees
         .iter()
@@ -164,16 +175,6 @@ fn get_open_folders(workspace: &Workspace, cx: &App) -> Vec<OpenFolderEntry> {
 
     entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
-}
-
-/// Shows a project by the name of the workspace file last used with its folders.
-fn code_workspace_label(paths: &[PathBuf], cx: &App) -> Option<HighlightedMatch> {
-    let name = workspace::code_workspace_display_name(paths, cx)?;
-    Some(HighlightedMatch {
-        text: name.to_string(),
-        highlight_positions: Vec::new(),
-        color: Color::Default,
-    })
 }
 
 fn get_branch_for_worktree(
@@ -915,17 +916,12 @@ impl PickerDelegate for RecentProjectsDelegate {
             .iter()
             .enumerate()
             .map(|(id, key)| {
-                let mut combined_string = key
+                let combined_string = key
                     .path_list()
                     .ordered_paths()
                     .map(|path| path.compact().to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
                     .concat();
-                if let Some(name) =
-                    workspace::code_workspace_display_name(key.path_list().paths(), cx)
-                {
-                    combined_string.push_str(&name);
-                }
                 StringMatchCandidate::new(id, &combined_string)
             })
             .collect();
@@ -933,26 +929,18 @@ impl PickerDelegate for RecentProjectsDelegate {
         let project_group_matches = match_strings(&project_group_candidates, query, match_options);
 
         // Build candidates for recent projects (not current, not sibling, not open folder)
-        let workspace_names = self
-            .workspaces
-            .iter()
-            .map(|workspace| workspace::code_workspace_display_name(workspace.paths.paths(), cx))
-            .collect::<Vec<_>>();
         let recent_candidates: Vec<_> = self
             .workspaces
             .iter()
             .enumerate()
             .filter(|(_, workspace)| self.is_valid_recent_candidate(workspace, cx))
             .map(|(id, workspace)| {
-                let mut combined_string = workspace
+                let combined_string = workspace
                     .identity_paths
                     .ordered_paths()
                     .map(|path| path.compact().to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
                     .concat();
-                if let Some(Some(name)) = workspace_names.get(id) {
-                    combined_string.push_str(name);
-                }
                 StringMatchCandidate::new(id, &combined_string)
             })
             .collect();
@@ -1055,7 +1043,10 @@ impl PickerDelegate for RecentProjectsDelegate {
                 let worktree_id = folder.worktree_id;
                 if let Some(workspace) = self.workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
-                        workspace.select_folder(worktree_id, cx);
+                        let git_store = workspace.project().read(cx).git_store().clone();
+                        git_store.update(cx, |git_store, cx| {
+                            git_store.set_active_repo_for_worktree(worktree_id, cx);
+                        });
                     });
                 }
                 cx.emit(DismissEvent);
@@ -1299,9 +1290,7 @@ impl PickerDelegate for RecentProjectsDelegate {
 
                 let highlighted_match = HighlightedMatchWithPaths {
                     prefix: None,
-                    match_label: code_workspace_label(paths.paths(), cx).unwrap_or_else(|| {
-                        HighlightedMatch::join(match_labels.into_iter(), ", ")
-                    }),
+                    match_label: HighlightedMatch::join(match_labels.into_iter(), ", "),
                     paths: path_highlights,
                     active: is_active,
                 };
@@ -1454,9 +1443,7 @@ impl PickerDelegate for RecentProjectsDelegate {
 
                 let highlighted_match = HighlightedMatchWithPaths {
                     prefix,
-                    match_label: code_workspace_label(raw_paths.paths(), cx).unwrap_or_else(|| {
-                        HighlightedMatch::join(match_labels.into_iter(), ", ")
-                    }),
+                    match_label: HighlightedMatch::join(match_labels.into_iter(), ", "),
                     paths,
                     active: false,
                 };

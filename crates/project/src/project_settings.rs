@@ -10,8 +10,7 @@ use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT_SECS, LanguageServerName};
 use paths::{
     EDITORCONFIG_NAME, debug_task_file_name, local_debug_file_relative_path,
     local_settings_file_relative_path, local_tasks_file_relative_path,
-    local_vscode_launch_file_relative_path, local_vscode_settings_file_relative_path,
-    local_vscode_tasks_file_relative_path, task_file_name,
+    local_vscode_launch_file_relative_path, local_vscode_tasks_file_relative_path, task_file_name,
 };
 use rpc::{
     AnyProtoClient, TypedEnvelope,
@@ -29,13 +28,12 @@ use settings::{
 };
 use std::{cell::OnceCell, collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use task::{DebugTaskFile, TaskTemplates, VsCodeDebugTaskFile, VsCodeTaskFile};
-use util::{ResultExt, merge_non_null_json_value_into, rel_path::RelPath, serde::default_true};
+use util::{ResultExt, rel_path::RelPath, serde::default_true};
 use worktree::{PathChange, UpdatedEntriesSet, Worktree, WorktreeId};
 
 use crate::{
     task_store::{TaskSettingsLocation, TaskStore},
     trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent},
-    vscode_workspace::{VsCodeWorkspace, convert_settings, empty_object},
     worktree_store::{WorktreeStore, WorktreeStoreEvent},
 };
 
@@ -908,8 +906,6 @@ pub enum SettingsObserverEvent {
 impl EventEmitter<SettingsObserverEvent> for SettingsObserver {}
 
 pub struct SettingsObserver {
-    vscode_workspace: Option<VsCodeWorkspace>,
-    workspace_worktrees: Vec<WorktreeId>,
     mode: SettingsObserverMode,
     downstream_client: Option<AnyProtoClient>,
     worktree_store: Entity<WorktreeStore>,
@@ -985,7 +981,6 @@ impl SettingsObserver {
                                     }
                                 }
                             }
-                            settings_observer.apply_workspace_settings(cx);
                         }
                         TrustedWorktreesEvent::Restricted(..) => {}
                     },
@@ -1023,8 +1018,6 @@ impl SettingsObserver {
         );
 
         Self {
-            vscode_workspace: None,
-            workspace_worktrees: Vec::new(),
             worktree_store,
             task_store,
             mode: SettingsObserverMode::Local(fs.clone()),
@@ -1088,8 +1081,6 @@ impl SettingsObserver {
         };
 
         Self {
-            vscode_workspace: None,
-            workspace_worktrees: Vec::new(),
             worktree_store,
             task_store,
             mode: SettingsObserverMode::Remote { via_collab },
@@ -1231,19 +1222,14 @@ impl SettingsObserver {
         cx: &mut Context<Self>,
     ) {
         match event {
-            WorktreeStoreEvent::WorktreeAdded(worktree) => {
-                cx.subscribe(worktree, |this, worktree, event, cx| {
+            WorktreeStoreEvent::WorktreeAdded(worktree) => cx
+                .subscribe(worktree, |this, worktree, event, cx| {
                     if let worktree::Event::UpdatedEntries(changes) = event {
                         this.update_local_worktree_settings(&worktree, changes, cx)
                     }
                 })
-                .detach();
-                if self.vscode_workspace.is_some() {
-                    self.apply_workspace_settings(cx);
-                }
-            }
+                .detach(),
             WorktreeStoreEvent::WorktreeRemoved(_, worktree_id) => {
-                self.workspace_worktrees.retain(|id| id != worktree_id);
                 cx.update_global::<SettingsStore, _>(|store, cx| {
                     store.clear_local_settings(*worktree_id, cx).log_err();
                 });
@@ -1264,11 +1250,8 @@ impl SettingsObserver {
 
         let mut settings_contents = Vec::new();
         for (path, _, change) in changes.iter() {
-            let (settings_dir, kind): (Arc<RelPath>, _) = if path
-                .ends_with(local_settings_file_relative_path())
-                || path.ends_with(local_vscode_settings_file_relative_path())
-            {
-                let settings_dir = path
+            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path()) {
+                let settings_dir: Arc<RelPath> = path
                     .ancestors()
                     .nth(local_settings_file_relative_path().components().count())
                     .unwrap()
@@ -1353,15 +1336,6 @@ impl SettingsObserver {
             let abs_path = worktree.read(cx).absolutize(path);
             let settings_file = path.clone();
             settings_contents.push(async move {
-                if kind == LocalSettingsKind::Settings {
-                    return match load_folder_settings(fs, abs_path).await {
-                        Ok(content) => (settings_dir, kind, content.map(Ok), settings_file),
-                        Err((relative_path, error)) => {
-                            let settings_file = settings_dir.join(relative_path).into();
-                            (settings_dir, kind, Some(Err(error)), settings_file)
-                        }
-                    };
-                }
                 (
                     settings_dir,
                     kind,
@@ -1469,14 +1443,7 @@ impl SettingsObserver {
                             }
                         };
                         match kind {
-                            LocalSettingsKind::Settings => {
-                                // Applying the merged settings only reports `.zed/settings.json`,
-                                // so a previous `.vscode/settings.json` error is dismissed here.
-                                cx.emit(SettingsObserverEvent::LocalSettingsUpdated(Ok(path
-                                    .join(local_vscode_settings_file_relative_path())
-                                    .as_std_path()
-                                    .to_path_buf())));
-                            }
+                            LocalSettingsKind::Settings => {}
                             LocalSettingsKind::Tasks => {
                                 cx.emit(SettingsObserverEvent::LocalTasksUpdated(Ok(
                                     settings_file.as_std_path().to_path_buf(),
@@ -1500,134 +1467,6 @@ impl SettingsObserver {
             })
         })
         .detach();
-    }
-
-    pub fn vscode_worktree_name(&self, path: &std::path::Path) -> Option<String> {
-        self.vscode_workspace
-            .as_ref()?
-            .folders
-            .iter()
-            .find(|folder| folder.path == path)?
-            .name
-            .clone()
-    }
-
-    pub fn vscode_workspace_path(&self) -> Option<&std::path::Path> {
-        self.vscode_workspace
-            .as_ref()
-            .map(|workspace| workspace.path.as_path())
-    }
-
-    pub fn set_vscode_workspace(
-        &mut self,
-        workspace: Option<VsCodeWorkspace>,
-        cx: &mut Context<Self>,
-    ) {
-        self.vscode_workspace = workspace;
-        self.apply_workspace_settings(cx);
-        let worktrees = self.worktree_store.read(cx).worktrees().collect::<Vec<_>>();
-        for worktree in worktrees {
-            let path = worktree.read(cx).abs_path();
-            let configuration = self.vscode_workspace.as_ref().filter(|workspace| {
-                workspace
-                    .folders
-                    .iter()
-                    .any(|folder| folder.path == path.as_ref())
-            });
-            let tasks = configuration
-                .map(|workspace| workspace.tasks_for_folder(path.as_ref()))
-                .transpose();
-            let launch = configuration
-                .map(|workspace| workspace.launch_for_folder(path.as_ref()))
-                .transpose();
-            for (kind, content) in [
-                (LocalSettingsKind::Tasks, tasks),
-                (LocalSettingsKind::Debug, launch),
-            ] {
-                match content {
-                    Ok(content) => self.update_settings(
-                        worktree.clone(),
-                        [(
-                            LocalSettingsPath::InWorktree(RelPath::empty_arc()),
-                            kind,
-                            content.flatten(),
-                        )],
-                        false,
-                        cx,
-                    ),
-                    Err(error) => {
-                        let path = self
-                            .vscode_workspace
-                            .as_ref()
-                            .map(|workspace| workspace.path.clone())
-                            .unwrap_or_default();
-                        let error = if kind == LocalSettingsKind::Tasks {
-                            InvalidSettingsError::Tasks {
-                                path,
-                                message: error.to_string(),
-                            }
-                        } else {
-                            InvalidSettingsError::Debug {
-                                path,
-                                message: error.to_string(),
-                            }
-                        };
-                        cx.emit(if kind == LocalSettingsKind::Tasks {
-                            SettingsObserverEvent::LocalTasksUpdated(Err(error))
-                        } else {
-                            SettingsObserverEvent::LocalDebugScenariosUpdated(Err(error))
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    /// Shares the workspace file's settings with every trusted folder of the workspace.
-    fn apply_workspace_settings(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.mode, SettingsObserverMode::Local(_)) {
-            return;
-        }
-        let worktrees = self.worktree_store.read(cx).worktrees().collect::<Vec<_>>();
-        let mut members = Vec::new();
-        if let Some(workspace) = &self.vscode_workspace {
-            for worktree in worktrees {
-                let worktree_id = worktree.read(cx).id();
-                let path = worktree.read(cx).abs_path();
-                if !workspace
-                    .folders
-                    .iter()
-                    .any(|folder| folder.path == path.as_ref())
-                {
-                    continue;
-                }
-                let trusted = TrustedWorktrees::try_get_global(cx).is_none_or(|trusted| {
-                    trusted.update(cx, |trusted, cx| {
-                        trusted.can_trust(&self.worktree_store, worktree_id, cx)
-                    })
-                });
-                if trusted {
-                    members.push(worktree_id);
-                }
-            }
-        }
-        let detached = std::mem::take(&mut self.workspace_worktrees)
-            .into_iter()
-            .filter(|worktree_id| !members.contains(worktree_id))
-            .collect::<Vec<_>>();
-        let settings = self
-            .vscode_workspace
-            .as_ref()
-            .map(|workspace| workspace.settings.clone());
-        cx.update_global::<SettingsStore, _>(|store, cx| {
-            if !detached.is_empty() {
-                store.set_workspace_settings(&detached, None, cx);
-            }
-            if !members.is_empty() {
-                store.set_workspace_settings(&members, settings, cx);
-            }
-        });
-        self.workspace_worktrees = members;
     }
 
     fn update_settings(
@@ -1849,67 +1688,6 @@ impl SettingsObserver {
             }
         })
     }
-}
-
-/// On failure, also returns which settings file caused the error.
-async fn load_folder_settings(
-    fs: Arc<dyn Fs>,
-    changed_path: PathBuf,
-) -> Result<Option<String>, (&'static RelPath, anyhow::Error)> {
-    let directory = changed_path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .context("Settings file has no project directory")
-        .map_err(|error| (local_settings_file_relative_path(), error))?;
-    let mut merged = None;
-    for relative_path in [
-        local_vscode_settings_file_relative_path(),
-        local_settings_file_relative_path(),
-    ] {
-        let value = load_settings_file(fs.as_ref(), &directory.join(relative_path.as_std_path()))
-            .await
-            .map_err(|error| (relative_path, error))?;
-        if let Some(value) = value {
-            merge_non_null_json_value_into(value, merged.get_or_insert_with(empty_object));
-        }
-    }
-    merged
-        .map(|settings| serde_json::to_string(&settings))
-        .transpose()
-        .map_err(|error| (local_settings_file_relative_path(), error.into()))
-}
-
-async fn load_settings_file(
-    fs: &dyn Fs,
-    path: &std::path::Path,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    let content = match fs.load(path).await {
-        Ok(content) => content,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("Failed to read {}", path.display()));
-        }
-    };
-    if content.trim().is_empty() {
-        return Ok(None);
-    }
-    let value: serde_json::Value = parse_json_with_comments(&content)
-        .with_context(|| format!("Invalid settings in {}", path.display()))?;
-    anyhow::ensure!(
-        value.is_object(),
-        "Settings in {} must be a JSON object",
-        path.display()
-    );
-    if path.ends_with(local_vscode_settings_file_relative_path().as_std_path()) {
-        return convert_settings(path, value).map(Some);
-    }
-    Ok(Some(value))
 }
 
 fn apply_local_settings(

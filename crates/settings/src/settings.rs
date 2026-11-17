@@ -1,5 +1,4 @@
 mod base_keymap_setting;
-mod code_workspace_settings;
 mod content_into_gpui;
 mod editable_setting_control;
 mod editorconfig_store;
@@ -52,7 +51,6 @@ pub use settings_store::{
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
 
-pub use code_workspace_settings::{workspace_project_settings, workspace_text_for_update};
 pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;

@@ -1,8 +1,4 @@
 pub mod active_file_name;
-mod code_workspace;
-pub use code_workspace::{
-    code_workspace_display_name, code_workspace_file_name, code_workspace_for_folders,
-};
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -1052,7 +1048,6 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
-    code_workspace::init(cx);
 
     cx.on_app_quit(flush_windows_serialization_on_quit).detach();
 
@@ -1696,7 +1691,6 @@ pub struct Workspace {
     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
     database_id: Option<WorkspaceId>,
-    code_workspace: Option<code_workspace::CodeWorkspace>,
     app_state: Arc<AppState>,
     dispatching_keystrokes: Rc<RefCell<DispatchingKeystrokes>>,
     _subscriptions: Vec<Subscription>,
@@ -1732,7 +1726,6 @@ pub struct Workspace {
     /// use this instead of going through the `multi_workspace` field to avoid
     /// reading it as we might end up in a double lease otherwise.
     active_workspace_id: Option<Rc<Cell<EntityId>>>,
-    selected_folder: Option<WorktreeId>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
     persisted_recent_navigation_history: Vec<PathBuf>,
@@ -1846,7 +1839,6 @@ impl Workspace {
                     this.update_window_title(window, cx);
                     this.serialize_workspace(window, cx);
                     this.update_history(cx);
-                    this.code_workspace_folders_changed(window, cx);
                 }
 
                 &project::Event::WorktreeAdded(id) => {
@@ -1859,7 +1851,6 @@ impl Workspace {
                     {
                         this.serialize_workspace(window, cx);
                         this.update_history(cx);
-                        this.code_workspace_folders_changed(window, cx);
                     }
                 }
                 project::Event::WorktreeUpdatedEntries(worktree_id, changes) => {
@@ -2211,7 +2202,6 @@ impl Workspace {
             dirty_items: Default::default(),
             active_call,
             database_id: workspace_id,
-            code_workspace: None,
             app_state,
             _observe_current_user,
             _apply_leader_updates,
@@ -2241,7 +2231,6 @@ impl Workspace {
             sidebar_focus_handle: None,
             multi_workspace,
             active_workspace_id: None,
-            selected_folder: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
             open_in_dev_container: false,
             _dev_container_task: None,
@@ -2295,10 +2284,6 @@ impl Workspace {
             if let Some(paths) = serialized_workspace.as_ref().map(|ws| &ws.paths) {
                 paths_to_open = paths.ordered_paths().cloned().collect();
             }
-
-            let (paths_to_open, code_configuration) =
-                code_workspace::expand_workspace_paths(paths_to_open, app_state.fs.as_ref())
-                    .await?;
 
             // Get project paths for all of the abs_paths
             let mut project_paths: Vec<(PathBuf, Option<ProjectPath>)> =
@@ -2466,16 +2451,6 @@ impl Workspace {
                 };
 
             notify_if_database_failed(window, cx);
-            window
-                .update(cx, |_, window, cx| {
-                    workspace.update(cx, |workspace, cx| match code_configuration {
-                        Some(configuration) => {
-                            workspace.attach_code_workspace(configuration, window, cx)
-                        }
-                        None => workspace.attach_matching_code_workspace(window, cx),
-                    })
-                })?
-                .await?;
             #[cfg(target_os = "windows")]
             if let Some(wsl_path) = wsl_path {
                 workspace.update(cx, |workspace, cx| workspace.notify_wsl_path(wsl_path, cx));
@@ -3034,40 +3009,27 @@ impl Workspace {
         &self.app_state
     }
 
-    pub fn select_folder(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
-        self.selected_folder = Some(worktree_id);
-        let git_store = self.project.read(cx).git_store().clone();
-        git_store.update(cx, |git_store, cx| {
-            git_store.set_active_repo_for_worktree(worktree_id, cx);
-        });
-        cx.notify();
-    }
-
-    pub fn selected_folder(&self, cx: &App) -> Option<Entity<Worktree>> {
-        self.project
-            .read(cx)
-            .worktree_for_id(self.selected_folder?, cx)
-            .filter(|worktree| worktree.read(cx).is_visible())
-    }
-
-    pub fn current_folder(&self, cx: &App) -> Option<Entity<Worktree>> {
-        if let Some(folder) = self.selected_folder(cx) {
-            return Some(folder);
-        }
-
+    pub fn active_folder_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
         let project = self.project.read(cx);
-        if let Some(repository) = project.active_repository(cx) {
-            let repository_path = &repository.read(cx).work_directory_abs_path;
-            if let Some(folder) = project.visible_worktrees(cx).find(|worktree| {
-                let worktree = worktree.read(cx);
+        let mut folders = project
+            .visible_worktrees(cx)
+            .filter(|worktree| {
                 worktree
-                    .path_style()
-                    .starts_with(&worktree.abs_path(), repository_path.as_ref())
+                    .read(cx)
+                    .root_entry()
+                    .is_some_and(|entry| entry.is_dir())
+            })
+            .collect::<Vec<_>>();
+        if let Some(repository) = project.active_repository(cx) {
+            let repository_path = repository.read(cx).work_directory_abs_path.clone();
+            if let Some(index) = folders.iter().position(|worktree| {
+                let worktree_path = worktree.read(cx).abs_path();
+                worktree_path == repository_path || worktree_path.starts_with(&repository_path)
             }) {
-                return Some(folder);
+                folders.swap(0, index);
             }
         }
-        project.visible_worktrees(cx).next()
+        folders.first().map(|worktree| worktree.read(cx).id())
     }
 
     pub fn is_restoring(&self) -> bool {
@@ -4306,24 +4268,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Vec<Option<anyhow::Result<Box<dyn ItemHandle>>>>> {
-        if abs_paths
-            .iter()
-            .any(|path| code_workspace::is_workspace_file(path))
-        {
-            let task = open_paths(
-                &abs_paths,
-                self.app_state.clone(),
-                OpenOptions {
-                    requesting_window: window.window_handle().downcast::<MultiWorkspace>(),
-                    ..options
-                },
-                cx,
-            );
-            return cx.spawn(async move |_, _| match task.await {
-                Ok(result) => result.opened_items,
-                Err(error) => vec![Some(Err(error))],
-            });
-        }
         #[cfg(target_os = "windows")]
         if self.project.read(cx).is_local()
             && let Some(wsl_path) = abs_paths
@@ -7066,10 +7010,6 @@ impl Workspace {
                 .active_item(cx)
                 .is_some_and(|item| item.buffer_kind(cx) == ItemBufferKind::Singleton)
         {
-            if active_project_path_changed && self.selected_folder != Some(project_path.worktree_id)
-            {
-                self.selected_folder = None;
-            }
             let git_store_entity = self.project.read(cx).git_store().clone();
             git_store_entity.update(cx, |git_store, cx| {
                 git_store.set_active_repo_for_path(project_path, cx);
@@ -11967,9 +11907,6 @@ pub fn open_paths(
     let abs_paths = abs_paths.to_vec();
 
     cx.spawn(async move |cx| {
-        let original_paths = abs_paths.clone();
-        let (abs_paths, code_configuration) =
-            code_workspace::expand_workspace_paths(abs_paths, app_state.fs.as_ref()).await?;
         let mut reuse_target =
             find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx);
 
@@ -11977,10 +11914,7 @@ pub fn open_paths(
 
         // Fallback: if no workspace contains the paths and all paths are files,
         // prefer an existing local workspace window (active window first).
-        if code_configuration.is_none()
-            && open_options.should_reuse_existing_window()
-            && reuse_target.is_none()
-        {
+        if open_options.should_reuse_existing_window() && reuse_target.is_none() {
             let all_paths = abs_paths.iter().map(|path| app_state.fs.metadata(path));
             let all_metadatas = futures::future::join_all(all_paths)
                 .await
@@ -12082,16 +12016,6 @@ pub fn open_paths(
                 });
             });
 
-            if let Some(configuration) = code_configuration {
-                target_window
-                    .update(cx, |_, window, cx| {
-                        target_workspace.update(cx, |workspace, cx| {
-                            workspace.attach_code_workspace(configuration, window, cx)
-                        })
-                    })?
-                    .await?;
-            }
-
             Ok(OpenResult {
                 window: target_window,
                 workspace: target_workspace,
@@ -12112,15 +12036,10 @@ pub fn open_paths(
             } else {
                 None
             };
-            let paths_for_new_workspace = if code_configuration.is_some() {
-                original_paths
-            } else {
-                abs_paths
-            };
             let result = cx
                 .update(move |cx| {
                     Workspace::new_local(
-                        paths_for_new_workspace,
+                        abs_paths,
                         app_state.clone(),
                         creation_window,
                         open_options.env,

@@ -393,8 +393,10 @@ impl WelcomePage {
         project_index: usize,
         tab_index: usize,
         location: &SerializedWorkspaceLocation,
-        name: String,
+        paths: &PathList,
     ) -> impl IntoElement {
+        let name = project_name(paths);
+
         let (icon, title) = match location {
             SerializedWorkspaceLocation::Local => (IconName::Folder, name),
             SerializedWorkspaceLocation::Remote(_) => (IconName::Server, name),
@@ -428,14 +430,11 @@ impl Render for WelcomePage {
             .take(5)
             .enumerate()
             .map(|(index, workspace)| {
-                let name = crate::code_workspace_display_name(workspace.paths.paths(), cx)
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| project_name(&workspace.identity_paths));
                 self.render_recent_project(
                     index,
                     first_section_entries + index,
                     &workspace.location,
-                    name,
+                    &workspace.identity_paths,
                 )
             })
             .collect::<Vec<_>>();

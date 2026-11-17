@@ -2297,18 +2297,6 @@ pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<Path
 }
 
 fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
-    // Follow the folder the title bar shows as current. Without an explicit
-    // pick it tracks the active repository, which can differ from the folder
-    // of the active file (e.g. after choosing a repository in the Git panel).
-    let has_current_folder = workspace.selected_folder(cx).is_some()
-        || workspace.project().read(cx).active_repository(cx).is_some();
-    if has_current_folder
-        && let Some(directory) = workspace
-            .current_folder(cx)
-            .and_then(|folder| worktree_directory(folder.read(cx)))
-    {
-        return Some(directory);
-    }
     workspace
         .project()
         .read(cx)
@@ -2321,10 +2309,6 @@ fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf>
 ///Gets the first project's home directory, or the home directory
 fn first_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let worktree = workspace.worktrees(cx).next()?.read(cx);
-    worktree_directory(worktree)
-}
-
-fn worktree_directory(worktree: &project::Worktree) -> Option<PathBuf> {
     let worktree_path = worktree.abs_path();
     if worktree.root_entry()?.is_dir() {
         Some(worktree_path.to_path_buf())
@@ -2985,89 +2969,6 @@ mod tests {
             assert_eq!(res, Some(Path::new("/root2/").to_path_buf()));
             let res = first_project_directory(workspace, cx);
             assert_eq!(res, Some(Path::new("/root1/").to_path_buf()));
-        });
-    }
-
-    #[gpui::test]
-    async fn selected_folder_sets_terminal_directory(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-        let (first_folder, first_entry) = create_folder_wt(project.clone(), "/root1/", cx).await;
-        let (selected_folder, _) = create_folder_wt(project.clone(), "/root2/", cx).await;
-        insert_active_entry_for(first_folder, first_entry, project, cx);
-
-        let selected_folder_id = selected_folder.read_with(cx, |worktree, _| worktree.id());
-        workspace.update(cx, |workspace, cx| {
-            assert_eq!(
-                default_working_directory(workspace, cx),
-                Some(PathBuf::from("/root1/"))
-            );
-            workspace.select_folder(selected_folder_id, cx);
-            assert_eq!(
-                default_working_directory(workspace, cx),
-                Some(PathBuf::from("/root2/"))
-            );
-        });
-    }
-
-    #[gpui::test]
-    async fn active_repository_folder_sets_terminal_directory(cx: &mut TestAppContext) {
-        let params = cx.update(AppState::test);
-        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
-        let fs = params.fs.as_fake();
-        fs.insert_tree(util::path!("/root1"), serde_json::json!({ "a.txt": "" }))
-            .await;
-        fs.insert_tree(
-            util::path!("/root2"),
-            serde_json::json!({ ".git": {}, "b.txt": "" }),
-        )
-        .await;
-        let project = Project::test(
-            params.fs.clone(),
-            [
-                Path::new(util::path!("/root1")),
-                Path::new(util::path!("/root2")),
-            ],
-            cx,
-        )
-        .await;
-        let window_handle =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = window_handle
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .expect("workspace");
-        cx.run_until_parked();
-
-        let (first_folder, second_folder) = project.read_with(cx, |project, cx| {
-            let mut worktrees = project.visible_worktrees(cx);
-            (
-                worktrees.next().expect("first folder"),
-                worktrees.next().expect("second folder"),
-            )
-        });
-        let first_entry = first_folder.read_with(cx, |worktree, _| {
-            worktree
-                .entry_for_path(
-                    RelPath::new(Path::new("a.txt"), PathStyle::local())
-                        .expect("relative path")
-                        .as_ref(),
-                )
-                .expect("file entry")
-                .clone()
-        });
-        insert_active_entry_for(first_folder, first_entry, project.clone(), cx);
-        let second_folder_id = second_folder.read_with(cx, |worktree, _| worktree.id());
-        project.update(cx, |project, cx| {
-            project.git_store().update(cx, |git_store, cx| {
-                git_store.set_active_repo_for_worktree(second_folder_id, cx)
-            })
-        });
-        cx.run_until_parked();
-
-        workspace.read_with(cx, |workspace, cx| {
-            assert_eq!(
-                default_working_directory(workspace, cx),
-                Some(PathBuf::from(util::path!("/root2")))
-            );
         });
     }
 

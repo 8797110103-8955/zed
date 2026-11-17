@@ -95,13 +95,6 @@ impl Project {
 
         let package_manager =
             crate::project_settings::ProjectSettings::get(settings_location, cx).package_manager;
-        let package_manager_sources = self
-            .settings_observer
-            .read(cx)
-            .vscode_workspace_path()
-            .map(Path::to_path_buf)
-            .into_iter()
-            .collect::<Vec<_>>();
         let package_manager_runtime = self.node_runtime().cloned();
 
         let local_path = if is_via_remote { None } else { path.clone() };
@@ -171,7 +164,7 @@ impl Project {
                                     &arguments,
                                     environment.into_iter().collect(),
                                     package_manager,
-                                    &package_manager_sources,
+                                    &[],
                                 )
                                 .await
                         })
