@@ -8772,7 +8772,9 @@ impl GitPanel {
                 |this, _repo, event, cx| {
                     if matches!(
                         event,
-                        RepositoryEvent::GraphEvent(_, _) | RepositoryEvent::TagsChanged
+                        RepositoryEvent::GraphEvent(_, _)
+                            | RepositoryEvent::TagsChanged
+                            | RepositoryEvent::HistoryChanged
                     ) {
                         if this.active_tab == GitPanelTab::History {
                             this.fetch_commit_history_entries(cx);

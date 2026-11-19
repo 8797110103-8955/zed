@@ -867,6 +867,7 @@ pub enum RepositoryEvent {
     BranchListChanged,
     RemotesChanged,
     TagsChanged,
+    HistoryChanged,
     StashEntriesChanged,
     GitWorktreeListChanged,
     PendingOpsChanged { pending_ops: SumTree<PendingOps> },
@@ -6674,8 +6675,8 @@ impl Repository {
                     self.initial_graph_data.clear();
                 }
             }
-            // Tags are only changed by explicit user actions, never during the initial scan.
-            RepositoryEvent::TagsChanged => {
+            // Explicit history changes must invalidate the cache even before initial scans finish.
+            RepositoryEvent::TagsChanged | RepositoryEvent::HistoryChanged => {
                 self.initial_graph_data.clear();
             }
             RepositoryEvent::StashEntriesChanged => {
@@ -8868,7 +8869,7 @@ impl Repository {
         let this = cx.weak_entity();
         let status = askpass.is_some().then(|| "git fetch".into());
         self.send_job("fetch", status, move |git_repo, mut cx| async move {
-            match git_repo {
+            let result = match git_repo {
                 RepositoryState::Local(LocalRepositoryState {
                     backend,
                     environment,
@@ -8907,7 +8908,12 @@ impl Repository {
                         stderr: response.stderr,
                     })
                 }
+            };
+            if result.is_ok() {
+                // Fetch can change tags or deepen history without changing the branch list.
+                this.update(&mut cx, |_, cx| cx.emit(RepositoryEvent::HistoryChanged))?;
             }
+            result
         })
     }
 
