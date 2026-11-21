@@ -658,27 +658,27 @@ pub struct LanguageSettingsContent {
     ///
     /// Options:
     /// - "off": Do not request semantic tokens from language servers.
-    /// - "combined": Use LSP semantic tokens together with tree-sitter highlighting.
+    /// - "combined": Use LSP semantic tokens together with tree-sitter highlighting (default).
     /// - "full": Use LSP semantic tokens exclusively, replacing tree-sitter highlighting.
     ///
-    /// Default: "off"
+    /// Default: "combined"
     pub semantic_tokens: Option<SemanticTokens>,
     /// Controls whether folding ranges from language servers are used instead of
     /// tree-sitter and indent-based folding.
     ///
     /// Options:
-    /// - "off": Use tree-sitter and indent-based folding (default).
-    /// - "on": Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server.
+    /// - "off": Use tree-sitter and indent-based folding.
+    /// - "on": Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server (default).
     ///
-    /// Default: "off"
+    /// Default: "on"
     pub document_folding_ranges: Option<DocumentFoldingRanges>,
     /// Controls the source of document symbols used for outlines and breadcrumbs.
     ///
     /// Options:
-    /// - "off": Use tree-sitter queries to compute document symbols (default).
-    /// - "on": Use the language server's `textDocument/documentSymbol` LSP response. When enabled, tree-sitter is not used for document symbols.
+    /// - "off": Use tree-sitter queries to compute document symbols.
+    /// - "on": Prefer the language server's `textDocument/documentSymbol` response, falling back to tree-sitter when no response is available (default).
     ///
-    /// Default: "off"
+    /// Default: "on"
     pub document_symbols: Option<DocumentSymbols>,
     /// Controls where the `editor::Rewrap` action is allowed for this language.
     ///

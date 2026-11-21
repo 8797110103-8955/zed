@@ -156,11 +156,10 @@ impl Editor {
             .chain(buffer_id.and_then(|buffer_id| self.buffer.read(cx).buffer(buffer_id)))
             .filter_map(|editor_buffer| {
                 let editor_buffer_id = editor_buffer.read(cx).remote_id();
-                if self.registered_buffers.contains_key(&editor_buffer_id)
-                    && LanguageSettings::for_buffer(editor_buffer.read(cx), cx)
-                        .semantic_tokens
-                        .enabled()
-                {
+                if self.registered_buffers.contains_key(&editor_buffer_id) && {
+                    let settings = LanguageSettings::for_buffer(editor_buffer.read(cx), cx);
+                    settings.enable_language_server && settings.semantic_tokens.enabled()
+                } {
                     Some((editor_buffer_id, editor_buffer))
                 } else {
                     None
@@ -182,9 +181,8 @@ impl Editor {
                     .buffer(*buffer_id)
                     .is_some_and(|buffer| {
                         let buffer = buffer.read(cx);
-                        LanguageSettings::for_buffer(&buffer, cx)
-                            .semantic_tokens
-                            .enabled()
+                        let settings = LanguageSettings::for_buffer(&buffer, cx);
+                        settings.enable_language_server && settings.semantic_tokens.enabled()
                     })
             })
             .collect::<Vec<_>>()

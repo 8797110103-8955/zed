@@ -1132,9 +1132,9 @@ pub struct ProjectPanelIndentGuidesSettings {
 #[serde(rename_all = "snake_case")]
 pub enum SemanticTokens {
     /// Do not request semantic tokens from language servers.
-    #[default]
     Off,
-    /// Use LSP semantic tokens together with tree-sitter highlighting.
+    /// Use LSP semantic tokens together with tree-sitter highlighting (default).
+    #[default]
     Combined,
     /// Use LSP semantic tokens exclusively, replacing tree-sitter highlighting.
     Full,
@@ -1170,9 +1170,9 @@ impl SemanticTokens {
 #[serde(rename_all = "snake_case")]
 pub enum DocumentFoldingRanges {
     /// Do not request folding ranges from language servers; use tree-sitter and indent-based folding.
-    #[default]
     Off,
-    /// Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server.
+    /// Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server (default).
+    #[default]
     On,
 }
 
@@ -1199,13 +1199,13 @@ impl DocumentFoldingRanges {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentSymbols {
-    /// Use tree-sitter queries to compute document symbols for outlines and breadcrumbs (default).
-    #[default]
+    /// Use tree-sitter queries to compute document symbols for outlines and breadcrumbs.
     #[serde(alias = "tree_sitter")]
     Off,
-    /// Use the language server's `textDocument/documentSymbol` LSP response for outlines and
-    /// breadcrumbs. When enabled, tree-sitter is not used for document symbols.
+    /// Prefer the language server's `textDocument/documentSymbol` response for outlines and
+    /// breadcrumbs, falling back to tree-sitter when no response is available (default).
     #[serde(alias = "language_server")]
+    #[default]
     On,
 }
 

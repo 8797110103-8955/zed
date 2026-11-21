@@ -1452,26 +1452,26 @@
   //
   // Options:
   // - "off": Do not request semantic tokens from language servers.
-  // - "combined": Use LSP semantic tokens together with tree-sitter highlighting as base.
+  // - "combined": Use LSP semantic tokens together with tree-sitter highlighting as base (default).
   // - "full": Use LSP semantic tokens exclusively to highlight the text, tree-sitter syntax highlighting is off.
   //
   // May require language server restart to properly apply.
-  "semantic_tokens": "off",
+  "semantic_tokens": "combined",
 
   // Controls whether folding ranges from language servers are used instead of
   // tree-sitter and indent-based folding.
   //
   // Options:
-  // - "off": Use tree-sitter and indent-based folding (default).
-  // - "on": Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server.
-  "document_folding_ranges": "off",
+  // - "off": Use tree-sitter and indent-based folding.
+  // - "on": Use LSP folding wherever possible, falling back to tree-sitter and indent-based folding when no results were returned by the server (default).
+  "document_folding_ranges": "on",
 
   // Controls the source of document symbols used for outlines and breadcrumbs.
   //
   // Options:
-  // - "off": Use tree-sitter queries to compute document symbols (default).
-  // - "on": Use the language server's `textDocument/documentSymbol` LSP response. When enabled, tree-sitter is not used for document symbols.
-  "document_symbols": "off",
+  // - "off": Use tree-sitter queries to compute document symbols.
+  // - "on": Prefer the language server's `textDocument/documentSymbol` response, falling back to tree-sitter when no response is available (default).
+  "document_symbols": "on",
 
   // When to automatically save edited buffers. This setting can
   // take four values.

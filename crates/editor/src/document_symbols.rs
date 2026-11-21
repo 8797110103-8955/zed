@@ -35,11 +35,12 @@ impl Editor {
                 .get(&buffer_id)
                 .and_then(|tasks| tasks.get(&LspDataKind::DocumentSymbols))
                 .cloned();
+            let syntax = cx.theme().syntax().clone();
             cx.spawn(async move |editor, cx| {
                 if let Some(refresh_task) = refresh_task {
                     refresh_task.await;
                 }
-                editor
+                let lsp_items = editor
                     .read_with(cx, |editor, _| {
                         editor
                             .lsp_document_symbols
@@ -48,7 +49,27 @@ impl Editor {
                             .unwrap_or_default()
                     })
                     .ok()
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                if !lsp_items.is_empty() {
+                    return lsp_items;
+                }
+
+                let Some(buffer_snapshot) = editor
+                    .read_with(cx, |editor, cx| {
+                        editor
+                            .buffer
+                            .read(cx)
+                            .buffer(buffer_id)
+                            .map(|buffer| buffer.read(cx).snapshot())
+                    })
+                    .ok()
+                    .flatten()
+                else {
+                    return Vec::new();
+                };
+                cx.background_executor()
+                    .spawn(async move { buffer_snapshot.outline(Some(&syntax)).items })
+                    .await
             })
         } else {
             let buffer_snapshot = buffer.read(cx).snapshot();
@@ -72,6 +93,10 @@ impl Editor {
             return false;
         };
         lsp_symbols_enabled(buffer.read(cx), cx)
+            && self
+                .lsp_document_symbols
+                .get(&anchor.buffer_id)
+                .is_some_and(|symbols| !symbols.is_empty())
     }
 
     /// Filters editor-local LSP document symbols to the ancestor chain
@@ -240,9 +265,8 @@ impl Editor {
 }
 
 fn lsp_symbols_enabled(buffer: &Buffer, cx: &App) -> bool {
-    LanguageSettings::for_buffer(buffer, cx)
-        .document_symbols
-        .lsp_enabled()
+    let settings = LanguageSettings::for_buffer(buffer, cx);
+    settings.enable_language_server && settings.document_symbols.lsp_enabled()
 }
 
 /// Finds where the symbol name appears in the buffer and returns combined
@@ -1177,21 +1201,23 @@ mod tests {
         assert!(symbol_request.next().await.is_some());
         cx.run_until_parked();
         cx.update_editor(|editor, _window, _cx| {
-            // With LSP enabled but empty response, outline_symbols_at_cursor should be None
-            // (no symbols to show in breadcrumbs)
+            // An empty LSP response falls back to tree-sitter for breadcrumbs.
             assert!(
-                editor.outline_symbols_at_cursor.is_none(),
-                "Empty LSP response should result in no outline symbols"
+                editor.outline_symbols_at_cursor.is_some(),
+                "Empty LSP response should fall back to tree-sitter symbols"
             );
         });
     }
 
     #[gpui::test]
-    async fn test_lsp_document_symbols_disabled_by_default(cx: &mut TestAppContext) {
+    async fn test_lsp_document_symbols_disabled_when_off(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
 
         let request_count = Arc::new(atomic::AtomicUsize::new(0));
-        // Do NOT enable document_symbols — defaults to Off
+        update_test_language_settings(cx, &|settings| {
+            settings.defaults.document_symbols = Some(DocumentSymbols::Off);
+        });
+
         let mut cx = EditorLspTestContext::new_rust(
             lsp::ServerCapabilities {
                 document_symbol_provider: Some(lsp::OneOf::Left(true)),
@@ -1220,7 +1246,7 @@ mod tests {
         cx.set_state("fn maˇin() {\n    let x = 1;\n}\n");
         cx.run_until_parked();
 
-        // Tree-sitter should be used instead
+        // Tree-sitter should be used when the setting is off.
         cx.update_editor(|editor, _window, _cx| {
             assert_eq!(
                 outline_symbol_names(editor),

@@ -5122,7 +5122,7 @@ This is separate from `project_panel.sticky_scroll`, which controls sticky folde
 
 - Description: Controls how [semantic tokens](../semantic-tokens.md) from language servers are used for syntax highlighting.
 - Setting: `semantic_tokens`
-- Default: `off`
+- Default: `combined`
 
 **Options**
 
@@ -5154,9 +5154,9 @@ May require language server restart to properly apply.
 
 ## LSP Folding Ranges
 
-- Description: Controls whether folding ranges from language servers are used instead of tree-sitter and indent-based folding. Tree-sitter and indent-based folding is the default; it is used as a fallback when LSP folding data is not returned or this setting is turned off.
+- Description: Controls whether folding ranges from language servers are used instead of tree-sitter and indent-based folding. LSP folding is preferred when available, with tree-sitter and indent-based folding as a fallback.
 - Setting: `document_folding_ranges`
-- Default: `off`
+- Default: `on`
 
 **Options**
 
@@ -5185,14 +5185,14 @@ To enable LSP folding ranges for a specific language:
 
 ## LSP Document Symbols
 
-- Description: Controls the source of document symbols used for outlines and breadcrumbs. This is an LSP feature — when enabled, tree-sitter is not used for document symbols, and the language server's `textDocument/documentSymbol` response is used instead.
+- Description: Controls the source of document symbols used for outlines and breadcrumbs. LSP document symbols are preferred when available, with tree-sitter as a fallback.
 - Setting: `document_symbols`
-- Default: `off`
+- Default: `on`
 
 **Options**
 
 1. `off`: Use tree-sitter queries to compute document symbols.
-2. `on`: Use the language server's `textDocument/documentSymbol` LSP response. When enabled, tree-sitter is not used for document symbols.
+2. `on`: Prefer the language server's `textDocument/documentSymbol` response, falling back to tree-sitter when no response is available.
 
 To enable LSP document symbols globally:
 

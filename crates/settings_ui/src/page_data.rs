@@ -517,9 +517,24 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn extensions_section() -> [SettingsPageItem; 2] {
+    fn extensions_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Extensions"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Package Manager",
+                description: "Choose the package manager for project tasks, acp, and language servers.",
+                field: Box::new(SettingField {
+                    json_path: Some("package_manager"),
+                    pick: |content| content.package_manager.as_ref(),
+                    write: |content, value, _| content.package_manager = value,
+                    organization_override: None,
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Suggest Extensions",
                 description: "Whether to suggest installing extensions based on the files you open.",
@@ -3415,27 +3430,6 @@ fn editor_page() -> SettingsPage {
 }
 
 fn languages_and_tools_page(cx: &App) -> SettingsPage {
-    fn package_manager_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("Package Management"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Package Manager",
-                description: "Choose the package manager for project tasks and for installing agents and language servers. For tasks, Auto reads packageManager from package.json, then checks project markers. For agents and language servers, Auto uses an installed manager in pnpm, vp, bun, npm, yarn order and downloads pnpm if none is installed. A selected manager that is missing is installed through any installed manager, or downloaded if none is installed.",
-                field: Box::new(SettingField {
-                    json_path: Some("package_manager"),
-                    pick: |content| content.package_manager.as_ref(),
-                    write: |content, value, _| content.package_manager = value,
-                    organization_override: None,
-                }),
-                metadata: Some(Box::new(SettingsFieldMetadata {
-                    should_do_titlecase: Some(false),
-                    ..Default::default()
-                })),
-                files: USER,
-            }),
-        ]
-    }
-
     fn file_types_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("File Types"),
@@ -3743,7 +3737,6 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
             concat_sections!(
                 non_editor_language_settings_data(),
                 file_types_section(),
-                package_manager_section(),
                 diagnostics_section(),
                 inline_diagnostics_section(),
                 lsp_pull_diagnostics_section(),
@@ -11569,7 +11562,7 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "LSP Document Symbols",
-                description: "When enabled, use the language server's document symbols for outlines and breadcrumbs instead of tree-sitter.",
+                description: "Prefer the language server's document symbols for outlines and breadcrumbs, falling back to tree-sitter when unavailable.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).document_symbols"),

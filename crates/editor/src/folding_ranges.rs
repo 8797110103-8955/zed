@@ -22,9 +22,8 @@ impl Editor {
             .lsp_data_buffers(for_buffer, cx)
             .into_iter()
             .filter(|buffer| {
-                LanguageSettings::for_buffer(buffer.read(cx), cx)
-                    .document_folding_ranges
-                    .enabled()
+                let settings = LanguageSettings::for_buffer(buffer.read(cx), cx);
+                settings.enable_language_server && settings.document_folding_ranges.enabled()
             })
             .collect();
         self.spawn_lsp_data_tasks(
@@ -85,9 +84,8 @@ impl Editor {
             .into_iter()
             .filter(|buffer| {
                 let buffer = buffer.read(cx);
-                !LanguageSettings::for_buffer(&buffer, cx)
-                    .document_folding_ranges
-                    .enabled()
+                let settings = LanguageSettings::for_buffer(&buffer, cx);
+                !settings.enable_language_server || !settings.document_folding_ranges.enabled()
             })
             .map(|buffer| buffer.read(cx).remote_id())
             .collect::<Vec<_>>();
@@ -225,8 +223,12 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_lsp_folding_ranges_disabled_by_default(cx: &mut TestAppContext) {
+    async fn test_lsp_folding_ranges_disabled_when_off(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
+
+        update_test_language_settings(cx, &|settings| {
+            settings.defaults.document_folding_ranges = Some(DocumentFoldingRanges::Off);
+        });
 
         let mut cx = EditorLspTestContext::new_rust(
             lsp::ServerCapabilities {
@@ -243,7 +245,7 @@ mod tests {
         cx.editor.read_with(&cx.cx.cx, |editor, cx| {
             assert!(
                 !editor.document_folding_ranges_enabled(cx),
-                "LSP folding ranges should not be enabled by default"
+                "LSP folding ranges should remain disabled when the setting is off"
             );
         });
     }
