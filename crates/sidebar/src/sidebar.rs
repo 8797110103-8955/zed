@@ -230,17 +230,6 @@ impl ThreadEntryWorkspace {
             Self::Closed { .. } => None,
         }
     }
-
-    fn is_remote(&self, cx: &App) -> bool {
-        match self {
-            ThreadEntryWorkspace::Open(workspace) => workspace
-                .read_with(cx, |workspace, cx| !workspace.project().read(cx).is_local())
-                .unwrap_or_default(),
-            ThreadEntryWorkspace::Closed {
-                project_group_key, ..
-            } => project_group_key.host().is_some(),
-        }
-    }
 }
 
 /// If the title begins with a decorative prefix (such as a leading emoji,
@@ -6310,8 +6299,6 @@ impl Sidebar {
             format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into()
         };
 
-        let is_remote = thread.workspace.is_remote(cx);
-
         let worktrees = apply_worktree_label_mode(
             thread.worktrees.clone(),
             cx.flag_value::<AgentThreadWorktreeLabelFlag>(),
@@ -6335,7 +6322,6 @@ impl Sidebar {
                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
             })
             .status(thread.status)
-            .is_remote(is_remote)
             .when_some(icon_svg, |this, svg| {
                 this.custom_icon_from_external_svg(svg)
             })
@@ -6659,7 +6645,6 @@ impl Sidebar {
             terminal.worktrees.clone(),
             cx.flag_value::<AgentThreadWorktreeLabelFlag>(),
         );
-        let is_remote = terminal.workspace.is_remote(cx);
         let is_renaming =
             self.rename_target == Some(RenameTarget::Terminal(terminal.metadata.terminal_id));
         let rename_title_editor = is_renaming.then(|| self.render_rename_title_editor(cx));
@@ -6675,7 +6660,6 @@ impl Sidebar {
             .base_bg(sidebar_bg)
             .icon(IconName::Terminal)
             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
-            .is_remote(is_remote)
             .worktrees(worktrees)
             .timestamp(timestamp)
             .notified(terminal.has_notification)

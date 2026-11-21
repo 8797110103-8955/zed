@@ -1964,7 +1964,7 @@ impl GitGraph {
                     }
                 }
             }
-            RepositoryEvent::TagsChanged => {
+            RepositoryEvent::TagsChanged | RepositoryEvent::HistoryChanged => {
                 self.pending_select_sha = None;
                 self.invalidate_state(cx);
             }
@@ -7628,6 +7628,128 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(reloaded_shas, vec![updated_head, updated_stash]);
+    }
+
+    #[gpui::test]
+    async fn test_graph_data_reloaded_after_fetch(cx: &mut TestAppContext) {
+        use git::repository::{AskPassDelegate, FetchOptions};
+
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let root = Path::new(util::path!("/project"));
+        let dot_git = root.join(".git");
+        fs.insert_tree(root, json!({".git": {}, "file.txt": "content"}))
+            .await;
+
+        let head = Oid::from_bytes(&[1; 20]).expect("valid commit SHA");
+        let remote_head = Oid::from_bytes(&[2; 20]).expect("valid commit SHA");
+        let initial_commit = Arc::new(InitialGraphCommitData {
+            sha: head,
+            parents: smallvec![],
+            ref_names: vec!["HEAD".into(), "refs/heads/main".into()],
+        });
+        fs.set_graph_commits(&dot_git, vec![initial_commit.clone()]);
+        let project = Project::test(fs.clone(), [root], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.run_until_parked();
+
+        let repository = project.read_with(cx, |project, cx| {
+            project.active_repository(cx).expect("active repository")
+        });
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().downgrade());
+        let git_graph = cx.new_window_entity(|window, cx| {
+            GitGraph::new(
+                repository.read(cx).id,
+                project.read(cx).git_store().clone(),
+                workspace,
+                None,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        git_graph.read_with(&*cx, |graph, _| {
+            assert_eq!(graph.graph_data.commits.len(), 1);
+            let commit = graph
+                .graph_data
+                .commits
+                .first()
+                .expect("head commit loaded");
+            assert_eq!(commit.data.sha, head);
+            assert_eq!(commit.data.ref_names, initial_commit.ref_names);
+        });
+
+        let tagged_commit = Arc::new(InitialGraphCommitData {
+            sha: head,
+            parents: smallvec![],
+            ref_names: vec!["HEAD".into(), "refs/heads/main".into(), "tag: v1.0".into()],
+        });
+        let remote_commit = Arc::new(InitialGraphCommitData {
+            sha: remote_head,
+            parents: smallvec![head],
+            ref_names: vec!["refs/remotes/origin/main".into()],
+        });
+
+        for commits in [
+            vec![tagged_commit.clone()],
+            vec![remote_commit, tagged_commit],
+        ] {
+            fs.with_git_state(&dot_git, false, |state| {
+                state.graph_commits = commits.clone();
+                if commits.len() > 1 {
+                    state.branches.insert("origin/main".into());
+                }
+            })
+            .expect("repository exists");
+            let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
+            repository
+                .update(cx, |repository, cx| {
+                    repository.fetch(FetchOptions::All, Some(askpass), cx)
+                })
+                .await
+                .expect("fetch job completed")
+                .expect("fetch succeeded");
+            project
+                .update(cx, |project, cx| project.git_scans_complete(cx))
+                .await;
+            cx.run_until_parked();
+
+            git_graph.update(cx, |graph, cx| {
+                graph.commit_count_and_loading_state(cx);
+            });
+            cx.run_until_parked();
+
+            git_graph.read_with(&*cx, |graph, cx| {
+                let commit_state = |commit: &Arc<InitialGraphCommitData>| {
+                    (commit.sha, commit.parents.clone(), commit.ref_names.clone())
+                };
+                let expected_commits = commits.iter().map(commit_state).collect::<Vec<_>>();
+                let graph_commits = graph
+                    .graph_data
+                    .commits
+                    .iter()
+                    .map(|commit| commit_state(&commit.data))
+                    .collect::<Vec<_>>();
+                assert_eq!(graph_commits, expected_commits);
+                assert_eq!(
+                    repository
+                        .read(cx)
+                        .get_graph_data(LogSource::default(), LogOrder::default())
+                        .expect("graph cache loaded")
+                        .commit_data
+                        .iter()
+                        .map(commit_state)
+                        .collect::<Vec<_>>(),
+                    expected_commits,
+                );
+            });
+        }
     }
 
     #[gpui::test]

@@ -10471,7 +10471,7 @@ mod tests {
                     session: server_session,
                     fs: remote_fs,
                     http_client: Arc::new(BlockedHttpClient),
-                    node_runtime: NodeRuntime::unavailable(),
+                    node_runtime: PackageManagerRuntime::unavailable(),
                     languages: Arc::new(LanguageRegistry::new(cx.background_executor().clone())),
                     extension_host_proxy: Arc::new(ExtensionHostProxy::new()),
                     startup_time: std::time::Instant::now(),
