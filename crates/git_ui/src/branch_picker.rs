@@ -778,7 +778,6 @@ impl BranchList {
             picker.delegate.branch_filter = branch_filter;
             picker.update_matches(picker.query(cx), window, cx);
             picker.refresh_placeholder(window, cx);
-            cx.notify();
         });
     }
 

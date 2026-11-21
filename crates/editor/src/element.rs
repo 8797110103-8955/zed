@@ -585,6 +585,7 @@ impl EditorElement {
         register_action(editor, window, Editor::fold_at_level_7);
         register_action(editor, window, Editor::fold_at_level_8);
         register_action(editor, window, Editor::fold_at_level_9);
+        register_action(editor, window, Editor::fold_at_current_indentation_level);
         register_action(editor, window, Editor::fold_all);
         register_action(editor, window, Editor::fold_function_bodies);
         register_action(editor, window, Editor::fold_recursive);
@@ -10805,7 +10806,6 @@ pub struct PointForPosition {
     pub next_valid: DisplayPoint,
     pub nearest_valid: DisplayPoint,
     pub exact_unclipped: DisplayPoint,
-    pub column_overshoot_after_line_end: u32,
 }
 
 impl PointForPosition {
@@ -10911,7 +10911,6 @@ impl PositionMap {
             next_valid,
             nearest_valid,
             exact_unclipped,
-            column_overshoot_after_line_end,
         }
     }
 
@@ -10957,7 +10956,6 @@ impl PositionMap {
             next_valid,
             nearest_valid,
             exact_unclipped,
-            column_overshoot_after_line_end,
         }
     }
 }
@@ -11078,13 +11076,6 @@ impl CursorLayout {
             block_text,
             cursor_name: None,
             animated_corners: None,
-        }
-    }
-
-    pub fn bounding_rect(&self, origin: gpui::Point<Pixels>) -> Bounds<Pixels> {
-        Bounds {
-            origin: self.origin + origin,
-            size: size(self.block_width, self.line_height),
         }
     }
 
