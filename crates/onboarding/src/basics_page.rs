@@ -581,6 +581,7 @@ fn render_registry_agent_button(
                     let agent_servers = settings.agent_servers.get_or_insert_default();
                     agent_servers.entry(agent_id).or_insert_with(|| {
                         CustomAgentServerSettings::Registry {
+                            package_version: None,
                             env: Default::default(),
                             default_mode: None,
                             default_config_options: HashMap::default(),

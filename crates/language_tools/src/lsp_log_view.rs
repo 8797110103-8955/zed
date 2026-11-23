@@ -349,7 +349,7 @@ impl LspLogView {
 * Capabilities: {CAPABILITIES}
 
 * Configuration: {CONFIGURATION}",
-            NAME = info.status.name,
+            NAME = info.status.name.display_name(),
             ID = info.id,
             VERSION = info
                 .status
@@ -1066,7 +1066,8 @@ impl Render for LspLogToolbarItemView {
                         .map(|row| {
                             Cow::Owned(format!(
                                 "{} ({})",
-                                row.server_name.0, row.worktree_root_name,
+                                row.server_name.display_name(),
+                                row.worktree_root_name,
                             ))
                         })
                         .unwrap_or_else(|| "No server selected".into()),

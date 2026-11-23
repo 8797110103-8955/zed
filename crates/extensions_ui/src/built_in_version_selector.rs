@@ -73,7 +73,7 @@ impl PickerDelegate for BuiltInVersionDelegate {
         "built-in language server version selector"
     }
     fn placeholder_text(&self, _: &mut Window, _: &mut App) -> Arc<str> {
-        format!("Select {} version...", self.name).into()
+        format!("Select {} version...", self.name.display_name()).into()
     }
     fn match_count(&self) -> usize {
         self.matches.len()

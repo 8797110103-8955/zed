@@ -5,22 +5,25 @@ use collections::HashMap;
 use editor::{Editor, EditorElement, EditorStyle};
 use fs::Fs;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, KeyContext, ParentElement, Render,
-    RenderOnce, SharedString, Styled, TextStyle, UniformListScrollHandle, Window, point,
-    uniform_list,
+    Anchor, AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, KeyContext,
+    ParentElement, Point, Render, RenderOnce, SharedString, Styled, TextStyle,
+    UniformListScrollHandle, WeakEntity, Window, point, uniform_list,
 };
 use project::agent_server_store::{AllAgentServersSettings, CustomAgentServerSettings};
 use project::{AgentRegistryStore, RegistryAgent};
 use settings::{Settings, SettingsStore, update_settings_file};
 use theme_settings::ThemeSettings;
 use ui::{
-    ButtonStyle, ScrollableHandle, ToggleButtonGroup, ToggleButtonGroupSize,
-    ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, WithScrollbar, prelude::*,
+    ButtonStyle, ContextMenu, IconButton, PopoverMenu, ScrollableHandle, ToggleButtonGroup,
+    ToggleButtonGroupSize, ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, WithScrollbar,
+    prelude::*,
 };
 use workspace::{
     Workspace,
     item::{Item, ItemEvent},
 };
+
+use crate::agent_version_selector::{AgentVersionSelector, AgentVersionSelectorDelegate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegistryFilter {
@@ -74,6 +77,7 @@ impl RenderOnce for AgentRegistryCard {
 }
 
 pub struct AgentRegistryPage {
+    workspace: WeakEntity<Workspace>,
     registry_store: Entity<AgentRegistryStore>,
     list: UniformListScrollHandle,
     registry_agents: Vec<RegistryAgent>,
@@ -90,6 +94,7 @@ impl AgentRegistryPage {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
+        let workspace = cx.entity().downgrade();
         cx.new(|cx| {
             let registry_store = AgentRegistryStore::global(cx);
             let query_editor = cx.new(|cx| {
@@ -108,6 +113,7 @@ impl AgentRegistryPage {
             }));
 
             let mut this = Self {
+                workspace,
                 registry_store,
                 list: UniformListScrollHandle::new(),
                 registry_agents: Vec::new(),
@@ -465,6 +471,56 @@ impl AgentRegistryPage {
             })
         });
 
+        let package = match agent {
+            RegistryAgent::Npx(agent) => Some(agent.package.to_string()),
+            RegistryAgent::Binary(_) => None,
+        };
+        let agent_id = agent.id().to_string();
+        let weak_self = cx.entity().downgrade();
+        let context_menu_button_id = SharedString::from(format!("agent-menu-{}", agent.id()));
+        let context_menu = PopoverMenu::new(context_menu_button_id.clone())
+            .trigger(
+                IconButton::new(context_menu_button_id, IconName::Ellipsis)
+                    .icon_size(IconSize::Small),
+            )
+            .anchor(Anchor::TopRight)
+            .offset(Point {
+                x: px(0.0),
+                y: px(2.0),
+            })
+            .menu(move |window, cx| {
+                let agent_id = agent_id.clone();
+                let package = package.clone();
+                let this = weak_self.upgrade()?;
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, window, _| {
+                        if let Some(package) = package {
+                            let agent_id = agent_id.clone();
+                            menu = menu.entry(
+                                "Install Another Version...",
+                                None,
+                                window.handler_for(&this, {
+                                    move |this: &mut AgentRegistryPage, window, cx| {
+                                        this.show_agent_version_list(
+                                            agent_id.clone(),
+                                            package.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            );
+                        }
+                        let agent_id = agent_id.clone();
+                        menu.entry("Copy Agent ID", None, move |_, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(agent_id.clone()));
+                        })
+                    },
+                ))
+            });
+
         AgentRegistryCard::new()
             .child(
                 h_flex()
@@ -505,9 +561,54 @@ impl AgentRegistryPage {
                             )
                             .when_some(repository_button, |this, button| this.child(button))
                             .when_some(website_button, |this, button| this.child(button))
-                            .when_some(license_button, |this, button| this.child(button)),
+                            .when_some(license_button, |this, button| this.child(button))
+                            .child(context_menu),
                     ),
             )
+    }
+
+    fn show_agent_version_list(
+        &mut self,
+        agent_id: String,
+        package: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(node_runtime) = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .node_runtime()
+            .cloned()
+        else {
+            return;
+        };
+        let package_name = package_name(&package);
+        let fs = workspace.read(cx).project().read(cx).fs().clone();
+
+        cx.spawn_in(window, async move |_, cx| {
+            let package_info = node_runtime
+                .package_manager_package_info(&package_name)
+                .await?;
+
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    let delegate = AgentVersionSelectorDelegate::new(
+                        fs,
+                        cx.entity().downgrade(),
+                        agent_id,
+                        package_info.versions,
+                    );
+                    AgentVersionSelector::new(delegate, window, cx)
+                });
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn install_button(
@@ -543,6 +644,7 @@ impl AgentRegistryPage {
                                 let agent_servers = settings.agent_servers.get_or_insert_default();
                                 agent_servers.entry(agent_id).or_insert_with(|| {
                                     settings::CustomAgentServerSettings::Registry {
+                                        package_version: None,
                                         default_mode: None,
                                         env: Default::default(),
                                         default_config_options: HashMap::default(),
@@ -586,6 +688,15 @@ impl AgentRegistryPage {
                 .disabled(true),
         }
     }
+}
+
+fn package_name(package_spec: &str) -> String {
+    package_spec
+        .rsplit_once('@')
+        .map(|(package_name, _)| package_name)
+        .filter(|package_name| !package_name.is_empty())
+        .unwrap_or(package_spec)
+        .to_owned()
 }
 
 impl Render for AgentRegistryPage {

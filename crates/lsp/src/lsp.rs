@@ -198,6 +198,13 @@ impl LanguageServerName {
         Self(SharedString::new_static(s))
     }
 
+    pub fn display_name(&self) -> SharedString {
+        match self.as_ref() {
+            "typescript-ls" => SharedString::new_static("TypeScript Language Server"),
+            _ => self.0.clone(),
+        }
+    }
+
     pub fn from_proto(s: String) -> Self {
         Self(s.into())
     }

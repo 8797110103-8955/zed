@@ -3,6 +3,7 @@ pub mod agent_connection_store;
 mod agent_diff;
 mod agent_panel;
 mod agent_registry_ui;
+mod agent_version_selector;
 mod buffer_codegen;
 mod completion_provider;
 mod config_options;

@@ -996,6 +996,7 @@ impl LspAdapter for TypeScriptLspAdapter {
             (LanguageName::new_static("TypeScript"), "typescript".into()),
             (LanguageName::new_static("JavaScript"), "javascript".into()),
             (LanguageName::new_static("TSX"), "typescriptreact".into()),
+            (LanguageName::new_static("JSX"), "javascriptreact".into()),
         ])
     }
 }

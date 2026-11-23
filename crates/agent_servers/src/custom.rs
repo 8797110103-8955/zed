@@ -328,6 +328,7 @@ fn is_registry_agent(agent_id: impl Into<AgentId>, cx: &App) -> bool {
 
 fn default_settings_for_agent() -> settings::CustomAgentServerSettings {
     settings::CustomAgentServerSettings::Registry {
+        package_version: None,
         default_mode: None,
         env: Default::default(),
         default_config_options: Default::default(),
@@ -423,6 +424,7 @@ mod tests {
             vec![(
                 "agent-from-settings",
                 settings::CustomAgentServerSettings::Registry {
+                    package_version: None,
                     env: HashMap::default(),
                     default_mode: None,
                     default_config_options: HashMap::default(),

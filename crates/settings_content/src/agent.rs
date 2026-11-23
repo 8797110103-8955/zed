@@ -891,6 +891,10 @@ pub enum CustomAgentServerSettings {
     // Used for the ACP extension migration
     #[serde(alias = "extension")]
     Registry {
+        /// An optional package version override for npm-based registry agents.
+        ///
+        /// Default: None
+        package_version: Option<String>,
         /// Additional environment variables to pass to the agent.
         ///
         /// Default: {}

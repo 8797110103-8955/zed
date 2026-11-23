@@ -284,7 +284,7 @@ impl LanguageServerState {
             let workspace = self.workspace.clone();
             let server_name = server_name.clone();
             menu = menu.entry(
-                format!("Enable {} for This Project", server_name.0),
+                format!("Enable {} for This Project", server_name.display_name()),
                 None,
                 move |window, cx| {
                     let workspace = workspace.clone();
@@ -438,7 +438,7 @@ impl LanguageServerState {
             let can_stop = !disabled_servers.contains(&server_info.name);
 
             menu = menu.submenu_with_colored_icon(
-                server_info.name.0.clone(),
+                server_info.name.display_name(),
                 IconName::Circle,
                 status_color,
                 {

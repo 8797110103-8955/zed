@@ -384,6 +384,7 @@ impl CustomAgentForm {
                     favorite_config_option_values = favorites.clone();
                 }
                 CustomAgentServerSettings::Registry {
+                    package_version: _,
                     env: env_map,
                     default_mode: mode,
                     default_config_options: config_options,

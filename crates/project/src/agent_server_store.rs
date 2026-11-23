@@ -286,6 +286,7 @@ impl AgentServerStore {
             agent_servers.insert(
                 registry_id.to_string(),
                 settings.unwrap_or_else(|| settings::CustomAgentServerSettings::Registry {
+                    package_version: None,
                     default_mode: None,
                     env: Default::default(),
                     default_config_options: HashMap::default(),
@@ -428,7 +429,11 @@ impl AgentServerStore {
                         ),
                     );
                 }
-                CustomAgentServerSettings::Registry { env, .. } => {
+                CustomAgentServerSettings::Registry {
+                    env,
+                    package_version,
+                    ..
+                } => {
                     let Some(agent) = registry_agents_by_id.get(name) else {
                         if registry_store.is_some() {
                             log::debug!("Registry agent '{}' not found in ACP registry", name);
@@ -481,7 +486,11 @@ impl AgentServerStore {
                                         project_environment: project_environment.clone(),
                                         registry_id: Arc::from(name.as_str()),
                                         version: agent.metadata.version.clone(),
-                                        package: agent.package.clone(),
+                                        package: package_with_version(
+                                            agent.package.as_ref(),
+                                            package_version.as_deref(),
+                                        )
+                                        .into(),
                                         args: agent.args.clone(),
                                         distribution_env: agent.env.clone(),
                                         settings_env: env.clone(),
@@ -1818,6 +1827,19 @@ fn bounded_npm_package_spec(package_spec: &str) -> (&str, String) {
     (package_name, format!("{package_name}@0.0.0 - {version}"))
 }
 
+fn package_with_version(package_spec: &str, version: Option<&str>) -> String {
+    let Some(version) = version else {
+        return package_spec.to_owned();
+    };
+
+    let package_name = package_spec
+        .rsplit_once('@')
+        .map(|(package_name, _)| package_name)
+        .filter(|package_name| !package_name.is_empty())
+        .unwrap_or(package_spec);
+    format!("{package_name}@{version}")
+}
+
 struct LocalCustomAgent {
     project_environment: Entity<ProjectEnvironment>,
     command: AgentServerCommand,
@@ -1906,6 +1928,10 @@ pub enum CustomAgentServerSettings {
         favorite_config_option_values: HashMap<String, Vec<String>>,
     },
     Registry {
+        /// An optional package version override for npm-based registry agents.
+        ///
+        /// Default: None
+        package_version: Option<String>,
         /// Additional environment variables to pass to the agent.
         ///
         /// Default: {}
@@ -2001,11 +2027,13 @@ impl From<settings::CustomAgentServerSettings> for CustomAgentServerSettings {
             },
             settings::CustomAgentServerSettings::Registry {
                 env,
+                package_version,
                 default_mode,
                 default_config_options,
                 favorite_config_option_values,
             } => CustomAgentServerSettings::Registry {
                 env,
+                package_version,
                 default_mode,
                 default_config_options,
                 favorite_config_option_values,
@@ -2155,6 +2183,7 @@ mod tests {
                             (
                                 name.to_string(),
                                 settings::CustomAgentServerSettings::Registry {
+                                    package_version: None,
                                     env: HashMap::default(),
                                     default_mode: None,
                                     default_config_options: HashMap::default(),
@@ -2212,6 +2241,22 @@ mod tests {
         assert_eq!(
             bounded_npm_package_spec("agent-package@latest"),
             ("agent-package", "agent-package@latest".to_string())
+        );
+    }
+
+    #[test]
+    fn applies_registry_package_version_overrides() {
+        assert_eq!(
+            package_with_version("agent-package@2.9.0", Some("2.7.0")),
+            "agent-package@2.7.0"
+        );
+        assert_eq!(
+            package_with_version("@scope/agent-package@2.9.0", Some("2.7.0")),
+            "@scope/agent-package@2.7.0"
+        );
+        assert_eq!(
+            package_with_version("agent-package@2.9.0", None),
+            "agent-package@2.9.0"
         );
     }
 

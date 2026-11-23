@@ -139,11 +139,9 @@ Other entities can then register a callback to handle these events by doing `cx.
 # Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
-- Run builds and other long-running commands in a discoverable terminal. A PTY is sufficient; do not use a fully detached background process that the user cannot easily find.
 - Run the `target/build.*` script (for example `target/build.ps1`) instead of the default build command when both of the following hold; otherwise build as usual:
   - The script exists.
   - The changes are controlled (for example, additional testing is unnecessary, relevant tests have passed, or changes only affect the GUI), regardless of change size.
-- For WebRTC and similar dependencies, check for a local cache matching the dependency version and target configuration before downloading. When available, pass it through the dependency's supported cache option (for example, `LK_CUSTOM_WEBRTC`).
 
 # Pull request hygiene
 
@@ -171,8 +169,8 @@ Release Notes:
 Fork commit messages exist so that, when merging upstream, fork changes can be found quickly and read alongside their diffs to decide which side to keep.
 
 - When committing, keep the message short: an imperative title plus one bullet per feature or fix, describing what changed in searchable terms. Leave code details (functions, files, keys) to the diff.
-- For merge commits, start the title with `Merge <source> into <target>`, followed by a concise summary of the changes.
-- When merging, leave `README.md` changes unstaged, including the required review reminder.
+> [!IMPORTANT]
+> When merging, preserve the first two review-reminder lines at the top of `README.md`, leave `README.md` changes unstaged, and never remove the reminder.
 - When merging upstream, search the fork's commit messages (for example `git log --grep`) for the conflicting area, and read the matching commits together with their diffs before choosing a side.
 
 # Crash Investigation

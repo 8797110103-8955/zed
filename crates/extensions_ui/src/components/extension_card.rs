@@ -4,6 +4,7 @@ use cloud_api_types::{ExtensionApiManifest, ExtensionMetadata, ExtensionProvides
 use extension::{ExtensionManifest, SchemaVersion};
 use extension_host::{ExtensionOperation, ExtensionStatus, ExtensionStore};
 use gpui::{Anchor, ElementId, Entity, Point, SharedString, prelude::*};
+use language::LanguageServerName;
 use release_channel::ReleaseChannel;
 use ui::{
     ButtonLike, Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*,
@@ -115,7 +116,7 @@ impl ExtensionCard {
         Self {
             details: ExtensionCardDetails {
                 id: format!("builtin:{name}").into(),
-                name: name.to_owned().into(),
+                name: LanguageServerName::from(name).display_name(),
                 version: state
                     .and_then(|state| state.version.as_deref())
                     .unwrap_or_default()

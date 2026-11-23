@@ -419,6 +419,10 @@ impl BuiltInLanguageServer {
             } else {
                 let search = search.to_lowercase();
                 self.name.to_lowercase().contains(&search)
+                    || LanguageServerName::from(self.name.as_str())
+                        .display_name()
+                        .to_lowercase()
+                        .contains(&search)
                     || self
                         .languages
                         .iter()
