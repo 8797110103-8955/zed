@@ -1,9 +1,10 @@
 use anyhow::Result;
 use gpui::Action;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, DismissEvent, EventEmitter, FocusHandle,
-    Focusable, ListSizingBehavior, ListState, MouseButton, MouseUpEvent, Pixels, ScrollStrategy,
-    Task, UniformListScrollHandle, Window, actions, canvas, div, list, prelude::*, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, Context, DismissEvent, ElementId, EventEmitter,
+    FocusHandle, Focusable, ListSizingBehavior, ListState, MouseButton, MouseUpEvent, Pixels,
+    ScrollStrategy, Task, UniformListScrollHandle, Window, actions, canvas, div, list, prelude::*,
+    uniform_list,
 };
 use head::Head;
 use schemars::JsonSchema;
@@ -168,6 +169,9 @@ pub trait PickerDelegate: Sized + 'static {
     /// typename of the delegate but then a rename would break persistence.
     fn name() -> &'static str;
     fn match_count(&self) -> usize;
+    fn match_id(&self, index: usize) -> ElementId {
+        ("item", index).into()
+    }
     fn selected_index(&self) -> usize;
     fn separators_after_indices(&self) -> Vec<usize> {
         Vec::new()
@@ -1381,7 +1385,7 @@ impl<D: PickerDelegate> Picker<D> {
         let focus_handle = self.focus_handle(cx);
 
         div()
-            .id(("item", ix))
+            .id(self.delegate.match_id(ix))
             .when(selectable, |this| this.cursor_pointer())
             .when(use_fallback_indicator, |this| {
                 this.hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
