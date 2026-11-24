@@ -202,12 +202,7 @@ impl super::LspAdapter for CLspAdapter {
             None => "",
         };
 
-        let mut label = completion
-            .label
-            .strip_prefix('•')
-            .unwrap_or(&completion.label)
-            .trim()
-            .to_owned();
+        let mut label = completion.label.trim_prefix('•').trim().to_owned();
 
         if !label_detail.is_empty() {
             let should_add_space = match completion.kind {
@@ -215,7 +210,7 @@ impl super::LspAdapter for CLspAdapter {
                 _ => true,
             };
 
-            if should_add_space && !label.ends_with(' ') && !label_detail.starts_with(' ') {
+            if should_add_space {
                 label.push(' ');
             }
             label.push_str(label_detail);

@@ -1576,7 +1576,7 @@ impl GitRepository for FakeGitRepository {
                         name.split_once('/').map_or(name, |(_, name)| name)
                     }
                 } else {
-                    branch.strip_prefix("refs/heads/").unwrap_or(branch)
+                    branch.trim_prefix("refs/heads/")
                 };
                 name.to_owned().into()
             }))
