@@ -401,19 +401,6 @@ pub fn init(cx: &mut App) {
             |workspace, window, cx| Editor::new_file(workspace, &Default::default(), window, cx),
         )
         .detach_and_log_err(cx);
-    })
-    .on_action(move |_: &workspace::NewWindow, cx| {
-        let app_state = workspace::AppState::global(cx);
-        workspace::open_new(
-            Default::default(),
-            app_state,
-            cx,
-            |workspace, window, cx| {
-                cx.activate(true);
-                Editor::new_file(workspace, &Default::default(), window, cx)
-            },
-        )
-        .detach_and_log_err(cx);
     });
     _ = ui_input::ERASED_EDITOR_FACTORY.set(|window, cx| {
         cx.new(|cx| Editor::single_line(window, cx))

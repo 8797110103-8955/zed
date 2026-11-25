@@ -413,6 +413,22 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 }
 
 pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+    cx.on_action({
+        let app_state = app_state.clone();
+        move |_: &NewWindow, cx| {
+            open_new(
+                Default::default(),
+                app_state.clone(),
+                cx,
+                |workspace, window, cx| {
+                    cx.activate(true);
+                    initialize_new_window(workspace, window, cx);
+                },
+            )
+            .detach_and_log_err(cx);
+        }
+    });
+
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -1330,21 +1346,6 @@ fn register_actions(
                 workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
             },
         )
-        .register_action({
-            let app_state = app_state.clone();
-            move |_, _: &NewWindow, _, cx| {
-                open_new(
-                    Default::default(),
-                    app_state.clone(),
-                    cx,
-                    |workspace, window, cx| {
-                        cx.activate(true);
-                        initialize_new_window(workspace, window, cx);
-                    },
-                )
-                .detach();
-            }
-        })
         .register_action({
             move |workspace, _: &CloseProject, window, cx| {
                 let Some(window_handle) = window.window_handle().downcast::<MultiWorkspace>() else {
@@ -3856,48 +3857,48 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_new_window_initial_items(cx: &mut TestAppContext) {
-        let app_state = init_test(cx);
+    fn test_new_window_initial_items(cx: &mut TestAppContext) {
+        init_test(cx);
         for on_new_window in [
             settings::OnNewWindow::Launchpad,
             settings::OnNewWindow::Readme,
             settings::OnNewWindow::EmptyTab,
         ] {
             set_on_new_window(Some(on_new_window), cx);
-            cx.update(|cx| {
-                open_new(
-                    OpenOptions::default(),
-                    app_state.clone(),
-                    cx,
-                    initialize_new_window,
-                )
-            })
-            .await
-            .expect("open blank window");
+            assert!(cx.windows().is_empty());
+            cx.update(|cx| cx.dispatch_action(&NewWindow));
             cx.run_until_parked();
 
-            let window = cx
-                .windows()
-                .first()
-                .expect("blank window")
-                .downcast::<MultiWorkspace>()
-                .expect("workspace window");
-            window
-                .update(cx, |multi_workspace, window, cx| {
-                    let workspace = multi_workspace.workspace().read(cx);
-                    let expected_items =
-                        usize::from(on_new_window == settings::OnNewWindow::EmptyTab);
-                    assert_eq!(workspace.items(cx).count(), expected_items);
-                    assert_eq!(workspace.active_pane().read(cx).items_len(), expected_items);
-                    if expected_items == 1 {
-                        let editor = workspace
-                            .active_item_as::<Editor>(cx)
-                            .expect("empty editor");
-                        assert_eq!(editor.read(cx).text(cx), "");
-                    }
-                    window.remove_window();
-                })
-                .expect("read blank window");
+            let windows = cx.windows();
+            assert_eq!(windows.len(), 1);
+            cx.dispatch_action(
+                *windows.first().expect("window from global action"),
+                NewWindow,
+            );
+
+            let windows = cx.windows();
+            assert_eq!(windows.len(), 2);
+            for window in windows {
+                VisualTestContext::from_window(window, cx).deactivate_window();
+                window
+                    .downcast::<MultiWorkspace>()
+                    .expect("workspace window")
+                    .update(cx, |multi_workspace, window, cx| {
+                        let workspace = multi_workspace.workspace().read(cx);
+                        let expected_items =
+                            usize::from(on_new_window == settings::OnNewWindow::EmptyTab);
+                        assert_eq!(workspace.items(cx).count(), expected_items);
+                        assert_eq!(workspace.active_pane().read(cx).items_len(), expected_items);
+                        if expected_items == 1 {
+                            let editor = workspace
+                                .active_item_as::<Editor>(cx)
+                                .expect("empty editor");
+                            assert_eq!(editor.read(cx).text(cx), "");
+                        }
+                        window.remove_window();
+                    })
+                    .expect("read new window");
+            }
             cx.run_until_parked();
         }
     }

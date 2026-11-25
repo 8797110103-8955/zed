@@ -354,6 +354,36 @@ pub fn classify_worktrees(
     (git_repos, non_git_paths)
 }
 
+pub(crate) fn worktree_operation_targets(
+    project: &Project,
+    cx: &gpui::App,
+) -> (Vec<Entity<Repository>>, Vec<PathBuf>) {
+    let (git_repos, retained_paths) = classify_worktrees(project, cx);
+    if let Some(repository) = project.active_repository(cx)
+        && !git_repos.contains(&repository)
+    {
+        let snapshot = repository.read(cx);
+        let visible_paths = project
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path())
+            .collect::<Vec<_>>();
+        if visible_paths.iter().any(|path| {
+            snapshot
+                .path_style
+                .starts_with(&snapshot.work_directory_abs_path, path)
+        }) {
+            // A checkout inside an open folder can be replaced independently of that folder.
+            let retained_paths = visible_paths
+                .into_iter()
+                .map(|path| path.to_path_buf())
+                .collect();
+            return (vec![repository], retained_paths);
+        }
+    }
+
+    (git_repos, retained_paths)
+}
+
 /// Resolves a branch target into the ref the new worktree should be based on.
 /// Returns `None` for `CurrentBranch`, meaning "use the current HEAD".
 pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -> Option<String> {
@@ -791,7 +821,7 @@ fn create_worktree_workspace_inner(
     let window_handle = window.window_handle().downcast::<MultiWorkspace>();
     let remote_connection_options = project.read(cx).remote_connection_options(cx).cloned();
 
-    let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
+    let (git_repos, non_git_paths) = worktree_operation_targets(project.read(cx), cx);
 
     if git_repos.is_empty() {
         let toast_workspace = cx.entity();
@@ -926,7 +956,7 @@ pub fn handle_switch_worktree(
     let window_handle = window.window_handle().downcast::<MultiWorkspace>();
     let remote_connection_options = project.read(cx).remote_connection_options(cx).cloned();
 
-    let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
+    let (git_repos, non_git_paths) = worktree_operation_targets(project.read(cx), cx);
 
     let git_repo_work_dirs: Vec<PathBuf> = git_repos
         .iter()
@@ -1269,6 +1299,27 @@ async fn open_worktree_workspace(
         })
         .await;
 
+    if let [(source, destination)] = path_remapping.as_slice()
+        && non_git_paths
+            .iter()
+            .any(|path| source.starts_with(path) || destination.starts_with(path))
+    {
+        new_workspace.update(cx, |workspace, cx| {
+            let repository = workspace
+                .project()
+                .read(cx)
+                .repositories(cx)
+                .values()
+                .find(|repository| {
+                    repository.read(cx).work_directory_abs_path.as_ref() == destination.as_path()
+                })
+                .cloned();
+            if let Some(repository) = repository {
+                repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+            }
+        });
+    }
+
     maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx).await;
 
     if transfer_state {
@@ -1281,8 +1332,7 @@ async fn open_worktree_workspace(
                     workspace.show_toast(
                         workspace::Toast::new(
                             toast_id,
-                            "Some project folders are not git repositories. \
-                             They were included as-is without creating a worktree.",
+                            "Other project folders were included as-is.",
                         ),
                         cx,
                     );
@@ -1607,6 +1657,113 @@ mod tests {
             ["setup worktree"],
             "switching back to the main worktree should not rerun create_worktree hooks"
         );
+    }
+
+    #[gpui::test]
+    async fn test_worktree_operations_follow_selected_nested_repository(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+        let root = Path::new(path!("/container"));
+        fs.insert_tree(
+            root,
+            json!({
+                "first": { ".git": {}, "file.txt": "first" },
+                "second": { ".git": {}, "file.txt": "second" },
+            }),
+        )
+        .await;
+        let checkout_path = root.join("second");
+        let git_dir = checkout_path.join(".git");
+        fs.set_head_for_repo(&git_dir, &[("file.txt", "second".to_owned())], "deadbeef");
+        let project = Project::test(fs, [root], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .find(|repository| {
+                    repository.read(cx).work_directory_abs_path.as_ref() == checkout_path
+                })
+                .cloned()
+                .expect("selected nested repository")
+        });
+        repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            handle_create_worktree(
+                workspace,
+                &zed_actions::CreateWorktree {
+                    worktree_name: Some("feature".to_owned()),
+                    branch_target: NewWorktreeBranchTarget::CurrentBranch,
+                },
+                window,
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let created_workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        assert_ne!(created_workspace, workspace);
+        created_workspace.read_with(cx, |created_workspace, cx| {
+            assert!(
+                created_workspace
+                    .root_paths(cx)
+                    .iter()
+                    .any(|path| path.as_ref() == root)
+            );
+            let project = created_workspace.project().read(cx);
+            let active_repository = project
+                .active_repository(cx)
+                .expect("active linked worktree");
+            let active_repository = active_repository.read(cx);
+            assert!(
+                active_repository.is_linked_worktree(),
+                "active checkout: {:?}; detected checkouts: {:?}",
+                active_repository.work_directory_abs_path,
+                project
+                    .repositories(cx)
+                    .values()
+                    .map(|repository| repository.read(cx).work_directory_abs_path.as_ref())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(active_repository.common_dir_abs_path.as_ref(), git_dir);
+        });
+
+        created_workspace.update_in(cx, |workspace, window, cx| {
+            handle_switch_worktree(
+                workspace,
+                &zed_actions::SwitchWorktree {
+                    path: checkout_path.clone(),
+                    display_name: "main".to_owned(),
+                },
+                window,
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(cx, |multi_workspace, cx| {
+            let workspace = multi_workspace.workspace().read(cx);
+            let repository = workspace
+                .project()
+                .read(cx)
+                .active_repository(cx)
+                .expect("active main worktree");
+            assert_eq!(
+                repository.read(cx).work_directory_abs_path.as_ref(),
+                checkout_path
+            );
+        });
     }
 
     #[gpui::test]

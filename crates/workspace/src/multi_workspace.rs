@@ -1236,7 +1236,7 @@ impl MultiWorkspace {
         let app_state = self.workspace().read(cx).app_state().clone();
         let window_handle = window.window_handle().downcast::<MultiWorkspace>();
         let connect_task = connect_remote(connection_options.clone(), window, cx);
-        let paths_vec = paths.paths().to_vec();
+        let paths_vec = paths.ordered_paths().cloned().collect::<Vec<_>>();
 
         cx.spawn(async move |_this, cx| {
             let session = connect_task
@@ -1335,7 +1335,7 @@ impl MultiWorkspace {
             return Task::ready(Ok(workspace));
         }
 
-        let paths = path_list.paths().to_vec();
+        let paths = path_list.ordered_paths().cloned().collect::<Vec<_>>();
         let app_state = self.workspace().read(cx).app_state().clone();
         let requesting_window = window.window_handle().downcast::<MultiWorkspace>();
         let fs = <dyn Fs>::global(cx);
@@ -1386,7 +1386,7 @@ impl MultiWorkspace {
             let result = cx
                 .update(|cx| {
                     Workspace::new_local(
-                        effective_path_list.paths().to_vec(),
+                        effective_path_list.ordered_paths().cloned().collect(),
                         app_state,
                         requesting_window,
                         None,

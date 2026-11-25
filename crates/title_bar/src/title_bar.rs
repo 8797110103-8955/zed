@@ -253,42 +253,45 @@ impl Render for TitleBar {
 
         let mut children = <ArrayVec<_, 5>>::new();
 
-        let mut project_name = None;
-        let mut repository = None;
-        let mut linked_worktree_name = None;
-        if let Some(worktree) = self.effective_active_worktree(cx) {
-            let path_style = worktree.read(cx).path_style();
-            repository = self.get_repository_for_worktree(&worktree, path_style, cx);
-            let worktree_abs_path = worktree.read(cx).abs_path();
-            project_name = worktree
+        let worktree = self.effective_active_worktree(cx);
+        let mut project_name = worktree.as_ref().and_then(|worktree| {
+            worktree
                 .read(cx)
                 .root_name()
                 .file_name()
-                .map(SharedString::from);
-            if let Some(repo) = &repository {
-                let repo = repo.read(cx);
-                let worktree_paths = self.project.read(cx).worktree_paths(cx);
-                let delta_checkout =
-                    delta_checkout_identity(&worktree_paths, &worktree_abs_path, path_style);
+                .map(SharedString::from)
+        });
+        let repository = self.project.read(cx).active_repository(cx);
+        let mut linked_worktree_name = None;
+        if let Some(repo) = &repository {
+            let repo = repo.read(cx);
+            let path_style = repo.path_style;
+            let checkout_path = &repo.work_directory_abs_path;
+            let opened_path = worktree
+                .map(|worktree| worktree.read(cx).abs_path())
+                .filter(|path| path_style.starts_with(path, checkout_path));
+            let worktree_paths = self.project.read(cx).worktree_paths(cx);
+            let delta_checkout = opened_path
+                .as_deref()
+                .and_then(|path| delta_checkout_identity(&worktree_paths, path, path_style))
+                .or_else(|| delta_checkout_identity(&worktree_paths, checkout_path, path_style));
+            linked_worktree_name = delta_checkout
+                .as_ref()
+                .map(|(_, worktree_name)| worktree_name.clone())
+                .or_else(|| {
+                    linked_worktree_short_name(
+                        repo.linked_worktree_anchor_path(),
+                        checkout_path,
+                        path_style,
+                    )
+                })
+                .or_else(|| repo.is_linked_worktree().then(|| repo.display_name()));
+
+            if let Some(opened_path) = opened_path {
                 let identity = match &delta_checkout {
                     Some((source_path, _)) => source_path,
                     None => repo_identity_path(&repo.common_dir_abs_path, path_style),
                 };
-                linked_worktree_name = delta_checkout
-                    .as_ref()
-                    .map(|(_, worktree_name)| worktree_name.clone())
-                    .or_else(|| {
-                        linked_worktree_short_name(
-                            repo.linked_worktree_anchor_path(),
-                            repo.work_directory_abs_path.as_ref(),
-                            path_style,
-                        )
-                    })
-                    .or_else(|| {
-                        repo.is_linked_worktree()
-                            .then_some(project_name.clone())
-                            .flatten()
-                    });
 
                 let display_name =
                     if path_style.extension(identity) == Some(std::ffi::OsStr::new("git")) {
@@ -301,9 +304,7 @@ impl Render for TitleBar {
                     let visible_worktrees_in_repo =
                         self.visible_worktrees_in_repository(repo, path_style, cx);
                     let name = if visible_worktrees_in_repo == 1 {
-                        if let Ok(relative) = path_style
-                            .strip_prefix(&worktree_abs_path, &*repo.work_directory_abs_path)
-                        {
+                        if let Ok(relative) = path_style.strip_prefix(&opened_path, checkout_path) {
                             if relative.as_os_str().is_empty() {
                                 repo_name.to_string()
                             } else {
@@ -330,7 +331,8 @@ impl Render for TitleBar {
                 .h_full()
                 .gap_0p5()
                 .map(|title_bar| {
-                    let mut render_project_items = title_bar_settings.show_branch_name
+                    let mut render_project_items = title_bar_settings.show_worktree_name
+                        || title_bar_settings.show_branch_name
                         || title_bar_settings.show_project_items;
                     title_bar
                         .when_some(
@@ -571,7 +573,7 @@ impl TitleBar {
     }
 
     /// Returns the worktree to display in the title bar.
-    /// - Prefer the worktree owning the project's active repository
+    /// - Prefer a worktree inside the active repository or its closest open parent
     /// - Fall back to the first visible worktree
     pub fn effective_active_worktree(&self, cx: &App) -> Option<Entity<project::Worktree>> {
         let project = self.project.read(cx);
@@ -579,38 +581,24 @@ impl TitleBar {
         if let Some(repo) = project.active_repository(cx) {
             let repo = repo.read(cx);
             let repo_path = &repo.work_directory_abs_path;
-
-            for worktree in project.visible_worktrees(cx) {
-                let worktree_path = worktree.read(cx).abs_path();
-                if worktree_path == *repo_path || worktree_path.starts_with(repo_path.as_ref()) {
-                    return Some(worktree);
-                }
+            let path_style = repo.path_style;
+            let worktree = project
+                .visible_worktrees(cx)
+                .find(|worktree| path_style.starts_with(&worktree.read(cx).abs_path(), repo_path))
+                .or_else(|| {
+                    project
+                        .visible_worktrees(cx)
+                        .filter(|worktree| {
+                            path_style.starts_with(repo_path, &worktree.read(cx).abs_path())
+                        })
+                        .max_by_key(|worktree| worktree.read(cx).abs_path().as_os_str().len())
+                });
+            if worktree.is_some() {
+                return worktree;
             }
         }
 
         project.visible_worktrees(cx).next()
-    }
-
-    fn get_repository_for_worktree(
-        &self,
-        worktree: &Entity<project::Worktree>,
-        path_style: PathStyle,
-        cx: &App,
-    ) -> Option<Entity<project::git_store::Repository>> {
-        let project = self.project.read(cx);
-        let git_store = project.git_store().read(cx);
-        let worktree_path = worktree.read(cx).abs_path();
-
-        git_store
-            .repositories()
-            .values()
-            .filter(|repo| {
-                let repo_path = &repo.read(cx).work_directory_abs_path;
-                worktree_path == *repo_path
-                    || path_style.starts_with(&worktree_path, repo_path.as_ref())
-            })
-            .max_by_key(|repo| repo.read(cx).work_directory_abs_path.as_os_str().len())
-            .cloned()
     }
 
     fn visible_worktrees_in_repository(
@@ -1049,6 +1037,12 @@ impl TitleBar {
                 .anchor(gpui::Anchor::TopLeft)
         });
 
+        let controls = h_flex().debug_selector(|| {
+            format!(
+                "title-bar-git-controls-{}",
+                branch_name.as_deref().unwrap_or_default()
+            )
+        });
         let branch_picker = branch_name.and_then(|branch_name| {
             settings.show_branch_name.then(|| {
                 let branch_tooltip_label = branch_name.clone();
@@ -1114,7 +1108,7 @@ impl TitleBar {
         let show_separator = worktree_button.is_some() && branch_picker.is_some();
 
         Some(
-            h_flex()
+            controls
                 .gap_px()
                 .children(worktree_button)
                 .when(show_separator, |this| {
@@ -1593,6 +1587,58 @@ mod tests {
         left: false,
         right: false,
     };
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    async fn test_git_controls_follow_selected_nested_repository(cx: &mut TestAppContext) {
+        let (workspace, cx) = init_test(TitleBarVisibility::Always, cx).await;
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let fs = project.read_with(cx, |project, _| project.fs().as_fake());
+        let root = Path::new(util::path!("/container"));
+        for name in ["first", "second"] {
+            let git_dir = root.join(name).join(".git");
+            fs.create_dir(&git_dir).await.expect("create repository");
+            fs.set_branch_name(&git_dir, Some(name));
+        }
+        project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree(root, true, cx)
+            })
+            .await
+            .expect("open containing folder");
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+
+        for (name, current, previous) in [
+            (
+                "first",
+                "title-bar-git-controls-first",
+                "title-bar-git-controls-second",
+            ),
+            (
+                "second",
+                "title-bar-git-controls-second",
+                "title-bar-git-controls-first",
+            ),
+        ] {
+            let checkout_path = root.join(name);
+            let repository = project.read_with(cx, |project, cx| {
+                project
+                    .repositories(cx)
+                    .values()
+                    .find(|repository| {
+                        repository.read(cx).work_directory_abs_path.as_ref() == checkout_path
+                    })
+                    .cloned()
+                    .expect("nested repository")
+            });
+            repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(current).is_some());
+            assert!(cx.debug_bounds(previous).is_none());
+        }
+    }
 
     #[gpui::test]
     async fn test_delta_checkout_identity(cx: &mut TestAppContext) {
