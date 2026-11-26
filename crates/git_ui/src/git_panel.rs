@@ -36,7 +36,7 @@ use anyhow::Context as _;
 use askpass::AskPassDelegate;
 use branch_mode::{BranchBase, ChangesMode};
 use client::zed_urls;
-use collections::{BTreeMap, HashMap, HashSet};
+use collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorElement, EditorMode, MultiBuffer, MultiBufferOffset, SizingBehavior};
 use editor::{EditorStyle, RewrapOptions};
@@ -662,6 +662,8 @@ struct SerializedGitPanel {
     /// `None` means the user never toggled it, so the setting decides.
     #[serde(default)]
     commit_editor_collapsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    collapsed_repositories: BTreeSet<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1325,7 +1327,7 @@ pub struct GitPanel {
     entries: Vec<GitListEntry>,
     collapsed_sections: HashSet<Section>,
     repositories_collapsed: bool,
-    collapsed_repositories: HashSet<RepositoryId>,
+    collapsed_repositories: BTreeSet<String>,
     changes_collapsed: bool,
     view_mode: GitPanelViewMode,
     tree_expanded_dirs: HashMap<TreeKey, bool>,
@@ -1524,9 +1526,11 @@ impl GitPanel {
         let initial_commit_message = active_draft
             .and_then(|draft| draft.message.clone())
             .unwrap_or_default();
-        let pending_commit_message_restores = serialized_panel
-            .map(|panel| panel.commit_messages)
-            .unwrap_or_default();
+        let SerializedGitPanel {
+            commit_messages: pending_commit_message_restores,
+            collapsed_repositories,
+            ..
+        } = serialized_panel.unwrap_or_default();
         let workspace_entity = cx.entity();
 
         cx.new(|cx| {
@@ -1713,7 +1717,7 @@ impl GitPanel {
                 entries: Vec::new(),
                 collapsed_sections: HashSet::default(),
                 repositories_collapsed: false,
-                collapsed_repositories: HashSet::default(),
+                collapsed_repositories,
                 changes_collapsed: false,
                 view_mode: GitPanelViewMode::from_settings(cx),
                 tree_expanded_dirs: HashMap::default(),
@@ -2271,6 +2275,7 @@ impl GitPanel {
             .commit_editor_toggled
             .then_some(self.commit_editor_collapsed);
         let commit_messages = self.serialized_commit_messages(cx);
+        let collapsed_repositories = self.collapsed_repositories.clone();
         let kvp = KeyValueStore::global(cx);
 
         self.pending_serialization = cx.spawn(async move |git_panel, cx| {
@@ -2298,6 +2303,7 @@ impl GitPanel {
                             signoff_enabled,
                             commit_messages,
                             commit_editor_collapsed,
+                            collapsed_repositories,
                         })?,
                     )
                     .await?;
@@ -7765,7 +7771,9 @@ impl GitPanel {
             }
             let depth = ancestors.len();
             let hidden = ancestors.last().is_some_and(|(_, collapsed)| *collapsed);
-            let collapsed = self.collapsed_repositories.contains(&repository_state.id);
+            let collapsed = self
+                .collapsed_repositories
+                .contains(path.to_string_lossy().as_ref());
             let has_children = repositories.get(index + 1).is_some_and(|next| {
                 let next = next.read(cx);
                 next.work_directory_abs_path != path
@@ -7929,7 +7937,8 @@ impl GitPanel {
                         }
                     }))
                     .child(if has_children {
-                        IconButton::new(
+                        let repository_path = path.clone();
+                        let toggle = IconButton::new(
                             ("toggle-repository", repository_id.0),
                             if collapsed {
                                 IconName::ChevronRight
@@ -7945,12 +7954,19 @@ impl GitPanel {
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            if !this.collapsed_repositories.remove(&repository_id) {
-                                this.collapsed_repositories.insert(repository_id);
+                            let repository_path = repository_path.to_string_lossy();
+                            if !this.collapsed_repositories.remove(repository_path.as_ref()) {
+                                this.collapsed_repositories
+                                    .insert(repository_path.into_owned());
                             }
+                            this.serialize(cx);
                             cx.notify();
-                        }))
-                        .into_any_element()
+                        }));
+                        #[cfg(test)]
+                        let toggle = div()
+                            .debug_selector(|| path.to_string_lossy().into_owned())
+                            .child(toggle);
+                        toggle.into_any_element()
                     } else {
                         div().w_4().flex_none().into_any_element()
                     })
@@ -14422,6 +14438,7 @@ mod tests {
                 signoff_enabled: false,
                 commit_messages: panel.serialized_commit_messages(cx),
                 commit_editor_collapsed: None,
+                ..Default::default()
             }
         });
 
@@ -14474,6 +14491,7 @@ mod tests {
                     ..Default::default()
                 },
             )]),
+            ..Default::default()
         };
         let mismatched_panel = workspace.update_in(cx, |workspace, window, cx| {
             GitPanel::new_with_serialized_panel(
@@ -14565,6 +14583,7 @@ mod tests {
             signoff_enabled: false,
             commit_messages: panel.serialized_commit_messages(cx),
             commit_editor_collapsed: None,
+            ..Default::default()
         });
         let buffer = repository.read_with(cx, |repository, _| {
             repository.commit_message_buffer().unwrap().clone()
@@ -14661,6 +14680,7 @@ mod tests {
             signoff_enabled: false,
             commit_messages: panel.serialized_commit_messages(cx),
             commit_editor_collapsed: None,
+            ..Default::default()
         });
 
         // Simulate a restart and restore from the serialized state.
@@ -14986,6 +15006,89 @@ mod tests {
         let bounds = cx.debug_bounds(selector).expect(selector);
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         draw_branch_picker(cx);
+    }
+
+    #[gpui::test]
+    async fn test_repository_collapse_state_persists(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (fs, project, workspace, _, mut cx) = setup_git_panel_with_changes(
+            cx,
+            json!({
+                ".git": {},
+                "submodule": {
+                    ".git": {},
+                    "nested": { ".git": {}, "leaf": { ".git": {} } },
+                },
+            }),
+            &[],
+        )
+        .await;
+        let (key, kvp, window_context) = workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_random_database_id();
+            (
+                GitPanel::serialization_key(workspace).expect("workspace has a database ID"),
+                KeyValueStore::global(cx),
+                window.to_async(cx),
+            )
+        });
+        kvp.write_kvp(key, r#"{"signoff_enabled":true}"#.into())
+            .await
+            .expect("write legacy panel state");
+
+        let root = path!("/project");
+        let submodule = path!("/project/submodule");
+        let nested = path!("/project/submodule/nested");
+        let late_submodule = path!("/project/late-submodule");
+        let mut panel = GitPanel::load(workspace.downgrade(), window_context.clone())
+            .await
+            .expect("load legacy panel state");
+        mount_git_panel(&workspace, &panel, &mut cx);
+        assert!(cx.debug_bounds(nested).is_some());
+
+        for collapsed in [true, false] {
+            if collapsed {
+                click_branch_picker_control(submodule, &mut cx);
+                assert!(cx.debug_bounds(nested).is_none());
+                click_branch_picker_control(root, &mut cx);
+            } else {
+                click_branch_picker_control(root, &mut cx);
+                assert!(cx.debug_bounds(submodule).is_some());
+                assert!(cx.debug_bounds(nested).is_none());
+                assert!(cx.debug_bounds(late_submodule).is_some());
+                click_branch_picker_control(submodule, &mut cx);
+            }
+
+            let write_state = panel.update(&mut cx, |panel, _| {
+                std::mem::replace(&mut panel.pending_serialization, Task::ready(()))
+            });
+            cx.executor().advance_clock(SERIALIZATION_THROTTLE_TIME);
+            write_state.await;
+
+            workspace.update_in(&mut cx, |workspace, window, cx| {
+                workspace.remove_panel(&panel, window, cx);
+            });
+            panel = GitPanel::load(workspace.downgrade(), window_context.clone())
+                .await
+                .expect("reload panel state");
+            mount_git_panel(&workspace, &panel, &mut cx);
+
+            assert_eq!(cx.debug_bounds(submodule).is_none(), collapsed);
+            assert_eq!(cx.debug_bounds(nested).is_none(), collapsed);
+            panel.read_with(&cx, |panel, _| assert!(panel.signoff_enabled));
+
+            if collapsed {
+                fs.insert_tree(
+                    late_submodule,
+                    json!({ ".git": {}, "child": { ".git": {} } }),
+                )
+                .await;
+                project
+                    .update(&mut cx, |project, cx| project.git_scans_complete(cx))
+                    .await;
+                draw_branch_picker(&mut cx);
+                assert!(cx.debug_bounds(late_submodule).is_none());
+            }
+        }
     }
 
     #[gpui::test]

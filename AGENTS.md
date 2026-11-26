@@ -168,7 +168,7 @@ Release Notes:
 
 Fork commit messages exist so that, when merging upstream, fork changes can be found quickly and read alongside their diffs to decide which side to keep.
 
-- When committing, keep the message short: an imperative title plus one bullet per feature or fix, describing what changed in searchable terms. Leave code details (functions, files, keys) to the diff.
+- Use a concise, searchable, imperative commit title. Omit the body when the title fully conveys the change. Add brief bullets only for meaningful changes or context the title cannot convey. Leave implementation details to the diff.
 > [!IMPORTANT]
 > When merging, preserve the first two review-reminder lines at the top of `README.md`, leave `README.md` changes unstaged, and never remove the reminder.
 - When merging upstream, search the fork's commit messages (for example `git log --grep`) for the conflicting area, and read the matching commits together with their diffs before choosing a side.
