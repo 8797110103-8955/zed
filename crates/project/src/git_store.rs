@@ -39,10 +39,11 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitFileStatus, CommitOptions,
-        CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions, FileHistoryChangedFileSets,
-        GitCommitTemplate, GitRepository, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
-        Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
-        Worktree as GitWorktree, delete_branch_flag, is_binary_content,
+        CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions, FetchResult,
+        FileHistoryChangedFileSets, GitCommitTemplate, GitRepository, InitialGraphCommitData,
+        LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, ResetMode,
+        SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
+        is_binary_content,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -3630,15 +3631,16 @@ impl GitStore {
             &mut cx,
         );
 
-        let remote_output = repository_handle
+        let fetch = repository_handle
             .update(&mut cx, |repository_handle, cx| {
                 repository_handle.fetch(fetch_options, Some(askpass), cx)
             })
             .await??;
 
         Ok(proto::RemoteMessageResponse {
-            stdout: remote_output.stdout,
-            stderr: remote_output.stderr,
+            stdout: fetch.output.stdout,
+            stderr: fetch.output.stderr,
+            fetch_history_changed: Some(fetch.history_changed),
         })
     }
 
@@ -3687,6 +3689,7 @@ impl GitStore {
         Ok(proto::RemoteMessageResponse {
             stdout: remote_output.stdout,
             stderr: remote_output.stderr,
+            fetch_history_changed: None,
         })
     }
 
@@ -3719,6 +3722,7 @@ impl GitStore {
         Ok(proto::RemoteMessageResponse {
             stdout: remote_message.stdout,
             stderr: remote_message.stderr,
+            fetch_history_changed: None,
         })
     }
 
@@ -8988,7 +8992,7 @@ impl Repository {
             })
             .ok();
             if let Ok(result) = result {
-                tx.send(result).ok();
+                tx.send(result.map(|fetch| fetch.output)).ok();
             }
         })
         .detach();
@@ -9000,7 +9004,7 @@ impl Repository {
         fetch_options: FetchOptions,
         askpass: Option<AskPassDelegate>,
         cx: &mut Context<Self>,
-    ) -> oneshot::Receiver<Result<RemoteCommandOutput>> {
+    ) -> oneshot::Receiver<Result<FetchResult>> {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
@@ -9019,7 +9023,7 @@ impl Repository {
         let this = cx.weak_entity();
         let status = askpass.is_some().then(|| "git fetch".into());
         self.send_job("fetch", status, move |git_repo, mut cx| async move {
-            let result = match git_repo {
+            let fetch = match git_repo {
                 RepositoryState::Local(LocalRepositoryState {
                     backend,
                     environment,
@@ -9028,13 +9032,11 @@ impl Repository {
                     if askpass.is_none() && !backend.is_trusted() {
                         bail!("auto-fetch requires a trusted repository");
                     }
-                    let result = backend
+                    let fetch = backend
                         .fetch(fetch_options, prune, askpass, environment, cx.clone())
-                        .await;
-                    if result.is_ok() {
-                        Self::refresh_branch_list(&this, backend, updates_tx, &mut cx).await?;
-                    }
-                    result
+                        .await?;
+                    Self::refresh_branch_list(&this, backend, updates_tx, &mut cx).await?;
+                    fetch
                 }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     let Some(askpass) = askpass else {
@@ -9053,17 +9055,20 @@ impl Repository {
                         })
                         .await?;
 
-                    Ok(RemoteCommandOutput {
-                        stdout: response.stdout,
-                        stderr: response.stderr,
-                    })
+                    FetchResult {
+                        output: RemoteCommandOutput {
+                            stdout: response.stdout,
+                            stderr: response.stderr,
+                        },
+                        // Older hosts don't report whether the fetch changed history.
+                        history_changed: response.fetch_history_changed.unwrap_or(true),
+                    }
                 }
             };
-            if result.is_ok() {
-                // Fetch can change tags or deepen history without changing the branch list.
+            if fetch.history_changed {
                 this.update(&mut cx, |_, cx| cx.emit(RepositoryEvent::HistoryChanged))?;
             }
-            result
+            Ok(fetch)
         })
     }
 

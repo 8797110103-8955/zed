@@ -5535,7 +5535,7 @@ impl GitPanel {
                 repo.fetch(fetch_options.clone(), Some(askpass), cx)
             });
 
-            let remote_message = fetch.await?;
+            let remote_message = fetch.await?.map(|fetch| fetch.output);
             let action = match fetch_options {
                 FetchOptions::All | FetchOptions::Unshallow => RemoteAction::Fetch(None),
                 FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),

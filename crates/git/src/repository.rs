@@ -109,7 +109,7 @@ pub struct CommitData {
     pub message: SharedString,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct InitialGraphCommitData {
     pub sha: Oid,
     pub parents: SmallVec<[Oid; 1]>,
@@ -491,6 +491,12 @@ impl RemoteCommandOutput {
     }
 }
 
+#[derive(Debug)]
+pub struct FetchResult {
+    pub output: RemoteCommandOutput,
+    pub history_changed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct UpstreamTrackingStatus {
     pub ahead: u32,
@@ -617,6 +623,22 @@ async fn read_shallow_file(shallow_file_path: &Path) -> Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).context("reading shallow file"),
     }
+}
+
+async fn fetch_history_inputs(
+    git: &GitBinary,
+    shallow_file_path: &Path,
+) -> Result<(Vec<u8>, Option<String>)> {
+    let refs = git
+        .run_bytes(&[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
+        ])
+        .await
+        .context("reading Git references for fetch")?;
+    let shallow = read_shallow_file(shallow_file_path).await?;
+    Ok((refs, shallow))
 }
 
 async fn is_shallow_boundary_commit(
@@ -1038,7 +1060,7 @@ pub trait GitRepository: Send + Sync {
         // This method takes an AsyncApp to ensure it's invoked on the main thread,
         // otherwise git-credentials-manager won't work.
         cx: AsyncApp,
-    ) -> BoxFuture<'_, Result<RemoteCommandOutput>>;
+    ) -> BoxFuture<'_, Result<FetchResult>>;
 
     fn get_push_remote(&self, branch: String) -> BoxFuture<'_, Result<Option<Remote>>>;
 
@@ -3024,9 +3046,10 @@ impl GitRepository for RealGitRepository {
         askpass: Option<AskPassDelegate>,
         env: Arc<HashMap<String, String>>,
         cx: AsyncApp,
-    ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
+    ) -> BoxFuture<'_, Result<FetchResult>> {
         let working_directory = self.command_directory();
         let git_directory = self.path();
+        let shallow_file_path = self.common_dir.join("shallow");
         let remote_name = format!("{}", fetch_options);
         let git_binary_path = self.system_git_binary_path.clone();
         let executor = cx.background_executor().clone();
@@ -3047,10 +3070,26 @@ impl GitRepository for RealGitRepository {
                 arguments.push("--prune");
             }
             arguments.push(&remote_name);
-            git.run_remote_command(askpass, &env, &arguments, |command| {
-                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let history_before = fetch_history_inputs(&git, &shallow_file_path)
+                .await
+                .log_err();
+            let output = git
+                .run_remote_command(askpass, &env, &arguments, |command| {
+                    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+                })
+                .await?;
+            let history_after = fetch_history_inputs(&git, &shallow_file_path)
+                .await
+                .log_err();
+            let history_changed = match (history_before, history_after) {
+                (Some(before), Some(after)) => before != after,
+                // If either read fails, preserve refresh behavior after a successful fetch.
+                _ => true,
+            };
+            Ok(FetchResult {
+                output,
+                history_changed,
             })
-            .await
         }
         .boxed()
     }
@@ -3867,6 +3906,13 @@ impl GitBinary {
     where
         S: AsRef<OsStr>,
     {
+        Ok(String::from_utf8(self.run_bytes(args).await?)?)
+    }
+
+    async fn run_bytes<S>(&self, args: &[S]) -> Result<Vec<u8>>
+    where
+        S: AsRef<OsStr>,
+    {
         let mut command = self.build_command(args);
         let output = command.output().await?;
         anyhow::ensure!(
@@ -3877,7 +3923,7 @@ impl GitBinary {
                 status: output.status,
             }
         );
-        Ok(String::from_utf8(output.stdout)?)
+        Ok(output.stdout)
     }
 
     pub(crate) fn build_command<S>(&self, args: &[S]) -> util::command::Command
@@ -5190,10 +5236,11 @@ mod tests {
                         .is_ok()
                 );
                 git_command(&remote_directory, ["branch", "-D", "feature"]);
-                repository
+                let fetch = repository
                     .fetch(fetch_options, prune, None, Arc::default(), cx.to_async())
                     .await
                     .expect("fetch");
+                assert_eq!(fetch.history_changed, prune);
                 assert_eq!(
                     git.run(&["show-ref", "--verify", "refs/remotes/origin/feature"])
                         .await
@@ -5254,6 +5301,48 @@ mod tests {
                     .await
                     .is_ok()
             );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_fetch_detects_tags_and_shallow_history_changes(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (remote_directory, _) = clone_remote_repository_with_main_and_feature(directory.path());
+        let shallow_directory = directory.path().join("shallow");
+        git_command(
+            directory.path(),
+            [
+                OsString::from("clone"),
+                OsString::from("--no-local"),
+                OsString::from("--depth=1"),
+                OsString::from("--branch=feature"),
+                remote_directory.as_os_str().into(),
+                shallow_directory.as_os_str().into(),
+            ],
+        );
+        let repository = RealGitRepository::new(
+            &shallow_directory.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .expect("open shallow clone");
+        repository.set_trusted(true);
+
+        git_command(&remote_directory, ["tag", "v1", "feature"]);
+        for (options, history_changed) in [
+            (FetchOptions::All, true),
+            (FetchOptions::All, false),
+            (FetchOptions::Unshallow, true),
+            (FetchOptions::All, false),
+        ] {
+            let fetch = repository
+                .fetch(options, false, None, Arc::default(), cx.to_async())
+                .await
+                .expect("fetch");
+            assert_eq!(fetch.history_changed, history_changed);
         }
     }
 

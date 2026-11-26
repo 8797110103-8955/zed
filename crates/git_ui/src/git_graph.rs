@@ -8017,7 +8017,7 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        git_graph.read_with(&*cx, |graph, _| {
+        let original_entry = git_graph.read_with(&*cx, |graph, _| {
             assert_eq!(graph.graph_data.commits.len(), 1);
             let commit = graph
                 .graph_data
@@ -8026,6 +8026,25 @@ mod tests {
                 .expect("head commit loaded");
             assert_eq!(commit.data.sha, head);
             assert_eq!(commit.data.ref_names, initial_commit.ref_names);
+            commit.clone()
+        });
+
+        let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
+        let fetch = repository
+            .update(cx, |repository, cx| {
+                repository.fetch(FetchOptions::All, Some(askpass), cx)
+            })
+            .await
+            .expect("fetch job completed")
+            .expect("unchanged fetch succeeded");
+        assert!(!fetch.history_changed);
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.run_until_parked();
+        git_graph.read_with(&*cx, |graph, _| {
+            let entry = graph.graph_data.commits.first().expect("head retained");
+            assert!(Rc::ptr_eq(entry, &original_entry));
         });
 
         let tagged_commit = Arc::new(InitialGraphCommitData {
@@ -8044,7 +8063,7 @@ mod tests {
             vec![remote_commit, tagged_commit],
         ] {
             fs.with_git_state(&dot_git, false, |state| {
-                state.graph_commits = commits.clone();
+                state.fetch_graph_commits = Some(commits.clone());
                 if commits.len() > 1 {
                     state.branches.insert("origin/main".into());
                 }

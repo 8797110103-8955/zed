@@ -494,6 +494,7 @@ message Pull {
 message RemoteMessageResponse {
   string stdout = 1;
   string stderr = 2;
+  optional bool fetch_history_changed = 3;
 }
 
 message BlameBuffer {

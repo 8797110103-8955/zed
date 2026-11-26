@@ -13,9 +13,9 @@ use git::{
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
-        CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
-        GitRepository, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit, Remote,
-        RepoPath, ResetMode, SearchCommitArgs, Worktree, commit_hash_search_query,
+        CreateWorktreeTarget, FetchOptions, FetchResult, FileHistoryChangedFileSets,
+        GRAPH_CHUNK_SIZE, GitRepository, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
+        RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree, commit_hash_search_query,
         original_repo_path_from_common_dir,
     },
     stash::GitStash,
@@ -83,6 +83,7 @@ pub struct FakeGitRepositoryState {
     pub worktrees_requiring_force_delete: HashSet<PathBuf>,
     pub refs: HashMap<String, String>,
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
+    pub fetch_graph_commits: Option<Vec<Arc<InitialGraphCommitData>>>,
     pub commit_data: HashMap<Oid, FakeCommitDataEntry>,
     pub stash_entries: GitStash,
     pub fetches: Arc<Mutex<Vec<FetchOptions>>>,
@@ -115,6 +116,7 @@ impl FakeGitRepositoryState {
             oids: Default::default(),
             remotes: HashMap::default(),
             graph_commits: Vec::new(),
+            fetch_graph_commits: None,
             commit_data: Default::default(),
             commit_history: Vec::new(),
             stash_entries: Default::default(),
@@ -1370,13 +1372,22 @@ impl GitRepository for FakeGitRepository {
         _askpass: Option<AskPassDelegate>,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
-    ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
+    ) -> BoxFuture<'_, Result<FetchResult>> {
         self.with_state_async(true, move |state| {
             state.fetches.lock().push(fetch_options);
             state.fetch_prune_flags.lock().push(prune);
-            Ok(git::repository::RemoteCommandOutput {
-                stdout: String::new(),
-                stderr: String::new(),
+            let history_changed = if let Some(commits) = state.fetch_graph_commits.take() {
+                let previous_commits = std::mem::replace(&mut state.graph_commits, commits);
+                previous_commits != state.graph_commits
+            } else {
+                false
+            };
+            Ok(FetchResult {
+                output: git::repository::RemoteCommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                history_changed,
             })
         })
     }
