@@ -1909,57 +1909,10 @@ impl PickerDelegate for BranchListDelegate {
                 })
         };
 
-        let remote_status = match &self.branch_selection_behavior {
-            BranchSelectionBehavior::PromptRemote {
-                fetching: true,
-                pending_target,
-                operation,
-                ..
-            } => {
-                let message = if let Some(target) = pending_target {
-                    format!("Waiting to {} {target} after fetching…", operation.name())
-                } else {
-                    "Fetching remote branches…".to_owned()
-                };
-                Some(
-                    h_flex()
-                        .px_2p5()
-                        .py_1()
-                        .gap_2()
-                        .child(
-                            div().min_w_0().flex_1().child(
-                                Label::new(message)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            ),
-                        )
-                        .when(pending_target.is_some(), |row| {
-                            row.child(
-                                Button::new("cancel-pending-remote-operation", "Cancel").on_click(
-                                    cx.listener(|picker, _, _, cx| {
-                                        if let BranchSelectionBehavior::PromptRemote {
-                                            pending_target,
-                                            ..
-                                        } = &mut picker.delegate.branch_selection_behavior
-                                        {
-                                            *pending_target = None;
-                                            cx.notify();
-                                        }
-                                    }),
-                                ),
-                            )
-                        }),
-                )
-            }
-            _ => None,
-        };
-
         Some(
             v_flex()
                 .w_full()
                 .min_w_0()
-                .when_some(remote_status, |this, status| this.child(status))
                 .when(editor_bottom, |this| {
                     this.child(Divider::horizontal())
                         .when_some(warning_banner(), |this, banner| this.child(banner))
@@ -2867,6 +2820,56 @@ impl PickerDelegate for BranchListDelegate {
     }
 
     fn render_footer(&self, _: &mut Window, cx: &mut Context<Picker<Self>>) -> Option<AnyElement> {
+        let remote_status = match &self.branch_selection_behavior {
+            BranchSelectionBehavior::PromptRemote {
+                fetching: true,
+                pending_target,
+                operation,
+                ..
+            } => {
+                let message = if let Some(target) = pending_target {
+                    format!("Waiting to {} {target} after fetching…", operation.name())
+                } else {
+                    "Fetching remote branches…".to_owned()
+                };
+                Some(
+                    h_flex()
+                        .debug_selector(|| "remote-branch-fetch-status".to_owned())
+                        .px_2p5()
+                        .py_1()
+                        .gap_2()
+                        .child(
+                            div().min_w_0().flex_1().child(
+                                Label::new(message)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
+                        )
+                        .when(pending_target.is_some(), |row| {
+                            row.child(
+                                Button::new("cancel-pending-remote-operation", "Cancel").on_click(
+                                    cx.listener(|picker, _, _, cx| {
+                                        if let BranchSelectionBehavior::PromptRemote {
+                                            pending_target,
+                                            ..
+                                        } = &mut picker.delegate.branch_selection_behavior
+                                        {
+                                            *pending_target = None;
+                                            cx.notify();
+                                        }
+                                    }),
+                                ),
+                            )
+                        }),
+                )
+            }
+            _ => None,
+        };
+        if let Some(status) = remote_status {
+            return Some(status.into_any_element());
+        }
+
         if !self.show_footer || self.editor_position() == PickerEditorPosition::End {
             return None;
         }
@@ -3598,6 +3601,13 @@ mod tests {
             init_remote_branch_list_test(RemoteBranchOperation::Pull, cx).await;
         let picker = list.read_with(&cx, |list, _| list.picker.clone());
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        let status_bounds = cx
+            .debug_bounds("remote-branch-fetch-status")
+            .expect("fetch status footer");
+        let last_row_bounds = cx
+            .debug_bounds("branch-picker-entry-2")
+            .expect("last branch row");
+        assert!(status_bounds.origin.y >= last_row_bounds.bottom());
         let bounds = cx
             .debug_bounds("branch-picker-entry-1")
             .expect("feature row");
