@@ -3842,8 +3842,15 @@ fn stop_reason_from_v1(reason: &acp_v1::StopReason) -> Option<acp_v2::StopReason
     })
 }
 
+pub enum CodexConfigRestore {
+    Restored,
+    Reapplying { manual_change: bool },
+    Failed(Vec<&'static str>),
+}
+
 pub struct AcpThread {
     session_info: AgentSessionInfo,
+    pub codex_config_restore: Option<CodexConfigRestore>,
     parent_session_id: Option<acp_v2::SessionId>,
     /// Child sessions this session owns, such as subagents, in registration order.
     subagents: IndexMap<acp_v2::SessionId, Entity<AcpThread>>,
@@ -4196,6 +4203,7 @@ impl AcpThread {
                 created_at: None,
                 meta: None,
             },
+            codex_config_restore: None,
             action_log,
             shared_buffers: Default::default(),
             entries: Default::default(),
@@ -4591,6 +4599,19 @@ impl AcpThread {
 
     pub fn foreground_activity(&self) -> ForegroundActivity {
         self.activity.phase()
+    }
+
+    pub fn wait_for_foreground_idle(
+        &mut self,
+    ) -> Result<Option<futures::channel::oneshot::Receiver<()>>> {
+        self.activity.wait_for_idle()
+    }
+
+    pub fn is_reapplying_codex_config(&self) -> bool {
+        matches!(
+            self.codex_config_restore,
+            Some(CodexConfigRestore::Reapplying { .. })
+        )
     }
 
     pub fn activity_generation(&self) -> u64 {

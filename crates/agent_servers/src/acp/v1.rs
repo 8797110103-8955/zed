@@ -1131,7 +1131,7 @@ impl AcpConnection {
                         }
                     };
 
-                    if thread.upgrade().is_some() {
+                    if let Some(thread) = thread.upgrade() {
                         {
                             let mut sessions = connection_state.sessions.borrow_mut();
                             let Some(session) = sessions
@@ -1146,6 +1146,12 @@ impl AcpConnection {
                             };
                             session.session_modes = modes;
                             session.config_options = config_options;
+                        }
+                        if connection_state.id.as_ref() == crate::CODEX_ID {
+                            thread.update(cx, |thread, _| {
+                                thread.codex_config_restore =
+                                    Some(acp_thread::CodexConfigRestore::Restored);
+                            });
                         }
                         if let Some(replay) = replay {
                             replay.borrow_mut().finished = true;

@@ -800,6 +800,7 @@ pub struct ThreadView {
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
     pub show_external_source_prompt_warning: bool,
     pub show_codex_windows_warning: bool,
+    auto_submit_after_codex_restore: bool,
     sandbox_status: Option<VerifiedSandboxStatus>,
     sandbox_status_key: Option<SandboxStatusKey>,
     pending_sandbox_status_key: Option<SandboxStatusKey>,
@@ -1344,6 +1345,7 @@ impl ThreadView {
             code_span_resolver,
             show_external_source_prompt_warning,
             show_codex_windows_warning,
+            auto_submit_after_codex_restore: false,
             sandbox_status: None,
             sandbox_status_key: None,
             pending_sandbox_status_key: None,
@@ -1383,9 +1385,27 @@ impl ThreadView {
             });
 
         if should_auto_submit {
-            this.send(window, cx);
+            if this.thread.read(cx).is_reapplying_codex_config() {
+                this.auto_submit_after_codex_restore = true;
+            } else {
+                this.send(window, cx);
+            }
         }
         this
+    }
+
+    pub(super) fn submit_after_codex_restore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.thread.read(cx).is_reapplying_codex_config()
+            || !std::mem::take(&mut self.auto_submit_after_codex_restore)
+        {
+            return false;
+        }
+        self.send(window, cx);
+        true
     }
 
     /// Schedule a throttled save of the thread state (draft prompt, scroll position, etc.).
@@ -2231,7 +2251,7 @@ impl ThreadView {
         }
         let thread = &self.thread;
 
-        if self.is_loading_contents {
+        if self.is_loading_contents || thread.read(cx).is_reapplying_codex_config() {
             return;
         }
 
@@ -2380,6 +2400,9 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.thread.read(cx).is_reapplying_codex_config() {
+            return;
+        }
         let contents = self.resolve_message_contents(&message_editor, cx);
 
         self.thread_error.take();
@@ -3130,6 +3153,7 @@ impl ThreadView {
     ) -> bool {
         if self.thread.read(cx).foreground_activity() != ForegroundActivity::Idle
             || self.is_loading_contents
+            || self.thread.read(cx).is_reapplying_codex_config()
         {
             return false;
         }
@@ -3158,7 +3182,8 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.validate_queued_entry(id, cx) {
+        if self.thread.read(cx).is_reapplying_codex_config() || !self.validate_queued_entry(id, cx)
+        {
             return;
         }
         let is_generating = self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
@@ -6852,6 +6877,7 @@ impl ThreadView {
 
         let is_generating = self.thread.read(cx).status() == ThreadStatus::Generating;
         let is_unconfirmed = self.thread.read(cx).status() == ThreadStatus::Unconfirmed;
+        let restoring_codex_config = self.thread.read(cx).is_reapplying_codex_config();
 
         if self.is_loading_contents {
             div()
@@ -6886,14 +6912,16 @@ impl ThreadView {
             IconButton::new("send-message", send_icon)
                 .style(ButtonStyle::Filled)
                 .map(|this| {
-                    if is_editor_empty && !is_generating {
+                    if restoring_codex_config || (is_editor_empty && !is_generating) {
                         this.disabled(true).icon_color(Color::Muted)
                     } else {
                         this.icon_color(Color::Accent)
                     }
                 })
                 .tooltip(move |_window, cx| {
-                    if is_editor_empty && !is_generating {
+                    if restoring_codex_config {
+                        Tooltip::text("Restoring Codex session settings…")(_window, cx)
+                    } else if is_editor_empty && !is_generating {
                         Tooltip::for_action("Type to Send", &Chat, cx)
                     } else if is_generating {
                         let focus_handle = focus_handle.clone();
@@ -13464,15 +13492,24 @@ impl ThreadView {
     }
 
     fn render_session_notices(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let notices = self.thread.read(cx).notices();
-        if notices.is_empty() {
-            return None;
-        }
+        let is_codex = self.agent_id.as_ref() == agent_servers::CODEX_ID;
+        let mut notices = self
+            .thread
+            .read(cx)
+            .notices()
+            .iter()
+            .filter(|(_, notice)| {
+                !(is_codex
+                    && notice.severity == acp_v2::NoticeSeverity::Warning
+                    && Self::is_codex_resume_model_warning(&notice.title))
+            })
+            .peekable();
+        notices.peek()?;
 
         Some(
             crate::ui::session_notice_list("session-notices")
                 .debug_selector(|| "session-notices".into())
-                .children(notices.iter().map(|(notice_id, notice)| {
+                .children(notices.map(|(notice_id, notice)| {
                     let notice_id = *notice_id;
                     let thread = self.thread.clone();
                     let focus_handle = self.activation_focus_handle(cx);
@@ -13490,6 +13527,42 @@ impl ThreadView {
                     )
                 }))
                 .into_any_element(),
+        )
+    }
+
+    fn is_codex_resume_model_warning(title: &str) -> bool {
+        let Some((
+            "This session was recorded with model ",
+            recorded_model,
+            " but is resuming with ",
+            resuming_model,
+            ". Consider switching back to ",
+            suggested_model,
+            " as it may affect Codex performance.",
+        )) = title.split('`').collect_tuple()
+        else {
+            return false;
+        };
+
+        !recorded_model.is_empty()
+            && !resuming_model.is_empty()
+            && recorded_model != resuming_model
+            && recorded_model == suggested_model
+    }
+
+    fn render_codex_restore_notice(&self, cx: &App) -> Option<Callout> {
+        let Some(CodexConfigRestore::Failed(fields)) = &self.thread.read(cx).codex_config_restore
+        else {
+            return None;
+        };
+        Some(
+            Callout::new()
+                .severity(Severity::Warning)
+                .icon(IconName::Warning)
+                .description(format!(
+                    "Could not restore Codex session settings for {}.",
+                    fields.join(", ")
+                )),
         )
     }
 
@@ -14495,6 +14568,7 @@ impl Render for ThreadView {
             .when_some(self.render_session_notices(cx), |this, notices| {
                 this.child(notices)
             })
+            .children(self.render_codex_restore_notice(cx))
             .when(self.show_external_source_prompt_warning, |this| {
                 this.child(self.render_external_source_prompt_warning(cx))
             })

@@ -1147,7 +1147,13 @@ impl AcpV2Connection {
                             response.config_options,
                             response.available_commands,
                             cx,
-                        )
+                        )?;
+                        if this.id.as_ref() == crate::CODEX_ID {
+                            thread.update(cx, |thread, _| {
+                                thread.codex_config_restore = Some(acp_thread::CodexConfigRestore::Restored);
+                            });
+                        }
+                        Ok(())
                     })
                 }
             },

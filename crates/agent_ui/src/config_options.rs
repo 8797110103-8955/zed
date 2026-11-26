@@ -1,6 +1,6 @@
 use std::{rc::Rc, sync::Arc};
 
-use acp_thread::AgentSessionConfigOptions;
+use acp_thread::{AcpThread, AgentSessionConfigOptions, CodexConfigRestore};
 use agent_client_protocol::v2::schema as acp;
 use agent_servers::AgentServer;
 
@@ -34,6 +34,74 @@ use crate::{
 };
 
 const PICKER_THRESHOLD: usize = 5;
+
+pub(super) const CODEX_RESTORE_OPTIONS: [&str; 3] = ["model", "reasoning_effort", "mode"];
+
+pub(super) struct CodexConfigEditor {
+    pub thread: gpui::WeakEntity<AcpThread>,
+    pub options: Rc<dyn AgentSessionConfigOptions>,
+}
+
+impl AgentSessionConfigOptions for CodexConfigEditor {
+    fn config_options(&self) -> Vec<acp::SessionConfigOption> {
+        self.options.config_options()
+    }
+
+    fn description_format(&self) -> acp_thread::AgentDescriptionFormat {
+        self.options.description_format()
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.options.is_read_only()
+    }
+
+    fn set_config_option(
+        &self,
+        id: acp::SessionConfigId,
+        value: acp::SessionConfigOptionValue,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<acp::SessionConfigOption>>> {
+        if let Some(thread) = self.thread.upgrade() {
+            thread.update(cx, |thread, _| {
+                if let Some(CodexConfigRestore::Reapplying { manual_change }) =
+                    thread.codex_config_restore.as_mut()
+                {
+                    *manual_change = true;
+                }
+            });
+        }
+        self.options.set_config_option(id, value, cx)
+    }
+
+    fn watch(&self, cx: &mut App) -> Option<watch::Receiver<()>> {
+        self.options.watch(cx)
+    }
+}
+
+pub(super) fn codex_session_config(options: &[acp::SessionConfigOption]) -> [Option<String>; 3] {
+    CODEX_RESTORE_OPTIONS.map(|name| {
+        get_current_select_value(options, &acp::SessionConfigId::new(name))
+            .map(|value| value.0.to_string())
+    })
+}
+
+pub(super) fn codex_restore_target(
+    options: &[acp::SessionConfigOption],
+    name: &str,
+    target: &str,
+) -> anyhow::Result<Option<acp::SessionConfigOptionValue>> {
+    let config_id = acp::SessionConfigId::new(name);
+    let target = acp::SessionConfigValueId::new(target);
+    if get_current_select_value(options, &config_id).as_ref() == Some(&target) {
+        return Ok(None);
+    }
+    let valid = options.iter().any(|option| {
+        option.config_id == config_id
+            && matches!(&option.kind, acp::SessionConfigKind::Select(select) if find_option_name(&select.options, &target).is_some())
+    });
+    anyhow::ensure!(valid, "Saved {name} is unavailable");
+    Ok(Some(acp::SessionConfigOptionValue::id(target)))
+}
 
 fn toolbar_category(
     option: &acp::SessionConfigOption,
@@ -274,7 +342,8 @@ impl ConfigOptionsView {
                     }
                 }
 
-                let current_value = get_current_select_value(&self.config_options, config_id);
+                let current_value =
+                    get_current_select_value(&self.config_options.config_options(), config_id);
                 let current_index = current_value
                     .as_ref()
                     .and_then(|current| options.iter().position(|option| &option.value == current))
@@ -848,7 +917,7 @@ impl ConfigOptionPickerDelegate {
         let all_options = extract_options(&config_options, &config_id);
         let filtered_entries = options_to_picker_entries(&all_options, &favorites);
 
-        let current_value = get_current_select_value(&config_options, &config_id);
+        let current_value = get_current_select_value(&config_options.config_options(), &config_id);
         let selected_index = current_value
             .and_then(|current| {
                 filtered_entries.iter().position(|entry| {
@@ -887,7 +956,7 @@ impl ConfigOptionPickerDelegate {
     }
 
     fn current_value(&self) -> Option<acp::SessionConfigValueId> {
-        get_current_select_value(&self.config_options, &self.config_id)
+        get_current_select_value(&self.config_options.config_options(), &self.config_id)
     }
 }
 
@@ -1188,12 +1257,11 @@ fn extract_options(
 }
 
 fn get_current_select_value(
-    config_options: &Rc<dyn AgentSessionConfigOptions>,
+    config_options: &[acp::SessionConfigOption],
     config_id: &acp::SessionConfigId,
 ) -> Option<acp::SessionConfigValueId> {
     config_options
-        .config_options()
-        .into_iter()
+        .iter()
         .find(|opt| &opt.config_id == config_id)
         .and_then(|opt| match &opt.kind {
             acp::SessionConfigKind::Select(select) => Some(select.current_value.clone()),

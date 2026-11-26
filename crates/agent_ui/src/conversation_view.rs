@@ -1,9 +1,10 @@
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentThreadEntry, AssistantMessage, AssistantMessageChunk,
-    AuthRequired, ElicitationEntryId, ElicitationStatus, ElicitationStore, ForegroundActivity,
-    LoadError, MaxOutputTokensError, MentionUri, PermissionOptionChoice, PermissionOptions,
-    PermissionPattern, PermissionRequest, PermissionRequestId, ProtocolErrorInfo, RetryStatus,
-    SelectedPermissionOutcome, ThreadStatus, ToolCall, ToolCallContent, ToolCallStatus,
+    AuthRequired, CodexConfigRestore, ElicitationEntryId, ElicitationStatus, ElicitationStore,
+    ForegroundActivity, LoadError, MaxOutputTokensError, MentionUri, PermissionOptionChoice,
+    PermissionOptions, PermissionPattern, PermissionRequest, PermissionRequestId,
+    ProtocolErrorInfo, RetryStatus, SelectedPermissionOutcome, ThreadStatus, ToolCall,
+    ToolCallContent, ToolCallStatus,
 };
 use acp_thread::{AgentConnection, Plan, PlanContent};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
@@ -77,6 +78,9 @@ use workspace::{
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
 use super::config_options::ConfigOptionsView;
+use super::config_options::{
+    CODEX_RESTORE_OPTIONS, CodexConfigEditor, codex_restore_target, codex_session_config,
+};
 use super::entry_view_state::EntryViewState;
 use crate::ModeSelector;
 use crate::ModelSelectorPopover;
@@ -1509,6 +1513,7 @@ impl ConversationView {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(thread) => {
+                        this.restore_codex_config(&thread, cx);
                         if let Some(recovery) = &this.recovery {
                             thread.update(cx, |thread, cx| {
                                 thread.set_draft_prompt(Some(recovery.draft.clone()), cx);
@@ -1597,6 +1602,136 @@ impl ConversationView {
             connection: None,
             _request_elicitation_subscription: None,
         }
+    }
+
+    fn restore_codex_config(&self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
+        if !matches!(
+            thread.read(cx).codex_config_restore,
+            Some(CodexConfigRestore::Restored)
+        ) {
+            return;
+        }
+        thread.update(cx, |thread, _| thread.codex_config_restore = None);
+        let session = thread.read(cx);
+        let Some(options) = session
+            .connection()
+            .session_config_options(session.session_id(), cx)
+        else {
+            return;
+        };
+        if options.is_read_only() {
+            return;
+        }
+        let defaults = cx.try_global::<SettingsStore>().and_then(|settings| {
+            settings
+                .get::<project::agent_server_store::AllAgentServersSettings>(None)
+                .get(agent_servers::CODEX_ID)
+        });
+        let Some(defaults) = defaults else { return };
+        let targets = CODEX_RESTORE_OPTIONS.map(|name| {
+            defaults
+                .default_config_option(name)
+                .and_then(|value| value.as_value_id())
+                .map(str::to_owned)
+        });
+        let restored = options.config_options();
+        let current = codex_session_config(&restored);
+        if !targets.iter().zip(&current).any(|(target, current)| {
+            target
+                .as_ref()
+                .is_some_and(|target| Some(target) != current.as_ref())
+        }) {
+            return;
+        }
+        let wait_for_idle = thread.update(cx, |thread, cx| {
+            if matches!(
+                thread.foreground_activity(),
+                ForegroundActivity::Unconfirmed | ForegroundActivity::Unknown
+            ) {
+                return None;
+            }
+            let wait = thread.wait_for_foreground_idle().log_err()?;
+            thread.codex_config_restore = Some(CodexConfigRestore::Reapplying {
+                manual_change: false,
+            });
+            cx.notify();
+            Some(wait)
+        });
+        let Some(wait_for_idle) = wait_for_idle else {
+            return;
+        };
+        let thread = thread.downgrade();
+        cx.spawn(async move |_, cx| {
+            if let Some(wait_for_idle) = wait_for_idle {
+                wait_for_idle
+                    .await
+                    .context("Codex connection closed during restoration")
+                    .log_err();
+            }
+            let mut failures = Vec::new();
+            let mut confirmed = restored;
+            for (index, (name, target)) in
+                CODEX_RESTORE_OPTIONS.into_iter().zip(targets).enumerate()
+            {
+                let Some(target) = target else { continue };
+                let can_continue = thread
+                    .read_with(cx, |thread, _| {
+                        !thread.is_observation_closed()
+                            && thread.foreground_activity() == ForegroundActivity::Idle
+                            && matches!(
+                                thread.codex_config_restore,
+                                Some(CodexConfigRestore::Reapplying {
+                                    manual_change: false
+                                })
+                            )
+                    })
+                    .unwrap_or(false);
+                if !can_continue
+                    || codex_session_config(&confirmed)
+                        != codex_session_config(&options.config_options())
+                {
+                    break;
+                }
+                let value = match codex_restore_target(&confirmed, name, &target) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        log::warn!("Could not restore Codex {name}: {error}");
+                        failures.push(name);
+                        continue;
+                    }
+                };
+                let task = cx.update(|cx| {
+                    options.set_config_option(acp_v2::SessionConfigId::new(name), value, cx)
+                });
+                match task.await {
+                    Ok(updated) => {
+                        if codex_session_config(&updated)[index].as_deref() != Some(target.as_str())
+                        {
+                            failures.push(name);
+                        }
+                        confirmed = updated;
+                    }
+                    Err(error) => {
+                        log::warn!("Could not restore Codex {name}: {error}");
+                        failures.push(name);
+                    }
+                }
+            }
+            if let Some(thread) = thread.upgrade() {
+                thread.update(cx, |thread, cx| {
+                    thread.codex_config_restore =
+                        (!failures.is_empty()).then_some(CodexConfigRestore::Failed(failures));
+                    if thread.foreground_activity() == ForegroundActivity::Idle
+                        && !thread.is_observation_closed()
+                    {
+                        cx.emit(AcpThreadEvent::ActivityConfirmedIdle);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     async fn preflight_auth(
@@ -1768,6 +1903,16 @@ impl ConversationView {
         let model_selector;
         if let Some(config_options) = config_options_provider {
             // Use config options - don't create mode_selector or model_selector
+            let config_options = if agent_id.as_ref() == agent_servers::CODEX_ID
+                && thread.read(cx).parent_session_id().is_none()
+            {
+                Rc::new(CodexConfigEditor {
+                    thread: thread.downgrade(),
+                    options: config_options,
+                }) as Rc<dyn acp_thread::AgentSessionConfigOptions>
+            } else {
+                config_options
+            };
             let agent_server = self.agent.clone();
             let fs = self.project.read(cx).fs().clone();
             config_options_view =
@@ -2054,6 +2199,9 @@ impl ConversationView {
     ) -> bool {
         self.root_thread_view().is_some_and(|active| {
             active.update(cx, |active, cx| {
+                if active.submit_after_codex_restore(window, cx) {
+                    return true;
+                }
                 let is_first_editor_focused = active
                     .message_queue
                     .first()
