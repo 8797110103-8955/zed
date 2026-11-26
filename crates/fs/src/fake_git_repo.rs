@@ -86,6 +86,7 @@ pub struct FakeGitRepositoryState {
     pub commit_data: HashMap<Oid, FakeCommitDataEntry>,
     pub stash_entries: GitStash,
     pub fetches: Arc<Mutex<Vec<FetchOptions>>>,
+    pub fetch_prune_flags: Arc<Mutex<Vec<bool>>>,
     pub commit_template: Option<GitCommitTemplate>,
     pub blob_read_gate: Option<FakeBlobReadGate>,
 }
@@ -118,6 +119,7 @@ impl FakeGitRepositoryState {
             commit_history: Vec::new(),
             stash_entries: Default::default(),
             fetches: Arc::default(),
+            fetch_prune_flags: Arc::default(),
             commit_template: None,
         }
     }
@@ -1364,13 +1366,14 @@ impl GitRepository for FakeGitRepository {
     fn fetch(
         &self,
         fetch_options: FetchOptions,
-        _prune: bool,
+        prune: bool,
         _askpass: Option<AskPassDelegate>,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
         self.with_state_async(true, move |state| {
             state.fetches.lock().push(fetch_options);
+            state.fetch_prune_flags.lock().push(prune);
             Ok(git::repository::RemoteCommandOutput {
                 stdout: String::new(),
                 stderr: String::new(),

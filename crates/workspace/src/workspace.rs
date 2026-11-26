@@ -2973,6 +2973,11 @@ impl Workspace {
     }
 
     pub fn active_folder_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
+        self.active_folder_worktree(cx)
+            .map(|worktree| worktree.read(cx).id())
+    }
+
+    pub fn active_folder_worktree(&self, cx: &App) -> Option<Entity<Worktree>> {
         let project = self.project.read(cx);
         let mut folders = project
             .visible_worktrees(cx)
@@ -2992,7 +2997,7 @@ impl Workspace {
                 folders.swap(0, index);
             }
         }
-        folders.first().map(|worktree| worktree.read(cx).id())
+        folders.into_iter().next()
     }
 
     pub fn is_restoring(&self) -> bool {

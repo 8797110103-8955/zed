@@ -5209,6 +5209,114 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_fetch_uses_git_prune_config_when_zed_pruning_is_disabled(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        for (option, config) in [
+            (FetchOptions::All, "fetch.prune"),
+            (
+                FetchOptions::Remote(Remote {
+                    name: "origin".into(),
+                }),
+                "remote.origin.prune",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let (remote_directory, clone_directory) =
+                clone_remote_repository_with_main_and_feature(directory.path());
+            let repository = RealGitRepository::new(
+                &clone_directory.join(".git"),
+                None,
+                Some("git".into()),
+                cx.executor(),
+            )
+            .expect("open clone");
+            repository.set_trusted(true);
+            git_command(&clone_directory, ["config", config, "true"]);
+            git_command(&clone_directory, ["branch", "feature", "origin/feature"]);
+            git_command(&remote_directory, ["branch", "-D", "feature"]);
+
+            repository
+                .fetch(option, false, None, Arc::default(), cx.to_async())
+                .await
+                .expect("fetch with Git prune config");
+
+            let git = repository.git_binary_in_worktree().expect("git binary");
+            assert!(
+                git.run(&["show-ref", "--verify", "refs/remotes/origin/feature"])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                git.run(&["show-ref", "--verify", "refs/heads/feature"])
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_fetch_can_prune_while_unshallowing(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (remote_directory, _) = clone_remote_repository_with_main_and_feature(directory.path());
+        let shallow_directory = directory.path().join("shallow");
+        git_command(
+            directory.path(),
+            [
+                OsString::from("clone"),
+                OsString::from("--no-local"),
+                OsString::from("--depth=1"),
+                OsString::from("--no-single-branch"),
+                remote_directory.as_os_str().into(),
+                shallow_directory.as_os_str().into(),
+            ],
+        );
+        let repository = RealGitRepository::new(
+            &shallow_directory.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .expect("open shallow clone");
+        repository.set_trusted(true);
+        git_command(&shallow_directory, ["branch", "feature", "origin/feature"]);
+        git_command(&remote_directory, ["branch", "-D", "feature"]);
+
+        repository
+            .fetch(
+                FetchOptions::Unshallow,
+                true,
+                None,
+                Arc::default(),
+                cx.to_async(),
+            )
+            .await
+            .expect("fetch missing history with pruning");
+
+        let git = repository.git_binary_in_worktree().expect("git binary");
+        assert_eq!(
+            git.run(&["rev-parse", "--is-shallow-repository"])
+                .await
+                .expect("read shallow state"),
+            "false"
+        );
+        assert!(
+            git.run(&["show-ref", "--verify", "refs/remotes/origin/feature"])
+                .await
+                .is_err()
+        );
+        assert!(
+            git.run(&["show-ref", "--verify", "refs/heads/feature"])
+                .await
+                .is_ok()
+        );
+    }
+
+    #[gpui::test]
     async fn test_create_branch_from_tracks_same_name_and_can_change_upstream(
         cx: &mut TestAppContext,
     ) {
@@ -5264,6 +5372,43 @@ mod tests {
             git.run(&["rev-parse", "--symbolic-full-name", "@{upstream}"])
                 .await
                 .is_err()
+        );
+
+        let selected_commit = git
+            .run(&["rev-parse", "refs/remotes/origin/feature"])
+            .await
+            .expect("read selected commit");
+        git.run(&["switch", "--detach", "refs/remotes/origin/main"])
+            .await
+            .expect("detach at main");
+        // Without a configured remote, Git cannot set the otherwise matching ref as upstream.
+        git.run(&[
+            "update-ref",
+            "refs/remotes/unconfigured/partial",
+            &selected_commit,
+        ])
+        .await
+        .expect("create an unconfigured remote-tracking ref");
+        let error = repository
+            .create_branch("partial".into(), Some(selected_commit.clone()))
+            .await
+            .expect_err("upstream configuration should fail after creating the branch");
+        assert!(
+            error
+                .to_string()
+                .contains("Created partial, but could not set")
+        );
+        assert_eq!(
+            git.run(&["branch", "--show-current"])
+                .await
+                .expect("read current branch"),
+            "partial",
+        );
+        assert_eq!(
+            git.run(&["rev-parse", "HEAD"])
+                .await
+                .expect("read new branch commit"),
+            selected_commit,
         );
     }
 

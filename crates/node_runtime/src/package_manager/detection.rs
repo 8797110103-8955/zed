@@ -14,6 +14,19 @@ use std::{
 static PROJECT_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedProjectPackageManager>>> =
     LazyLock::new(Mutex::default);
 
+const PACKAGE_MANAGER_FILES: &[(&str, PackageManager)] = &[
+    ("pnpm-workspace.yaml", PackageManager::Pnpm),
+    ("pnpm-lock.yaml", PackageManager::Pnpm),
+    (".pnpmfile.cjs", PackageManager::Pnpm),
+    ("bun.lock", PackageManager::Bun),
+    ("bun.lockb", PackageManager::Bun),
+    ("bunfig.toml", PackageManager::Bun),
+    ("package-lock.json", PackageManager::Npm),
+    ("npm-shrinkwrap.json", PackageManager::Npm),
+    ("yarn.lock", PackageManager::Yarn),
+    (".yarnrc.yml", PackageManager::Yarn),
+];
+
 #[derive(Clone)]
 struct CachedProjectPackageManager {
     manager: PackageManager,
@@ -66,18 +79,7 @@ where
                 return Ok(manager);
             }
         }
-        for (name, manager) in [
-            ("pnpm-workspace.yaml", PackageManager::Pnpm),
-            ("pnpm-lock.yaml", PackageManager::Pnpm),
-            (".pnpmfile.cjs", PackageManager::Pnpm),
-            ("bun.lock", PackageManager::Bun),
-            ("bun.lockb", PackageManager::Bun),
-            ("bunfig.toml", PackageManager::Bun),
-            ("package-lock.json", PackageManager::Npm),
-            ("npm-shrinkwrap.json", PackageManager::Npm),
-            ("yarn.lock", PackageManager::Yarn),
-            (".yarnrc.yml", PackageManager::Yarn),
-        ] {
+        for &(name, manager) in PACKAGE_MANAGER_FILES {
             if is_file(directory.join(name)).await {
                 return Ok(manager);
             }
@@ -132,24 +134,17 @@ pub(super) async fn cached_project_package_manager(
 
     let mut files = Vec::new();
     for directory in directory.ancestors() {
-        for name in [
-            "package.json",
-            "pnpm-workspace.yaml",
-            "pnpm-lock.yaml",
-            ".pnpmfile.cjs",
-            "bun.lock",
-            "bun.lockb",
-            "bunfig.toml",
-            "package-lock.json",
-            "npm-shrinkwrap.json",
-            "yarn.lock",
-            ".yarnrc.yml",
+        let settings_files = [
             ".vscode/settings.json",
             ".vscode/tasks.json",
             ".vscode/launch.json",
             ".zed/settings.json",
             ".git",
-        ] {
+        ];
+        let project_files = std::iter::once("package.json")
+            .chain(PACKAGE_MANAGER_FILES.iter().map(|&(name, _)| name))
+            .chain(settings_files);
+        for name in project_files {
             let path = directory.join(name);
             let stamp = package_manager_file_stamp(&path).await?;
             files.push((path, stamp));

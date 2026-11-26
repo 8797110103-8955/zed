@@ -40,7 +40,7 @@ use project::{
 };
 use settings::Settings;
 use theme_settings::ThemeSettings;
-use ui::{Tooltip, prelude::*};
+use ui::{Tooltip, prelude::*, utils::fit_image_scale};
 use util::{ResultExt as _, paths::PathExt};
 use workspace::{
     ItemId, ItemSettings, Pane, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
@@ -247,11 +247,11 @@ impl ImageView {
 
     fn compute_fit_to_view_zoom(container_bounds: Bounds<Pixels>, image_size: (u32, u32)) -> f32 {
         let (image_width, image_height) = image_size;
-        let container_width: f32 = container_bounds.size.width.into();
-        let container_height: f32 = container_bounds.size.height.into();
-        let scale_x = container_width / image_width as f32;
-        let scale_y = container_height / image_height as f32;
-        scale_x.min(scale_y).min(1.0)
+        fit_image_scale(
+            container_bounds.size,
+            size(image_width as f32, image_height as f32),
+            1.0,
+        )
     }
 
     fn zoom_to_actual_size(
@@ -1201,6 +1201,54 @@ mod tests {
 
     fn image_is_cached(image: &Arc<gpui::Image>, cx: &VisualTestContext) -> bool {
         cx.read(|cx| image.is_asset_cached(cx))
+    }
+
+    #[gpui::test]
+    async fn test_image_zoom_preserves_cursor_anchor_and_fit_limit(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (project, image_item) = open_test_image(cx).await;
+        let source_id = cx.read(|cx| image_item.read(cx).image.id());
+        let (image_view, cx) =
+            cx.add_window_view(|window, cx| ImageView::new(image_item, project, window, cx));
+        cx.run_until_parked();
+        draw_window(cx);
+        assert_eq!(displayed_source_id(&image_view, cx), Some(source_id));
+
+        image_view.update_in(cx, |view, window, cx| {
+            view.fit_to_view(&FitToView, window, cx);
+            assert_eq!(view.zoom_level, 1.0);
+            let bounds = view.container_bounds.expect("laid-out image view");
+            let anchor = bounds.center() + point(px(32.), px(16.));
+            let image_point = (anchor - bounds.center() - view.pan_offset) / view.zoom_level;
+            view.set_zoom(2.0, Some(anchor), cx);
+            assert_eq!(
+                (anchor - bounds.center() - view.pan_offset) / view.zoom_level,
+                image_point
+            );
+
+            let pan_offset = view.pan_offset;
+            let drag_delta = point(px(18.), px(-5.));
+            view.last_mouse_position = Some(anchor);
+            view.handle_mouse_move(
+                &MouseMoveEvent {
+                    position: anchor + drag_delta,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                },
+                window,
+                cx,
+            );
+            assert_eq!(view.pan_offset, pan_offset + drag_delta);
+        });
+
+        cx.simulate_resize(size(px(200.), px(120.)));
+        draw_window(cx);
+        image_view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.zoom_level, 2.0);
+            view.fit_to_view(&FitToView, window, cx);
+            assert_eq!(view.zoom_level, 1.0);
+            assert_eq!(view.pan_offset, Point::default());
+        });
     }
 
     #[gpui::test]

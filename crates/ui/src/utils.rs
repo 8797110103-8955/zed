@@ -1,6 +1,6 @@
 //! UI-related utilities
 
-use gpui::App;
+use gpui::{App, Pixels, Size};
 use theme::ActiveTheme;
 
 mod apca_contrast;
@@ -22,6 +22,24 @@ pub use format_distance::*;
 pub use retained_focus::*;
 pub use search_input::*;
 pub use with_rem_size::*;
+
+pub fn fit_image_scale(viewport: Size<Pixels>, image: Size<f32>, maximum_scale: f32) -> f32 {
+    let width_scale = f32::from(viewport.width) / image.width;
+    let height_scale = f32::from(viewport.height) / image.height;
+    width_scale.min(height_scale).min(maximum_scale)
+}
+
+#[cfg(test)]
+#[test]
+fn image_fit_respects_the_viewport_and_scale_limit() {
+    use gpui::{px, size};
+
+    let viewport = size(px(300.), px(100.));
+    let narrow_image = size(0.25, 20.);
+    assert_eq!(fit_image_scale(viewport, narrow_image, f32::INFINITY), 5.0);
+    assert_eq!(fit_image_scale(viewport, narrow_image, 1.0), 1.0);
+    assert_eq!(fit_image_scale(viewport, size(600., 100.), 1.0), 0.5);
+}
 
 /// Returns true if the current theme is light or vibrant light.
 pub fn is_light(cx: &mut App) -> bool {

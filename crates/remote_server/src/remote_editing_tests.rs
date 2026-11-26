@@ -283,6 +283,80 @@ async fn test_remote_auto_fetch(cx: &mut TestAppContext, server_cx: &mut TestApp
 }
 
 #[gpui::test]
+async fn test_remote_fetch_uses_host_prune_setting(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use askpass::AskPassDelegate;
+    use git::repository::{FetchOptions, Remote};
+
+    cx.update(|cx| {
+        let mut store = SettingsStore::test(cx);
+        store
+            .set_user_settings(r#"{"git":{"prune_on_fetch":true}}"#, cx)
+            .expect("valid client settings");
+        cx.set_global(store);
+    });
+    server_cx.update(|cx| {
+        project::trusted_worktrees::init(Default::default(), cx);
+    });
+    let fs = FakeFs::new(server_cx.executor());
+    let dot_git = Path::new(path!("/project/.git"));
+    fs.insert_tree(
+        path!("/project"),
+        json!({".git": {}, "README.md": "project"}),
+    )
+    .await;
+    fs.insert_branches(dot_git, &["main", "origin/main"]);
+    fs.set_remote_for_repo(dot_git, "origin", "https://example.com/repo.git");
+    let (fetches, prune_flags) = fs
+        .with_git_state(dot_git, false, |state| {
+            (state.fetches.clone(), state.fetch_prune_flags.clone())
+        })
+        .expect("repository exists");
+    let (project, _headless) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/project"), true, cx)
+        })
+        .await
+        .expect("open remote project");
+    cx.run_until_parked();
+    let repository = project
+        .read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().cloned()
+        })
+        .expect("client repository exists");
+
+    let remote = FetchOptions::Remote(Remote {
+        name: "origin".into(),
+    });
+    for (host_setting, options) in [(false, remote.clone()), (true, FetchOptions::Unshallow)] {
+        server_cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_server_settings(
+                        &json!({"git": {"prune_on_fetch": host_setting}}).to_string(),
+                        cx,
+                    )
+                    .expect("valid host settings");
+            });
+        });
+        let askpass = AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {});
+        repository
+            .update(cx, |repository, cx| {
+                repository.fetch(options, Some(askpass), cx)
+            })
+            .await
+            .expect("fetch reply")
+            .expect("remote fetch completes");
+    }
+
+    assert_eq!(*fetches.lock(), [remote, FetchOptions::Unshallow]);
+    assert_eq!(*prune_flags.lock(), [false, true]);
+}
+
+#[gpui::test]
 async fn test_basic_remote_editing(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(

@@ -1,6 +1,6 @@
-use language::language_settings::LanguageSettings;
+use language::Buffer;
 use text::BufferId;
-use ui::{Context, Window};
+use ui::{App, Context, Window};
 
 use crate::{Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT, LspDataKind};
 
@@ -21,10 +21,7 @@ impl Editor {
         let buffers_to_query = self
             .lsp_data_buffers(for_buffer, cx)
             .into_iter()
-            .filter(|buffer| {
-                let settings = LanguageSettings::for_buffer(buffer.read(cx), cx);
-                settings.enable_language_server && settings.document_folding_ranges.enabled()
-            })
+            .filter(|buffer| lsp_folding_enabled(buffer.read(cx), cx))
             .collect();
         self.spawn_lsp_data_tasks(
             LspDataKind::FoldingRanges,
@@ -82,11 +79,7 @@ impl Editor {
             .read(cx)
             .all_buffers()
             .into_iter()
-            .filter(|buffer| {
-                let buffer = buffer.read(cx);
-                let settings = LanguageSettings::for_buffer(&buffer, cx);
-                !settings.enable_language_server || !settings.document_folding_ranges.enabled()
-            })
+            .filter(|buffer| !lsp_folding_enabled(buffer.read(cx), cx))
             .map(|buffer| buffer.read(cx).remote_id())
             .collect::<Vec<_>>();
 
@@ -101,6 +94,12 @@ impl Editor {
 
         self.refresh_folding_ranges(None, window, cx);
     }
+}
+
+fn lsp_folding_enabled(buffer: &Buffer, cx: &App) -> bool {
+    Editor::buffer_lsp_feature_enabled(buffer, cx, |settings| {
+        settings.document_folding_ranges.enabled()
+    })
 }
 
 #[cfg(test)]

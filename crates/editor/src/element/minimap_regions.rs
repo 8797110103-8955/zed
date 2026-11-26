@@ -12,6 +12,7 @@ use crate::{
 };
 
 const REGION_TITLE_HEIGHT: Pixels = px(20.);
+const REGION_PARSE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 struct RegionParser {
@@ -122,9 +123,7 @@ impl MinimapRegions {
         let text = buffer.as_rope().clone();
         self.task = Some(cx.spawn(async move |editor, cx| {
             if edited {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
+                cx.background_executor().timer(REGION_PARSE_DEBOUNCE).await;
             }
             let markers = cx
                 .background_spawn(async move {
@@ -206,6 +205,7 @@ fn render_region_title(title: SharedString, top: Pixels, cx: &App) -> impl IntoE
         .left_0()
         .right_0()
         .h(REGION_TITLE_HEIGHT)
+        .debug_selector(|| "minimap-region-row".into())
         .flex()
         .items_center()
         .gap(px(4.))
@@ -270,7 +270,7 @@ mod tests {
             parser.finish(),
             vec![
                 region(1, "Outer area"),
-                region(2, "Region A"),
+                region(2, "REGION A"),
                 region(7, "Compatibility"),
                 region(9, "VB title"),
                 region(11, "CSS"),
@@ -305,7 +305,36 @@ mod tests {
         let title = cx
             .debug_bounds("minimap-region-title")
             .expect("title should be drawn directly in the minimap");
-        assert!(title.size.height >= px(12.));
+        let title_row = cx
+            .debug_bounds("minimap-region-row")
+            .expect("title row should be drawn directly in the minimap");
+        assert_eq!(title_row.size.height, REGION_TITLE_HEIGHT);
+        assert!(title.size.width > px(0.) && title.size.height > px(0.));
+
+        let buffer = editor.read_with(cx, |editor, cx| {
+            editor
+                .buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("singleton buffer")
+        });
+        for title in ["Intermediate pipeline", "Final pipeline"] {
+            buffer.update(cx, |buffer, cx| {
+                let length = buffer.snapshot().len();
+                buffer.edit(
+                    [(
+                        0..length,
+                        format!("#pragma region {title}\n#pragma endregion"),
+                    )],
+                    None,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+        }
+        cx.executor().advance_clock(REGION_PARSE_DEBOUNCE);
+        cx.run_until_parked();
+
         editor.read_with(cx, |editor, cx| {
             let minimap = editor
                 .minimap()
@@ -320,7 +349,7 @@ mod tests {
                     .markers
                     .first()
                     .and_then(|marker| marker.title.as_deref()),
-                Some("Render pipeline")
+                Some("Final pipeline")
             );
         });
     }

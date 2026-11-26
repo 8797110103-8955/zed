@@ -4,9 +4,8 @@ use std::sync::Arc;
 use cloud_api_types::ExtensionMetadata;
 use extension_host::ExtensionStore;
 use fs::Fs;
-use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{App, DismissEvent, Entity, EventEmitter, Focusable, Task, WeakEntity, prelude::*};
-use picker::{Picker, PickerDelegate};
+use picker::{FuzzyVersionMatches, Picker, PickerDelegate};
 use release_channel::ReleaseChannel;
 use semver::Version;
 use settings::update_settings_file;
@@ -49,8 +48,7 @@ pub struct ExtensionVersionSelectorDelegate {
     fs: Arc<dyn Fs>,
     selector: WeakEntity<ExtensionVersionSelector>,
     extension_versions: Vec<ExtensionMetadata>,
-    selected_index: usize,
-    matches: Vec<StringMatch>,
+    matches: FuzzyVersionMatches,
 }
 
 impl ExtensionVersionSelectorDelegate {
@@ -69,21 +67,16 @@ impl ExtensionVersionSelectorDelegate {
             }
         });
 
-        let matches = extension_versions
-            .iter()
-            .map(|extension| StringMatch {
-                candidate_id: 0,
-                score: 0.0,
-                positions: Default::default(),
-                string: format!("v{}", extension.manifest.version),
-            })
-            .collect();
+        let matches = FuzzyVersionMatches::new(
+            extension_versions
+                .iter()
+                .map(|extension| format!("v{}", extension.manifest.version)),
+        );
 
         Self {
             fs,
             selector,
             extension_versions,
-            selected_index: 0,
             matches,
         }
     }
@@ -101,11 +94,11 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
     }
 
     fn match_count(&self) -> usize {
-        self.matches.len()
+        self.matches.matches().len()
     }
 
     fn selected_index(&self) -> usize {
-        self.selected_index
+        self.matches.selected_index()
     }
 
     fn set_selected_index(
@@ -114,7 +107,7 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) {
-        self.selected_index = ix;
+        self.matches.set_selected_index(ix);
     }
 
     fn update_matches(
@@ -123,60 +116,26 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Task<()> {
-        let background_executor = cx.background_executor().clone();
-        let candidates = self
-            .extension_versions
-            .iter()
-            .enumerate()
-            .map(|(id, extension)| {
-                StringMatchCandidate::new(id, &format!("v{}", extension.manifest.version))
-            })
-            .collect::<Vec<_>>();
+        let matches = self.matches.filter(query, cx.background_executor().clone());
 
         cx.spawn_in(window, async move |this, cx| {
-            let matches = if query.is_empty() {
-                candidates
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, candidate)| StringMatch {
-                        candidate_id: index,
-                        string: candidate.string,
-                        positions: Vec::new(),
-                        score: 0.0,
-                    })
-                    .collect()
-            } else {
-                match_strings(
-                    &candidates,
-                    &query,
-                    false,
-                    true,
-                    100,
-                    &Default::default(),
-                    background_executor,
-                )
-                .await
-            };
-
+            let matches = matches.await;
             this.update(cx, |this, _cx| {
-                this.delegate.matches = matches;
-                this.delegate.selected_index = this
-                    .delegate
-                    .selected_index
-                    .min(this.delegate.matches.len().saturating_sub(1));
+                this.delegate.matches.replace_matches(matches);
             })
             .log_err();
         })
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if self.matches.is_empty() {
+        let Some(extension_version) = self
+            .matches
+            .selected_match()
+            .and_then(|version_match| self.extension_versions.get(version_match.candidate_id))
+        else {
             self.dismissed(window, cx);
             return;
-        }
-
-        let candidate_id = self.matches[self.selected_index].candidate_id;
-        let extension_version = &self.extension_versions[candidate_id];
+        };
 
         if !extension_host::is_version_compatible(ReleaseChannel::global(cx), extension_version) {
             return;
@@ -212,8 +171,8 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
         _: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
-        let version_match = &self.matches.get(ix)?;
-        let extension_version = &self.extension_versions.get(version_match.candidate_id)?;
+        let version_match = self.matches.matches().get(ix)?;
+        let extension_version = self.extension_versions.get(version_match.candidate_id)?;
 
         let is_version_compatible =
             extension_host::is_version_compatible(ReleaseChannel::global(cx), extension_version);
@@ -249,5 +208,66 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
                         ),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use serde_json::json;
+    use settings::SettingsStore;
+
+    use super::*;
+
+    #[gpui::test]
+    fn test_extension_version_picker_rejects_incompatible_versions(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            release_channel::init_test(Version::new(1, 0, 0), ReleaseChannel::Stable, cx);
+        });
+        let incompatible: ExtensionMetadata = serde_json::from_value(json!({
+            "id": "test-extension",
+            "name": "Test Extension",
+            "version": "2.0.0",
+            "authors": [],
+            "repository": "https://example.test/extension",
+            "schema_version": i32::MAX,
+            "published_at": "2026-01-01T00:00:00Z",
+            "download_count": 0,
+        }))
+        .expect("valid metadata with unsupported schema");
+        let (selector, cx) = cx.add_window_view(|window, cx| {
+            let delegate =
+                ExtensionVersionSelectorDelegate::new(fs, cx.weak_entity(), vec![incompatible]);
+            ExtensionVersionSelector::new(delegate, window, cx)
+        });
+        let picker = selector.read_with(cx, |selector, _| selector.picker.clone());
+        let dismissed = Rc::new(Cell::new(false));
+        let _subscription = cx.update(|_, cx| {
+            let dismissed = dismissed.clone();
+            cx.subscribe(&selector, move |_, _: &DismissEvent, _| dismissed.set(true))
+        });
+        cx.run_until_parked();
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.confirm(false, window, cx);
+        });
+        assert!(!dismissed.get());
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_query("missing", window, cx)
+        });
+        cx.run_until_parked();
+        picker.update_in(cx, |picker, window, cx| {
+            assert_eq!(picker.delegate.match_count(), 0);
+            picker.delegate.confirm(false, window, cx);
+        });
+        assert!(dismissed.get());
     }
 }

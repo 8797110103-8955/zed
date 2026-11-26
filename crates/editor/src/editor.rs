@@ -11396,6 +11396,15 @@ impl Editor {
         self.enable_lsp_data && self.mode().is_full()
     }
 
+    fn buffer_lsp_feature_enabled(
+        buffer: &Buffer,
+        cx: &App,
+        enabled: impl FnOnce(&LanguageSettings) -> bool,
+    ) -> bool {
+        let settings = LanguageSettings::for_buffer(buffer, cx);
+        settings.enable_language_server && enabled(&settings)
+    }
+
     fn update_lsp_data(
         &mut self,
         for_buffer: Option<BufferId>,

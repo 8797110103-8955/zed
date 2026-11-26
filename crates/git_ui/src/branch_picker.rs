@@ -1617,17 +1617,14 @@ impl BranchListDelegate {
         };
         let new_branch_name = normalize_branch_name(&new_branch_name);
         let base_branch = from_branch.map(|b| b.to_string());
-        cx.spawn(async move |_, cx| {
-            repo.update(cx, |repo, _| {
-                repo.create_branch(new_branch_name, base_branch)
-            })
-            .await??;
-
-            Ok(())
-        })
-        .detach_and_prompt_err("Failed to create branch", window, cx, |e, _, _| {
-            Some(e.to_string())
-        });
+        crate::git_panel::create_branch(
+            repo,
+            async move |_| Ok(Some(new_branch_name)),
+            base_branch,
+            true,
+            window,
+            cx,
+        );
         cx.emit(DismissEvent);
     }
 

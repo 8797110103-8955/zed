@@ -20,7 +20,7 @@ use gpui::{
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
 use project::ProjectPath;
-use ui::{Tooltip, prelude::*};
+use ui::{Tooltip, prelude::*, utils::fit_image_scale};
 use workspace::item::{Item, ItemHandle};
 use workspace::notifications::NotifyResultExt;
 use workspace::{Pane, Workspace};
@@ -80,6 +80,113 @@ pub enum SvgPreviewMode {
     Default,
     /// The preview will "follow" the last active editor of an SVG file.
     Follow,
+}
+
+#[cfg(test)]
+mod tests {
+    use fs::{FakeFs, Fs};
+    use gpui::TestAppContext;
+    use project::Project;
+    use settings::SettingsStore;
+
+    use super::*;
+
+    #[gpui::test]
+    async fn test_svg_preview_zoom_resize_and_return_to_source(cx: &mut TestAppContext) {
+        const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120"><rect width="160" height="120" fill="blue"/></svg>"#;
+
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let root = Path::new("/project");
+        fs.create_dir(root).await.expect("create project directory");
+        let path = root.join("shape.svg");
+        fs.insert_file(&path, SVG.as_bytes().to_vec()).await;
+        let project = Project::test(fs, [root], cx).await;
+        let project_path = project
+            .read_with(cx, |project, cx| project.find_project_path(&path, cx))
+            .expect("SVG project path");
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        cx.simulate_resize(size(px(800.), px(600.)));
+        workspace.update_in(cx, |workspace, window, cx| {
+            SvgPreviewView::open_for_project_path(project_path, workspace, window, cx);
+        });
+        cx.run_until_parked();
+        let view = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item(cx)?.downcast::<SvgPreviewView>()
+            })
+            .expect("SVG opens as a preview");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+
+        let (initial_fit, panned_offset) = view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.image_size(), Some(size(160.0, 120.0)));
+            let bounds = view.container_bounds.expect("laid-out SVG preview");
+            let fit = view.current_fit_zoom().expect("initial SVG scale");
+            assert!(fit > 1.0);
+            let anchor_offset = point(px(32.), px(16.));
+            let anchor = bounds.center() + anchor_offset;
+            view.zoom_at(2.0, anchor, cx);
+            assert_eq!(view.relative_zoom, 2.0);
+            let unscaled_offset = point(
+                f32::from(anchor_offset.x) / fit,
+                f32::from(anchor_offset.y) / fit,
+            );
+            assert_eq!(
+                view.pan_offset,
+                point(-unscaled_offset.x, -unscaled_offset.y)
+            );
+
+            let starting_pan = view.pan_offset;
+            let drag_delta = point(px(24.), px(-12.));
+            view.last_mouse_position = Some(anchor);
+            view.handle_mouse_move(
+                &MouseMoveEvent {
+                    position: anchor + drag_delta,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                view.pan_offset,
+                starting_pan + point(f32::from(drag_delta.x) / fit, f32::from(drag_delta.y) / fit)
+            );
+            view.last_mouse_position = None;
+            (fit, view.pan_offset)
+        });
+
+        cx.simulate_resize(size(px(400.), px(300.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.current_fit_zoom().expect("resize fit") < initial_fit);
+            assert_eq!(view.relative_zoom, 2.0);
+            assert_eq!(view.pan_offset, panned_offset);
+            view.show_source(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let editor = workspace
+                .active_item(cx)
+                .and_then(|item| item.downcast::<Editor>())
+                .expect("source editor replaces preview");
+            let buffer = editor
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("same source buffer");
+            assert_eq!(buffer.read(cx).text(), SVG);
+        });
+    }
 }
 
 impl SvgPreviewView {
@@ -383,9 +490,7 @@ impl SvgPreviewView {
     }
 
     fn fit_zoom(container_bounds: Bounds<Pixels>, image_size: Size<f32>) -> f32 {
-        let container_width: f32 = container_bounds.size.width.into();
-        let container_height: f32 = container_bounds.size.height.into();
-        (container_width / image_size.width).min(container_height / image_size.height)
+        fit_image_scale(container_bounds.size, image_size, f32::INFINITY)
     }
 
     fn current_fit_zoom(&self) -> Option<f32> {

@@ -475,3 +475,143 @@ impl LspAdapterDelegate for ManagedServerDelegate {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AsyncApp, TestAppContext};
+    use language::{LanguageServerSource, LspInstaller};
+    use lsp::LanguageServerBinaryOptions;
+
+    use super::*;
+
+    struct TestManagedAdapter;
+
+    impl LspAdapter for TestManagedAdapter {
+        fn name(&self) -> LanguageServerName {
+            LanguageServerName("managed-test-server".into())
+        }
+
+        fn server_source(&self) -> Option<LanguageServerSource> {
+            Some(LanguageServerSource {
+                kind: LanguageServerSourceKind::PackageManager {
+                    package: "managed-test-server",
+                    version_requirement: None,
+                },
+                description: "",
+                author: "",
+                homepage: "",
+            })
+        }
+    }
+
+    impl LspInstaller for TestManagedAdapter {
+        type BinaryVersion = ();
+
+        async fn fetch_latest_server_version(
+            &self,
+            _: &Arc<dyn LspAdapterDelegate>,
+            _: bool,
+            _: &mut AsyncApp,
+        ) -> Result<()> {
+            bail!("unexpected server version query")
+        }
+
+        fn fetch_server_binary(
+            &self,
+            _: (),
+            _: PathBuf,
+            _: &Arc<dyn LspAdapterDelegate>,
+        ) -> impl Future<Output = Result<LanguageServerBinary>> + Send + use<> {
+            async { bail!("unexpected server download") }
+        }
+
+        async fn cached_server_binary(
+            &self,
+            container: PathBuf,
+            _: &dyn LspAdapterDelegate,
+        ) -> Option<LanguageServerBinary> {
+            let path = container.join("installed-server");
+            smol::fs::metadata(&path).await.ok()?;
+            Some(LanguageServerBinary {
+                path,
+                arguments: Vec::new(),
+                env: None,
+            })
+        }
+    }
+
+    #[gpui::test]
+    async fn test_managed_server_pin_and_uninstall_control_startup(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().expect("managed test installation directory");
+        let mut registry = LanguageRegistry::new(cx.executor());
+        registry.set_language_server_download_dir(directory.path());
+        let status_source = cx.update(|cx| cx.new(|_| ()));
+        let delegate: Arc<dyn LspAdapterDelegate> = Arc::new(ManagedServerDelegate {
+            registry: Arc::new(registry),
+            http_client: http_client::FakeHttpClient::with_404_response(),
+            background_executor: cx.executor(),
+            status_source_id: status_source.entity_id(),
+            root: directory.path().to_path_buf(),
+        });
+        let adapter = CachedLspAdapter::new(Arc::new(TestManagedAdapter));
+        let container = delegate
+            .language_server_download_dir(&adapter.name)
+            .await
+            .expect("server container");
+        let installed_path = container.join("installed-server");
+        smol::fs::write(&installed_path, "installed version 2.0.0")
+            .await
+            .expect("install fixture");
+        smol::fs::write(language_server_pinned_version(&container), "2.0.0")
+            .await
+            .expect("pin installed version");
+
+        let resolve_binary = async || {
+            adapter
+                .adapter
+                .clone()
+                .get_language_server_command(
+                    delegate.clone(),
+                    None,
+                    LanguageServerBinaryOptions {
+                        allow_path_lookup: false,
+                        allow_binary_download: true,
+                        pre_release: false,
+                    },
+                    adapter.lock_binary().await,
+                    cx.to_async(),
+                )
+                .await
+        };
+        let (binary, download) = resolve_binary().await;
+        assert_eq!(
+            binary.expect("start the pinned server").path,
+            installed_path
+        );
+        assert!(
+            download.is_none(),
+            "a pinned server should never queue an update"
+        );
+
+        smol::fs::write(language_server_uninstalled_marker(&container), "")
+            .await
+            .expect("mark server uninstalled");
+        smol::fs::remove_dir_all(&container)
+            .await
+            .expect("remove installed files");
+        let (binary, download) = resolve_binary().await;
+        let failure = binary
+            .err()
+            .expect("even a previously cached server cannot start");
+        assert!(
+            failure
+                .to_string()
+                .contains("language server is uninstalled")
+        );
+        assert!(
+            download.is_none(),
+            "an uninstalled server should never queue a download"
+        );
+    }
+}

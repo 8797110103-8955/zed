@@ -6,7 +6,7 @@ use gpui::{
     App, Context, FontStyle, FontWeight, HighlightStyle, StrikethroughStyle, Task, UnderlineStyle,
 };
 use itertools::Itertools;
-use language::{LanguageName, LanguageRegistry, language_settings::LanguageSettings};
+use language::{Buffer, LanguageName, LanguageRegistry};
 use lsp::LanguageServerId;
 use project::{
     LspStore,
@@ -156,10 +156,9 @@ impl Editor {
             .chain(buffer_id.and_then(|buffer_id| self.buffer.read(cx).buffer(buffer_id)))
             .filter_map(|editor_buffer| {
                 let editor_buffer_id = editor_buffer.read(cx).remote_id();
-                if self.registered_buffers.contains_key(&editor_buffer_id) && {
-                    let settings = LanguageSettings::for_buffer(editor_buffer.read(cx), cx);
-                    settings.enable_language_server && settings.semantic_tokens.enabled()
-                } {
+                if self.registered_buffers.contains_key(&editor_buffer_id)
+                    && semantic_tokens_enabled(editor_buffer.read(cx), cx)
+                {
                     Some((editor_buffer_id, editor_buffer))
                 } else {
                     None
@@ -179,11 +178,7 @@ impl Editor {
                     .buffer
                     .read(cx)
                     .buffer(*buffer_id)
-                    .is_some_and(|buffer| {
-                        let buffer = buffer.read(cx);
-                        let settings = LanguageSettings::for_buffer(&buffer, cx);
-                        settings.enable_language_server && settings.semantic_tokens.enabled()
-                    })
+                    .is_some_and(|buffer| semantic_tokens_enabled(buffer.read(cx), cx))
             })
             .collect::<Vec<_>>()
         {
@@ -338,6 +333,10 @@ impl Editor {
                 .ok();
         });
     }
+}
+
+fn semantic_tokens_enabled(buffer: &Buffer, cx: &App) -> bool {
+    Editor::buffer_lsp_feature_enabled(buffer, cx, |settings| settings.semantic_tokens.enabled())
 }
 
 fn server_precedences(

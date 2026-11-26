@@ -6,7 +6,6 @@ use git::{
 };
 use gpui::SharedString;
 use ui::IconName;
-use url::Url;
 
 /// A browser link to a commit, derived from one or more Git remotes that
 /// resolve to the same web origin and group.
@@ -59,12 +58,13 @@ fn remote_web_link(
     provider_registry: Arc<GitHostingProviderRegistry>,
 ) -> Option<((String, String), RemoteWebLink)> {
     let remote = remote_url.parse::<RemoteUrl>().ok()?;
-    let scheme = match remote.scheme() {
-        "http" | "https" => remote.scheme(),
-        "ssh" | "git" | "git+ssh" | "ssh+git" | "ftp" | "ftps" => "http",
-        _ => return None,
-    };
-    let host = remote.host_str()?.to_lowercase();
+    if !matches!(
+        remote.scheme(),
+        "http" | "https" | "ssh" | "git" | "git+ssh" | "ssh+git" | "ftp" | "ftps"
+    ) {
+        return None;
+    }
+    let host = remote.host_str()?;
 
     if let Some((provider, parsed)) = parse_git_remote_url(provider_registry, remote_url) {
         let provider_name = provider.name();
@@ -94,11 +94,7 @@ fn remote_web_link(
     if group.is_empty() || repo.is_empty() {
         return None;
     }
-    let mut url = Url::parse(&format!("{scheme}://{host}/")).ok()?;
-    // Transport ports do not identify the port of the web interface.
-    if matches!(remote.scheme(), "http" | "https") {
-        url.set_port(remote.port()).ok()?;
-    }
+    let mut url = remote.web_origin("http").ok()?;
     url.set_path(&format!("{group}/{repo}/commit/{sha}"));
     let secure_url = if matches!(remote.scheme(), "http" | "https") {
         None
@@ -154,6 +150,7 @@ fn site_name(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use url::Url;
 
     #[test]
     fn test_site_name() {

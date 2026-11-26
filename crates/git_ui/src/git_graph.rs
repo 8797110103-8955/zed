@@ -5827,6 +5827,18 @@ mod tests {
             graph.create_branch_at_commit(commit, window, cx);
         });
         cx.run_until_parked();
+        cx.simulate_input("cancelled-branch");
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        fs.with_git_state(&dot_git, false, |state| {
+            assert!(!state.branches.contains("cancelled-branch"));
+        })
+        .expect("cancelling the dialog leaves the repository unchanged");
+
+        graph.update_in(cx, |graph, window, cx| {
+            graph.create_branch_at_commit(commit, window, cx);
+        });
+        cx.run_until_parked();
         cx.simulate_input("graph-branch");
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();

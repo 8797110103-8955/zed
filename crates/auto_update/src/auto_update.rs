@@ -80,7 +80,14 @@ impl PartialEq for AutoUpdateStatus {
 
 impl AutoUpdateStatus {
     pub fn is_update_available(&self) -> bool {
-        matches!(self, Self::UpdateAvailable { .. })
+        self.available_version().is_some()
+    }
+
+    fn available_version(&self) -> Option<&Version> {
+        match self {
+            Self::UpdateAvailable { version } => Some(version),
+            _ => None,
+        }
     }
 }
 
@@ -216,9 +223,7 @@ pub fn available_update_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
     let auto_updater = AutoUpdater::get(cx)?;
     let auto_updater = auto_updater.read(cx);
-    let AutoUpdateStatus::UpdateAvailable { version } = &auto_updater.status else {
-        return None;
-    };
+    let version = auto_updater.status.available_version()?;
     Some(release_page_url(
         release_channel,
         version.clone(),
@@ -592,8 +597,8 @@ impl AutoUpdater {
 
         match release_channel {
             ReleaseChannel::Nightly => {
-                let should_report = if let AutoUpdateStatus::UpdateAvailable { version } = status {
-                    fetched_version != version
+                let should_report = if let Some(version) = status.available_version() {
+                    &fetched_version != version
                 } else {
                     let fetched_sha = fetched_version.build.as_str().rsplit('.').next();
                     app_commit_sha
@@ -604,12 +609,10 @@ impl AutoUpdater {
                 Ok(should_report.then_some(fetched_version))
             }
             _ => {
-                let current_version = if let AutoUpdateStatus::UpdateAvailable { version } = status
-                {
-                    version
-                } else {
-                    installed_version
-                };
+                let current_version = status
+                    .available_version()
+                    .cloned()
+                    .unwrap_or(installed_version);
                 Ok(Self::check_if_fetched_version_is_newer_non_nightly(
                     current_version,
                     fetched_version,

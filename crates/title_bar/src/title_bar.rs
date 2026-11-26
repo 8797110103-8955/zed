@@ -301,8 +301,7 @@ impl Render for TitleBar {
                     };
 
                 if let Some(repo_name) = display_name.and_then(|n| n.to_str()) {
-                    let visible_worktrees_in_repo =
-                        self.visible_worktrees_in_repository(repo, path_style, cx);
+                    let visible_worktrees_in_repo = self.visible_worktrees_in_repository(repo, cx);
                     let name = if visible_worktrees_in_repo == 1 {
                         if let Ok(relative) = path_style.strip_prefix(&opened_path, checkout_path) {
                             if relative.as_os_str().is_empty() {
@@ -580,17 +579,13 @@ impl TitleBar {
 
         if let Some(repo) = project.active_repository(cx) {
             let repo = repo.read(cx);
-            let repo_path = &repo.work_directory_abs_path;
-            let path_style = repo.path_style;
             let worktree = project
                 .visible_worktrees(cx)
-                .find(|worktree| path_style.starts_with(&worktree.read(cx).abs_path(), repo_path))
+                .find(|worktree| repo.contains_worktree_path(&worktree.read(cx).abs_path()))
                 .or_else(|| {
                     project
                         .visible_worktrees(cx)
-                        .filter(|worktree| {
-                            path_style.starts_with(repo_path, &worktree.read(cx).abs_path())
-                        })
+                        .filter(|worktree| repo.worktree_is_within(&worktree.read(cx).abs_path()))
                         .max_by_key(|worktree| worktree.read(cx).abs_path().as_os_str().len())
                 });
             if worktree.is_some() {
@@ -604,18 +599,12 @@ impl TitleBar {
     fn visible_worktrees_in_repository(
         &self,
         repository: &project::git_store::Repository,
-        path_style: PathStyle,
         cx: &App,
     ) -> usize {
-        let repo_path = &repository.work_directory_abs_path;
         self.project
             .read(cx)
             .visible_worktrees(cx)
-            .filter(|worktree| {
-                let worktree_path = worktree.read(cx).abs_path();
-                worktree_path == *repo_path
-                    || path_style.starts_with(&worktree_path, repo_path.as_ref())
-            })
+            .filter(|worktree| repository.contains_worktree_path(&worktree.read(cx).abs_path()))
             .count()
     }
 

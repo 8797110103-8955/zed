@@ -63,13 +63,7 @@ pub fn get_host_from_git_remote_url(remote_url: &str) -> Result<String> {
 }
 
 fn get_web_base_url_from_git_remote_url(remote_url: &str) -> Result<Url> {
-    let remote = remote_url.parse::<RemoteUrl>()?;
-    let host = remote.host_str().context("URL has no host")?;
-    if matches!(remote.scheme(), "http" | "https") {
-        Ok(Url::parse(&remote.origin().ascii_serialization())?)
-    } else {
-        Ok(Url::parse(&format!("https://{host}"))?)
-    }
+    remote_url.parse::<RemoteUrl>()?.web_origin("https")
 }
 
 fn remote_matches_base_url(remote: &RemoteUrl, base_url: &Url, public_host: Option<&str>) -> bool {

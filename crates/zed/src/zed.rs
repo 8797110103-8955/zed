@@ -2590,15 +2590,7 @@ fn open_local_file(
     cx: &mut Context<Workspace>,
 ) -> Option<gpui::Task<anyhow::Result<Entity<Editor>>>> {
     let project = workspace.project().clone();
-    let worktree = workspace
-        .active_folder_worktree_id(cx)
-        .and_then(|worktree_id| project.read(cx).worktree_for_id(worktree_id, cx))
-        .or_else(|| {
-            project
-                .read(cx)
-                .visible_worktrees(cx)
-                .find_map(|tree| tree.read(cx).root_entry()?.is_dir().then_some(tree))
-        });
+    let worktree = workspace.active_folder_worktree(cx);
     if let Some(worktree) = worktree {
         let tree_id = worktree.read(cx).id();
         Some(cx.spawn_in(window, async move |workspace, cx| {

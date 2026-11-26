@@ -603,7 +603,9 @@ fn missing_selected_manager_is_installed_once_through_an_existing_manager() -> R
                 (PackageManager::Npm, 10),
                 (PackageManager::Yarn, 1),
             ] {
-                let project = repository(&root.join(format!("{}-{major}", installer.name())))?;
+                // Previously installed managers remain on the search path through the registry.
+                let case_directory = tempfile::tempdir_in(&root)?;
+                let project = repository(case_directory.path())?;
                 let system = project.join("system");
                 let global = if installer == PackageManager::Vp {
                     project.join("vp-home/bin")

@@ -71,6 +71,7 @@ use workspace::{
     ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
 };
 
+use git_ui_core::worktree_labels::workspace_menu_worktree_labels;
 use git_ui_core::worktree_picker::WorktreePicker;
 use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
 use zed_actions::editor::{MoveDown, MoveUp};
@@ -619,91 +620,44 @@ fn workspace_has_terminal_metadata_except(
         .any(|terminal| except_terminal_id != Some(terminal.terminal_id))
 }
 
-#[derive(Clone)]
-struct WorkspaceMenuWorktreeLabel {
-    icon: Option<IconName>,
-    primary_name: SharedString,
-    secondary_name: Option<SharedString>,
+fn git_project_group_key(workspace: &Entity<Workspace>, cx: &App) -> ProjectGroupKey {
+    let project = workspace.read(cx).project().read(cx);
+    ProjectGroupKey::from_worktree_paths(
+        &project.git_worktree_paths(cx),
+        project.remote_connection_options(cx).cloned(),
+    )
 }
 
-impl WorkspaceMenuWorktreeLabel {
-    fn render(&self) -> impl IntoElement {
-        h_flex()
-            .min_w_0()
-            .gap_0p5()
-            .when_some(self.icon, |this, icon| {
-                this.child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
-            })
-            .child(Label::new(self.primary_name.clone()).truncate())
-            .when_some(self.secondary_name.clone(), |this, secondary_name| {
-                this.child(Label::new("/").alpha(0.5))
-                    .child(Label::new(secondary_name).truncate())
-            })
-    }
-}
-
-fn workspace_menu_worktree_labels(
-    workspace: &Entity<Workspace>,
+fn worktree_creation_base_workspaces(
+    project_group_key: &ProjectGroupKey,
+    active_workspace: Option<&Entity<Workspace>>,
+    open_workspaces: &[Entity<Workspace>],
     cx: &App,
-) -> Vec<WorkspaceMenuWorktreeLabel> {
-    let root_paths = workspace.read(cx).root_paths(cx);
-    let show_folder_name = root_paths.len() > 1;
-    let project = workspace.read(cx).project().clone();
-    let (path_style, repository_snapshots) = {
-        let project = project.read(cx);
-        let path_style = project.path_style(cx);
-        let repository_snapshots = project
-            .repositories(cx)
-            .values()
-            .map(|repo| repo.read(cx).snapshot())
-            .collect::<Vec<_>>();
-        (path_style, repository_snapshots)
-    };
-
-    root_paths
-        .into_iter()
-        .map(|root_path| {
-            let root_path = root_path.as_ref();
-            let folder_name = path_style
-                .file_name(root_path)
-                .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
-                .unwrap_or_default();
-            let repository_snapshot = repository_snapshots
-                .iter()
-                .find(|snapshot| snapshot.work_directory_abs_path.as_ref() == root_path);
-
-            if let Some(snapshot) = repository_snapshot {
-                let worktree_name = if snapshot.is_linked_worktree() {
-                    project::linked_worktree_short_name(
-                        snapshot.linked_worktree_anchor_path(),
-                        root_path,
-                        snapshot.path_style,
-                    )
-                    .unwrap_or_else(|| folder_name.clone())
-                } else {
-                    "main".into()
-                };
-
-                if show_folder_name {
-                    WorkspaceMenuWorktreeLabel {
-                        icon: Some(IconName::GitWorktree),
-                        primary_name: folder_name,
-                        secondary_name: Some(worktree_name),
-                    }
-                } else {
-                    WorkspaceMenuWorktreeLabel {
-                        icon: Some(IconName::GitWorktree),
-                        primary_name: worktree_name,
-                        secondary_name: None,
-                    }
-                }
-            } else {
-                WorkspaceMenuWorktreeLabel {
-                    icon: None,
-                    primary_name: folder_name,
-                    secondary_name: None,
-                }
+) -> Vec<(Entity<Workspace>, bool)> {
+    let mut git_project_group_keys = Vec::new();
+    let mut base_workspaces = Vec::new();
+    if let Some(active_workspace) =
+        active_workspace.filter(|workspace| open_workspaces.contains(workspace))
+    {
+        git_project_group_keys.push(git_project_group_key(active_workspace, cx));
+        base_workspaces.push(active_workspace.clone());
+    } else {
+        for workspace in open_workspaces {
+            let git_project_group_key = git_project_group_key(workspace, cx);
+            if !git_project_group_keys.contains(&git_project_group_key) {
+                git_project_group_keys.push(git_project_group_key);
+                base_workspaces.push(workspace.clone());
             }
+        }
+    }
+    let names_every_base_workspace = base_workspaces.len() > 1;
+    base_workspaces
+        .into_iter()
+        .zip(git_project_group_keys)
+        .map(|(base_workspace, git_project_group_key)| {
+            let is_named =
+                names_every_base_workspace || git_project_group_key != *project_group_key;
+            (base_workspace, is_named)
         })
         .collect()
 }
@@ -731,6 +685,14 @@ fn worktree_picker_workspace(
                 .find(|workspace| has_worktree_picker(workspace))
                 .cloned()
         })
+}
+
+fn defer_menu_dismissal(menu: &WeakEntity<ContextMenu>, window: &mut Window, cx: &mut App) {
+    let menu = menu.clone();
+    // Keyboard confirmation invokes the entry handler while the menu is being updated.
+    window.defer(cx, move |_, cx| {
+        menu.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+    });
 }
 
 fn open_worktree_picker(
@@ -2772,23 +2734,45 @@ impl Sidebar {
                         );
                     }
 
-                    let base_workspace = open_workspaces
-                        .contains(&active_workspace)
-                        .then_some(active_workspace)
-                        .or_else(|| open_workspaces.first().cloned());
-
-                    // Only offer worktree creation when the base project can
-                    // actually create one; otherwise the submenu would expand to
-                    // nothing. Mirrors the picker's `creation_blocked_reason`.
-                    let creation_blocked = base_workspace.as_ref().is_none_or(|base_workspace| {
-                        let project = base_workspace.read(cx).project().read(cx);
-                        project.is_via_collab() || project.repositories(cx).is_empty()
-                    });
-
-                    if let Some(base_workspace) = base_workspace.filter(|_| !creation_blocked) {
+                    let base_workspaces = worktree_creation_base_workspaces(
+                        &key,
+                        Some(&active_workspace),
+                        &open_workspaces,
+                        cx,
+                    );
+                    let mut has_creation_submenu = false;
+                    for (base_workspace, is_named) in base_workspaces {
+                        // Only offer worktree creation when the base project can
+                        // actually create one; otherwise the submenu would expand to
+                        // nothing. Mirrors the picker's `creation_blocked_reason`.
+                        let creation_blocked = {
+                            let project = base_workspace.read(cx).project().read(cx);
+                            project.is_via_collab() || project.repositories(cx).is_empty()
+                        };
+                        if creation_blocked {
+                            continue;
+                        }
+                        let submenu_label = open_workspaces
+                            .iter()
+                            .position(|workspace| *workspace == base_workspace)
+                            .and_then(|workspace_index| workspace_labels.get(workspace_index))
+                            .filter(|_| is_named)
+                            .map_or_else(
+                                || "Create New Worktree…".to_string(),
+                                |labels| {
+                                    format!(
+                                        "Create New Worktree in {}…",
+                                        labels.iter().map(|label| label.text()).join(" • ")
+                                    )
+                                },
+                            );
+                        if !has_creation_submenu {
+                            menu = menu.separator();
+                            has_creation_submenu = true;
+                        }
+                        let this = this.clone();
                         let base_workspace = base_workspace.downgrade();
-                        menu = menu.separator().submenu("Create New Worktree…", {
-                            let this = this.clone();
+                        menu = menu.submenu(submenu_label, {
                             move |mut submenu, _window, submenu_cx| {
                                 let Some(workspace) = base_workspace.upgrade() else {
                                     return submenu;
@@ -2805,13 +2789,8 @@ impl Sidebar {
                                             .map(|branch| branch.name().to_string())
                                     });
                                 let default_branch = this
-                                    .read_with(submenu_cx, |sidebar, _| {
-                                        match sidebar.worktree_default_branches.get(&key) {
-                                            Some(DefaultBranchCache::Resolved(branch)) => {
-                                                branch.clone()
-                                            }
-                                            _ => None,
-                                        }
+                                    .read_with(submenu_cx, |sidebar, cx| {
+                                        sidebar.worktree_default_branch(&workspace, cx)
                                     })
                                     .ok()
                                     .flatten();
@@ -2861,36 +2840,38 @@ impl Sidebar {
         .into_any_element()
     }
 
-    // Warms `worktree_default_branches` for every project group with at least one
-    // open workspace. The git query runs off the menu path so the submenu can read
-    // the result synchronously when it opens. Worktrees of a repository share the
-    // same default branch, so any workspace in the group yields the same answer.
+    // Warms `worktree_default_branches` for every open workspace, so the submenu can read the result synchronously when it opens.
+    // The cache is keyed by Git identity, not by project group: the Delta checkouts of one group are separate clones with their own refs.
     fn prefetch_worktree_default_branches(&mut self, cx: &mut Context<Self>) {
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
             return;
         };
-        let keys: Vec<ProjectGroupKey> = self
-            .contents
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ListEntry::ProjectHeader { key, .. } => Some(key.clone()),
-                _ => None,
-            })
-            .collect();
-        for key in keys {
-            if self.worktree_default_branches.contains_key(&key) {
-                continue;
-            }
-            let Some(base) = multi_workspace
-                .read(cx)
-                .workspaces_for_project_group(&key, cx)
-                .next()
-                .cloned()
-            else {
-                continue;
-            };
-            self.prefetch_worktree_default_branch(&key, &base, cx);
+        let workspaces = multi_workspace
+            .read(cx)
+            .workspaces()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut default_branch_keys = HashSet::new();
+        for workspace in workspaces {
+            let default_branch_key = git_project_group_key(&workspace, cx);
+            self.prefetch_worktree_default_branch(&default_branch_key, &workspace, cx);
+            default_branch_keys.insert(default_branch_key);
+        }
+        self.worktree_default_branches
+            .retain(|default_branch_key, _| default_branch_keys.contains(default_branch_key));
+    }
+
+    fn worktree_default_branch(
+        &self,
+        workspace: &Entity<Workspace>,
+        cx: &App,
+    ) -> Option<RemoteBranchName> {
+        match self
+            .worktree_default_branches
+            .get(&git_project_group_key(workspace, cx))
+        {
+            Some(DefaultBranchCache::Resolved(branch)) => branch.clone(),
+            _ => None,
         }
     }
 
@@ -3216,9 +3197,7 @@ impl Sidebar {
                                                     .activate(workspace, None, window, cx);
                                             })
                                             .ok();
-                                        activate_weak_menu
-                                            .update(cx, |_, cx| cx.emit(DismissEvent))
-                                            .ok();
+                                        defer_menu_dismissal(&activate_weak_menu, window, cx);
                                     },
                                 );
                             }
@@ -3272,30 +3251,26 @@ impl Sidebar {
                                     ContextMenuEntry::new("Move Up")
                                         .action(Box::new(MoveProjectUp))
                                         .disabled(!can_move_up)
-                                        .handler(move |_window, cx| {
+                                        .handler(move |window, cx| {
                                             move_up_multi_workspace
                                                 .update(cx, |mw, cx| {
                                                     mw.move_project_group_up(&move_up_key, cx);
                                                 })
                                                 .ok();
-                                            move_up_weak_menu
-                                                .update(cx, |_, cx| cx.emit(DismissEvent))
-                                                .ok();
+                                            defer_menu_dismissal(&move_up_weak_menu, window, cx);
                                         }),
                                 )
                                 .item(
                                     ContextMenuEntry::new("Move Down")
                                         .action(Box::new(MoveProjectDown))
                                         .disabled(!can_move_down)
-                                        .handler(move |_window, cx| {
+                                        .handler(move |window, cx| {
                                             move_down_multi_workspace
                                                 .update(cx, |mw, cx| {
                                                     mw.move_project_group_down(&move_down_key, cx);
                                                 })
                                                 .ok();
-                                            move_down_weak_menu
-                                                .update(cx, |_, cx| cx.emit(DismissEvent))
-                                                .ok();
+                                            defer_menu_dismissal(&move_down_weak_menu, window, cx);
                                         }),
                                 )
                         });
@@ -3310,7 +3285,7 @@ impl Sidebar {
                                         .detach_and_log_err(cx);
                                 })
                                 .ok();
-                            weak_menu.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+                            defer_menu_dismissal(&weak_menu, window, cx);
                         })
                     });
 

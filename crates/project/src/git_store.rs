@@ -6427,6 +6427,16 @@ impl RepositorySnapshot {
         Self::abs_path_to_repo_path_inner(&self.work_directory_abs_path, abs_path, self.path_style)
     }
 
+    pub fn contains_worktree_path(&self, path: &Path) -> bool {
+        self.path_style
+            .starts_with(path, &self.work_directory_abs_path)
+    }
+
+    pub fn worktree_is_within(&self, path: &Path) -> bool {
+        self.path_style
+            .starts_with(&self.work_directory_abs_path, path)
+    }
+
     pub fn repo_path_to_abs_path(&self, repo_path: &RepoPath) -> PathBuf {
         let repo_path = repo_path.display(self.path_style);
         self.path_style

@@ -367,11 +367,10 @@ pub(crate) fn worktree_operation_targets(
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path())
             .collect::<Vec<_>>();
-        if visible_paths.iter().any(|path| {
-            snapshot
-                .path_style
-                .starts_with(&snapshot.work_directory_abs_path, path)
-        }) {
+        if visible_paths
+            .iter()
+            .any(|path| snapshot.worktree_is_within(path))
+        {
             // A checkout inside an open folder can be replaced independently of that folder.
             let retained_paths = visible_paths
                 .into_iter()

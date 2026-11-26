@@ -1793,6 +1793,13 @@ async fn npm_package_dir_entries(fs: &dyn Fs, dir: &Path) -> Result<Vec<PathBuf>
     Ok(package_dirs)
 }
 
+pub fn split_npm_package_spec(package_spec: &str) -> (&str, Option<&str>) {
+    match package_spec.rsplit_once('@') {
+        Some((package_name, version)) if !package_name.is_empty() => (package_name, Some(version)),
+        _ => (package_spec, None),
+    }
+}
+
 /// People are using min-release-age more frequently. Which means a fresh registry will likely have
 /// new package versions than the user can install.
 /// We set the version to now be a ceiling and not an exact pin instead. This allows npm to resolve
@@ -1814,17 +1821,14 @@ async fn npm_package_dir_entries(fs: &dyn Fs, dir: &Path) -> Result<Vec<PathBuf>
 /// containing whitespace, so `package@<=0.25.3` reaches cmd.exe bare and the unquoted `<` is
 /// interpreted as input redirection. See zed-industries/zed#55921.
 fn bounded_npm_package_spec(package_spec: &str) -> (&str, String) {
-    let Some((package_name, version)) = package_spec.rsplit_once('@') else {
-        return (package_spec, package_spec.to_string());
+    let (package_name, version) = split_npm_package_spec(package_spec);
+    let bounded_spec = match version {
+        Some(version) if Version::parse(version).is_ok() => {
+            format!("{package_name}@0.0.0 - {version}")
+        }
+        _ => package_spec.to_owned(),
     };
-    if package_name.is_empty() {
-        return (package_spec, package_spec.to_string());
-    }
-    if Version::parse(version).is_err() {
-        return (package_name, package_spec.to_string());
-    }
-
-    (package_name, format!("{package_name}@0.0.0 - {version}"))
+    (package_name, bounded_spec)
 }
 
 fn package_with_version(package_spec: &str, version: Option<&str>) -> String {
@@ -1832,11 +1836,7 @@ fn package_with_version(package_spec: &str, version: Option<&str>) -> String {
         return package_spec.to_owned();
     };
 
-    let package_name = package_spec
-        .rsplit_once('@')
-        .map(|(package_name, _)| package_name)
-        .filter(|package_name| !package_name.is_empty())
-        .unwrap_or(package_spec);
+    let (package_name, _) = split_npm_package_spec(package_spec);
     format!("{package_name}@{version}")
 }
 

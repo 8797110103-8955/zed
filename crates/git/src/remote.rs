@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use anyhow::Context as _;
 use derive_more::Deref;
 use url::Url;
 
@@ -8,6 +9,15 @@ use url::Url;
 pub struct RemoteUrl(Url);
 
 impl RemoteUrl {
+    pub fn web_origin(&self, fallback_scheme: &str) -> anyhow::Result<Url> {
+        let host = self.host_str().context("URL has no host")?;
+        if matches!(self.scheme(), "http" | "https") {
+            Ok(Url::parse(&self.origin().ascii_serialization())?)
+        } else {
+            Ok(Url::parse(&format!("{fallback_scheme}://{host}"))?)
+        }
+    }
+
     fn parse(input: &str) -> Result<Url, url::ParseError> {
         let mut input = input.trim();
         // Remote helpers wrap the address as `<transport>::<address>`.

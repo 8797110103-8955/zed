@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use collections::HashMap;
 use fs::Fs;
-use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{App, DismissEvent, Entity, EventEmitter, Focusable, Task, WeakEntity, prelude::*};
-use picker::{Picker, PickerDelegate};
+use picker::{FuzzyVersionMatches, Picker, PickerDelegate};
 use semver::Version;
 use settings::update_settings_file;
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
@@ -48,8 +47,7 @@ pub struct AgentVersionSelectorDelegate {
     selector: WeakEntity<AgentVersionSelector>,
     agent_id: String,
     versions: Vec<Version>,
-    selected_index: usize,
-    matches: Vec<StringMatch>,
+    matches: FuzzyVersionMatches,
 }
 
 impl AgentVersionSelectorDelegate {
@@ -62,22 +60,14 @@ impl AgentVersionSelectorDelegate {
         versions.sort_unstable_by(|left, right| right.cmp(left));
         versions.dedup();
 
-        let matches = versions
-            .iter()
-            .map(|version| StringMatch {
-                candidate_id: 0,
-                score: 0.0,
-                positions: Default::default(),
-                string: format!("v{version}"),
-            })
-            .collect();
+        let matches =
+            FuzzyVersionMatches::new(versions.iter().map(|version| format!("v{version}")));
 
         Self {
             fs,
             selector,
             agent_id,
             versions,
-            selected_index: 0,
             matches,
         }
     }
@@ -95,11 +85,11 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
     }
 
     fn match_count(&self) -> usize {
-        self.matches.len()
+        self.matches.matches().len()
     }
 
     fn selected_index(&self) -> usize {
-        self.selected_index
+        self.matches.selected_index()
     }
 
     fn set_selected_index(
@@ -108,7 +98,7 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) {
-        self.selected_index = index;
+        self.matches.set_selected_index(index);
     }
 
     fn update_matches(
@@ -117,52 +107,19 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Task<()> {
-        let background_executor = cx.background_executor().clone();
-        let candidates = self
-            .versions
-            .iter()
-            .enumerate()
-            .map(|(index, version)| StringMatchCandidate::new(index, &format!("v{version}")))
-            .collect::<Vec<_>>();
+        let matches = self.matches.filter(query, cx.background_executor().clone());
 
         cx.spawn_in(window, async move |this, cx| {
-            let matches = if query.is_empty() {
-                candidates
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, candidate)| StringMatch {
-                        candidate_id: index,
-                        string: candidate.string,
-                        positions: Vec::new(),
-                        score: 0.0,
-                    })
-                    .collect()
-            } else {
-                fuzzy::match_strings(
-                    &candidates,
-                    &query,
-                    false,
-                    true,
-                    100,
-                    &Default::default(),
-                    background_executor,
-                )
-                .await
-            };
-
+            let matches = matches.await;
             this.update(cx, |this, _cx| {
-                this.delegate.matches = matches;
-                this.delegate.selected_index = this
-                    .delegate
-                    .selected_index
-                    .min(this.delegate.matches.len().saturating_sub(1));
+                this.delegate.matches.replace_matches(matches);
             })
             .log_err();
         })
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        let Some(version_match) = self.matches.get(self.selected_index) else {
+        let Some(version_match) = self.matches.selected_match() else {
             self.dismissed(window, cx);
             return;
         };
@@ -175,7 +132,6 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
         let version = version.to_string();
         update_settings_file(self.fs.clone(), cx, {
             let agent_id = agent_id.clone();
-            let version = version.clone();
             move |settings, _| {
                 let agent_servers = settings.agent_servers.get_or_insert_default();
                 match agent_servers.get_mut(agent_id.as_str()) {
@@ -215,7 +171,7 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
-        let version_match = self.matches.get(index)?;
+        let version_match = self.matches.matches().get(index)?;
 
         Some(
             ListItem::new(index)
@@ -227,5 +183,82 @@ impl PickerDelegate for AgentVersionSelectorDelegate {
                     version_match.positions.clone(),
                 )),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use settings::SettingsStore;
+
+    use super::*;
+
+    #[gpui::test]
+    async fn test_agent_version_picker_writes_the_filtered_version(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        let settings_path = paths::settings_file();
+        fs.create_dir(settings_path.parent().expect("settings directory"))
+            .await
+            .expect("create settings directory");
+        fs.insert_file(settings_path, b"{}".to_vec()).await;
+        cx.update(|cx| {
+            let mut settings = SettingsStore::test(cx);
+            settings.watch_settings_files(fs.clone(), cx, |_, _, _| {});
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+
+        let (selector, cx) = cx.add_window_view(|window, cx| {
+            let delegate = AgentVersionSelectorDelegate::new(
+                fs.clone(),
+                cx.weak_entity(),
+                "test-agent".to_string(),
+                vec![
+                    Version::new(1, 0, 0),
+                    Version::new(3, 0, 0),
+                    Version::new(2, 0, 0),
+                ],
+            );
+            AgentVersionSelector::new(delegate, window, cx)
+        });
+        let picker = selector.read_with(cx, |selector, _| selector.picker.clone());
+        let dismissals = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|_, cx| {
+            let dismissals = dismissals.clone();
+            cx.subscribe(&selector, move |_, _: &DismissEvent, _| {
+                dismissals.set(dismissals.get() + 1);
+            })
+        });
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_query("missing", window, cx)
+        });
+        cx.run_until_parked();
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.confirm(false, window, cx);
+        });
+        assert_eq!(dismissals.get(), 1);
+        assert_eq!(fs.load(settings_path).await.expect("read settings"), "{}");
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_query("2.0.0", window, cx)
+        });
+        cx.run_until_parked();
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.confirm(false, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(dismissals.get(), 2);
+        let content = fs.load(settings_path).await.expect("load written settings");
+        let settings: serde_json::Value =
+            serde_json::from_str(&content).expect("valid settings JSON");
+        assert_eq!(
+            settings["agent_servers"]["test-agent"]["package_version"],
+            "2.0.0"
+        );
     }
 }

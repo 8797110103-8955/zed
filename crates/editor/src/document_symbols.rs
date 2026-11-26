@@ -2,7 +2,6 @@ use std::ops::Range;
 
 use gpui::{App, Context, HighlightStyle, Task};
 use itertools::Itertools as _;
-use language::language_settings::LanguageSettings;
 use language::{Buffer, LanguageAwareStyling, OutlineItem, highlight_ranges_from_text};
 use multi_buffer::{
     Anchor, AnchorRangeExt as _, MultiBufferOffset, MultiBufferRow, MultiBufferSnapshot,
@@ -265,8 +264,9 @@ impl Editor {
 }
 
 fn lsp_symbols_enabled(buffer: &Buffer, cx: &App) -> bool {
-    let settings = LanguageSettings::for_buffer(buffer, cx);
-    settings.enable_language_server && settings.document_symbols.lsp_enabled()
+    Editor::buffer_lsp_feature_enabled(buffer, cx, |settings| {
+        settings.document_symbols.lsp_enabled()
+    })
 }
 
 /// Finds where the symbol name appears in the buffer and returns combined

@@ -9,7 +9,9 @@ use gpui::{
     ParentElement, Point, Render, RenderOnce, SharedString, Styled, TextStyle,
     UniformListScrollHandle, WeakEntity, Window, point, uniform_list,
 };
-use project::agent_server_store::{AllAgentServersSettings, CustomAgentServerSettings};
+use project::agent_server_store::{
+    AllAgentServersSettings, CustomAgentServerSettings, split_npm_package_spec,
+};
 use project::{AgentRegistryStore, RegistryAgent};
 use settings::{Settings, SettingsStore, update_settings_file};
 use theme_settings::ThemeSettings;
@@ -513,7 +515,6 @@ impl AgentRegistryPage {
                                 }),
                             );
                         }
-                        let agent_id = agent_id.clone();
                         menu.entry("Copy Agent ID", None, move |_, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(agent_id.clone()));
                         })
@@ -586,12 +587,12 @@ impl AgentRegistryPage {
         else {
             return;
         };
-        let package_name = package_name(&package);
         let fs = workspace.read(cx).project().read(cx).fs().clone();
 
         cx.spawn_in(window, async move |_, cx| {
+            let (package_name, _) = split_npm_package_spec(&package);
             let package_info = node_runtime
-                .package_manager_package_info(&package_name)
+                .package_manager_package_info(package_name)
                 .await?;
 
             workspace.update_in(cx, |workspace, window, cx| {
@@ -688,15 +689,6 @@ impl AgentRegistryPage {
                 .disabled(true),
         }
     }
-}
-
-fn package_name(package_spec: &str) -> String {
-    package_spec
-        .rsplit_once('@')
-        .map(|(package_name, _)| package_name)
-        .filter(|package_name| !package_name.is_empty())
-        .unwrap_or(package_spec)
-        .to_owned()
 }
 
 impl Render for AgentRegistryPage {

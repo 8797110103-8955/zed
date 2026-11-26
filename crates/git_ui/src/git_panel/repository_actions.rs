@@ -1,13 +1,83 @@
 use super::GitPanel;
+use crate::remote_output::RemoteAction;
 use anyhow::Context as _;
 use editor::Editor;
+use git::repository::RemoteCommandOutput;
 use git::{StashAll, StashApply, StashPop, StashStaged, StashTracked};
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
+use gpui::{
+    AsyncWindowContext, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task,
+    WeakEntity,
+};
 use project::git_store::Repository;
 use ui::{ContextMenu, ContextMenuEntry, prelude::*};
 use util::ResultExt;
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{ModalView, Workspace};
+
+#[derive(Clone, Copy)]
+pub(crate) enum RemoteOperationKind {
+    Fetch,
+    Pull,
+    Push,
+}
+
+impl GitPanel {
+    pub(super) fn start_remote_operation(
+        &mut self,
+        kind: RemoteOperationKind,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_remote_operation.is_some() {
+            return false;
+        }
+        self.set_remote_operation(kind, cx);
+        true
+    }
+
+    pub(super) fn set_remote_operation(
+        &mut self,
+        kind: RemoteOperationKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_remote_operation = Some(kind);
+        cx.notify();
+    }
+
+    pub(super) fn clear_remote_operation(&mut self, cx: &mut Context<Self>) {
+        self.pending_remote_operation.take();
+        cx.notify();
+    }
+
+    pub(super) fn show_remote_result(
+        &mut self,
+        action: RemoteAction,
+        result: anyhow::Result<RemoteCommandOutput>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(output) => self.show_remote_output(action, output, cx),
+            Err(error) => {
+                let operation = action.name();
+                log::error!("Error while executing {operation}: {error:?}");
+                self.show_error_toast(operation, error, cx);
+            }
+        }
+    }
+}
+
+pub(super) fn spawn_remote_operation<R: 'static>(
+    window: &Window,
+    cx: &Context<GitPanel>,
+    run: impl AsyncFnOnce(WeakEntity<GitPanel>, &mut AsyncWindowContext) -> R + 'static,
+) -> Task<R> {
+    let clear = cx
+        .to_async()
+        .on_drop(&cx.weak_entity(), GitPanel::clear_remote_operation);
+    cx.spawn_in(window, async move |panel, cx| {
+        let _clear = clear;
+        run(panel, cx).await
+    })
+}
 
 struct RepositoryInputModal {
     title: SharedString,
@@ -146,21 +216,45 @@ pub(crate) fn prompt_create_branch(
     cx: &mut App,
 ) {
     let title = title.into();
-    window
-        .spawn(cx, async move |cx| {
+    create_branch(
+        repository,
+        async move |cx| {
             let input = cx.update(|window, cx| {
                 repository_input(title, "Create", &["Branch name"], workspace, window, cx)
             })?;
             let Some(mut values) = input.await else {
+                return Ok(None);
+            };
+            Ok(Some(values.pop().context("Missing branch name")?))
+        },
+        base,
+        false,
+        window,
+        cx,
+    );
+}
+
+pub(crate) fn create_branch(
+    repository: Entity<Repository>,
+    name: impl AsyncFnOnce(&mut AsyncWindowContext) -> anyhow::Result<Option<String>> + 'static,
+    base: Option<String>,
+    show_error_details: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window
+        .spawn(cx, async move |cx| {
+            let Some(name) = name(cx).await? else {
                 return Ok(());
             };
-            let name = values.pop().context("Missing branch name")?;
             repository
                 .update(cx, |repository, _| repository.create_branch(name, base))
                 .await??;
             Ok(())
         })
-        .detach_and_prompt_err("Failed to create branch", window, cx, |_, _, _| None);
+        .detach_and_prompt_err("Failed to create branch", window, cx, move |error, _, _| {
+            show_error_details.then(|| error.to_string())
+        });
 }
 
 #[derive(Clone, Copy)]

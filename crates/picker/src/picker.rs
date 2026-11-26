@@ -22,6 +22,7 @@ use workspace::ModalView;
 use zed_actions::editor::{MoveDown, MoveUp};
 
 mod footer;
+mod fuzzy_version_matches;
 mod head;
 pub mod highlighted_match_with_paths;
 pub mod parts;
@@ -34,6 +35,7 @@ mod shape;
 use crate::shape::RelativeHeight;
 use crate::shape::RelativeWidth;
 pub use footer::PickerAction;
+pub use fuzzy_version_matches::FuzzyVersionMatches;
 pub use language::{HighlightedText, HighlightedTextBuilder};
 pub use preview::Layout as PreviewLayout;
 pub use preview::MatchLocation;
