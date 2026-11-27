@@ -430,6 +430,7 @@ pub struct Pane {
     >,
     render_tab_bar: Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> AnyElement>,
     show_tab_bar_buttons: bool,
+    hovered: Option<bool>,
     max_tabs: Option<NonZeroUsize>,
     use_max_tabs: bool,
     _subscriptions: Vec<Subscription>,
@@ -606,6 +607,7 @@ impl Pane {
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
             render_tab_bar: Rc::new(Self::render_tab_bar),
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
+            hovered: None,
             display_nav_history_buttons: Some(
                 TabBarSettings::get_global(cx).show_nav_history_buttons,
             ),
@@ -719,6 +721,22 @@ impl Pane {
     pub fn context_menu_focused(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.new_item_context_menu_handle.is_focused(window, cx)
             || self.split_item_context_menu_handle.is_focused(window, cx)
+    }
+
+    pub fn show_tab_bar_buttons_on_hover(&mut self) {
+        self.hovered = Some(false);
+    }
+
+    pub fn tab_bar_buttons_visible(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.has_focus(window, cx)
+            || match self.hovered {
+                Some(true) => true,
+                Some(false) => {
+                    self.new_item_context_menu_handle.is_deployed()
+                        || self.split_item_context_menu_handle.is_deployed()
+                }
+                None => self.context_menu_focused(window, cx),
+            }
     }
 
     fn focus_out(&mut self, _event: FocusOutEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4320,7 +4338,7 @@ fn default_render_tab_bar_buttons(
     window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> (Option<AnyElement>, Option<AnyElement>) {
-    if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
+    if !pane.tab_bar_buttons_visible(window, cx) {
         return (None, None);
     }
     let (can_clone, can_split_move) = match pane.active_item() {
@@ -4428,7 +4446,7 @@ impl Render for Pane {
         let should_display_tab_bar = self.should_display_tab_bar.clone();
         let display_tab_bar = should_display_tab_bar(window, cx);
         let Some(project) = self.project.upgrade() else {
-            return div().track_focus(&self.focus_handle(cx));
+            return div().track_focus(&self.focus_handle(cx)).into_any_element();
         };
         // WSL remotes accept dropped host files too, since their paths can be translated with `wslpath`; see `Pane::handle_external_paths_drop`.
         let accepts_external_paths = {
@@ -4733,6 +4751,17 @@ impl Render for Pane {
                     }
                 }),
             )
+            .map(|pane| {
+                if self.hovered.is_none() {
+                    return pane.into_any_element();
+                }
+                pane.id(cx.entity_id().as_u64())
+                    .on_hover(cx.listener(|pane, hovered, _, cx| {
+                        pane.hovered = Some(*hovered);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
     }
 }
 

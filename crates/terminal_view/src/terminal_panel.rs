@@ -135,15 +135,11 @@ impl TerminalPanel {
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
                     .is_some_and(|view| view.read(cx).rename_editor_is_focused(window, cx));
-                let show_buttons_on_hover = !pane.has_focus(window, cx)
-                    && !pane.context_menu_focused(window, cx)
-                    && !has_focused_rename_editor;
+                if !pane.tab_bar_buttons_visible(window, cx) && !has_focused_rename_editor {
+                    return (None, None);
+                }
                 let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
-                    .id("terminal-tab-bar-buttons")
-                    .when(show_buttons_on_hover, |buttons| {
-                        buttons.visible_on_hover("tab_bar")
-                    })
                     .gap(DynamicSpacing::Base02.rems(cx))
                     .child(
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
@@ -1345,6 +1341,7 @@ pub fn new_terminal_pane(
         pane.set_zoomed(zoomed, cx);
         pane.display_nav_history_buttons(None);
         pane.set_should_display_tab_bar(|_, _| true);
+        pane.show_tab_bar_buttons_on_hover();
         pane.set_zoom_out_on_close(false);
 
         let split_closure_terminal_panel = terminal_panel.downgrade();
@@ -2869,6 +2866,51 @@ mod tests {
                 "finishing restoration must not steal focus from an active modal"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_tab_bar_buttons_show_on_pane_hover(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let editor_focus = window_handle
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_pane()
+                    .focus_handle(cx)
+            })
+            .expect("editor focus should be available");
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        terminal_panel.update(cx, |panel, cx| panel.set_assistant_enabled(true, cx));
+        let terminal = terminal_panel
+            .update_in(cx, |panel, window, cx| {
+                panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+            })
+            .await
+            .expect("terminal should open")
+            .upgrade()
+            .expect("terminal should stay open");
+        cx.update(|window, cx| editor_focus.focus(window, cx));
+        let outside_terminal = gpui::point(gpui::px(10.), gpui::px(10.));
+        cx.simulate_mouse_move(outside_terminal, None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ICON-ZedAssistant").is_none());
+
+        let terminal_center = terminal.read_with(cx, |terminal, _| {
+            terminal.last_content().terminal_bounds.bounds.center()
+        });
+        cx.simulate_mouse_move(terminal_center, None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ICON-ZedAssistant").is_some());
+        cx.update(|window, cx| assert!(editor_focus.contains_focused(window, cx)));
+
+        cx.simulate_mouse_move(outside_terminal, None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ICON-ZedAssistant").is_none());
     }
 
     #[gpui::test]
