@@ -14,9 +14,9 @@ use git::{
     repository::{
         AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
         CreateWorktreeTarget, FetchOptions, FetchResult, FileHistoryChangedFileSets,
-        GRAPH_CHUNK_SIZE, GitRepository, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
-        RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree, commit_hash_search_query,
-        original_repo_path_from_common_dir,
+        GRAPH_CHUNK_SIZE, GitRepository, InitialGraphCommitData, LogOrder, LogSource, PullStrategy,
+        PushOptions, RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
+        commit_hash_search_query, original_repo_path_from_common_dir,
     },
     stash::GitStash,
     status::{
@@ -1411,6 +1411,14 @@ impl GitRepository for FakeGitRepository {
 
     fn get_branch_remote(&self, _branch: String) -> BoxFuture<'_, Result<Option<Remote>>> {
         unimplemented!()
+    }
+
+    fn pull_strategy(
+        &self,
+        _branch: String,
+        _env: std::sync::Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<PullStrategy>> {
+        future::ready(Ok(PullStrategy::Unspecified)).boxed()
     }
 
     fn check_for_pushed_commit(&self) -> BoxFuture<'_, Result<Vec<gpui::SharedString>>> {

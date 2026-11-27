@@ -2,7 +2,7 @@ use super::GitPanel;
 use crate::remote_output::RemoteAction;
 use anyhow::Context as _;
 use editor::Editor;
-use git::repository::RemoteCommandOutput;
+use git::repository::{PullStrategy, RemoteCommandOutput};
 use git::{StashAll, StashApply, StashPop, StashStaged, StashTracked};
 use gpui::{
     AsyncWindowContext, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task,
@@ -22,6 +22,12 @@ pub(crate) enum RemoteOperationKind {
 }
 
 impl GitPanel {
+    pub(super) fn remote_actions_enabled(&self, cx: &App) -> bool {
+        self.has_write_access(cx)
+            && self.can_push_and_pull(cx)
+            && self.pending_remote_operation.is_none()
+    }
+
     pub(super) fn start_remote_operation(
         &mut self,
         kind: RemoteOperationKind,
@@ -332,12 +338,98 @@ pub(super) fn fetch_menu_entries(
     }
 }
 
-pub(super) fn repository_action_submenus(
+pub(super) fn pull_push_menu_entries(
+    menu: ContextMenu,
+    panel: &WeakEntity<GitPanel>,
+    repository: &Entity<Repository>,
+    disabled: bool,
+    cx: &mut Context<ContextMenu>,
+) -> ContextMenu {
+    let pull_label = if disabled {
+        "Pull"
+    } else {
+        read_pull_label(repository, cx)
+    };
+    menu.action_disabled_when(disabled, pull_label, Box::new(git::Pull))
+        .map(|menu| {
+            repository_menu_entry(
+                menu,
+                "Pull From…",
+                panel.clone(),
+                repository.clone(),
+                RepositoryMenuAction::PullFrom,
+                disabled,
+            )
+        })
+        .action_disabled_when(disabled, "Push", Box::new(git::Push))
+        .map(|menu| {
+            repository_menu_entry(
+                menu,
+                "Push To…",
+                panel.clone(),
+                repository.clone(),
+                RepositoryMenuAction::PushTo,
+                disabled,
+            )
+        })
+}
+
+fn read_pull_label(repository: &Entity<Repository>, cx: &mut Context<ContextMenu>) -> &'static str {
+    let Some(branch) = repository
+        .read(cx)
+        .branch
+        .as_ref()
+        .map(|branch| branch.ref_name.clone())
+    else {
+        return "Pull";
+    };
+    let Some(strategy) = repository.update(cx, |repository, cx| repository.pull_strategy(cx))
+    else {
+        return "Pull";
+    };
+    if let Some(strategy) = strategy.peek() {
+        return pull_label(*strategy);
+    }
+    let repository = repository.downgrade();
+    cx.spawn(async move |menu, cx| {
+        let strategy = strategy.await;
+        if let (Some(menu), Some(repository)) = (menu.upgrade(), repository.upgrade()) {
+            menu.update(cx, |menu, cx| {
+                let state = repository.read(cx);
+                if state
+                    .branch
+                    .as_ref()
+                    .is_some_and(|current| current.ref_name == branch)
+                    && state
+                        .git_store()
+                        .and_then(|store| store.read(cx).active_repository())
+                        .as_ref()
+                        == Some(&repository)
+                {
+                    menu.set_action_label(&git::Pull, pull_label(strategy), cx);
+                }
+            });
+        }
+    })
+    .detach();
+    "Pull"
+}
+
+fn pull_label(strategy: PullStrategy) -> &'static str {
+    match strategy {
+        PullStrategy::Unspecified => "Pull",
+        PullStrategy::Merge => "Pull (Merge)",
+        PullStrategy::Rebase => "Pull (Rebase)",
+        PullStrategy::FastForwardOnly => "Pull (Fast-Forward Only)",
+    }
+}
+
+pub(super) fn repository_action_entries(
     menu: ContextMenu,
     panel: WeakEntity<GitPanel>,
     repository: Entity<Repository>,
     focus_handle: FocusHandle,
-    cx: &App,
+    cx: &mut Context<ContextMenu>,
 ) -> ContextMenu {
     let state = repository.read(cx);
     let has_branch = state.branch.is_some();
@@ -348,46 +440,18 @@ pub(super) fn repository_action_submenus(
     let writable = panel
         .read_with(cx, |panel, cx| panel.has_write_access(cx))
         .unwrap_or(false);
-    let remote_enabled = writable
-        && panel
-            .read_with(cx, |panel, cx| {
-                panel.can_push_and_pull(cx) && panel.pending_remote_operation.is_none()
-            })
-            .unwrap_or(false);
-    menu.submenu("Pull, Push", {
-        let panel = panel.clone();
-        let repository = repository.clone();
-        let focus_handle = focus_handle.clone();
-        move |menu, _, _| {
-            menu.context(focus_handle.clone())
-                .action_disabled_when(
-                    !remote_enabled || !has_branch,
-                    "Pull (Rebase)",
-                    Box::new(git::PullRebase),
-                )
-                .map(|menu| {
-                    repository_menu_entry(
-                        menu,
-                        "Pull From…",
-                        panel.clone(),
-                        repository.clone(),
-                        RepositoryMenuAction::PullFrom,
-                        !remote_enabled || !has_branch,
-                    )
-                })
-                .map(|menu| {
-                    repository_menu_entry(
-                        menu,
-                        "Push To…",
-                        panel.clone(),
-                        repository.clone(),
-                        RepositoryMenuAction::PushTo,
-                        !remote_enabled || !has_branch,
-                    )
-                })
-        }
-    })
-    .submenu("Branch", {
+    let remote_enabled = panel
+        .read_with(cx, GitPanel::remote_actions_enabled)
+        .unwrap_or(false);
+    pull_push_menu_entries(
+        menu,
+        &panel,
+        &repository,
+        !remote_enabled || !has_branch,
+        cx,
+    )
+    .separator()
+    .submenu("Branch, Remote", {
         let panel = panel.clone();
         let repository = repository.clone();
         let focus_handle = focus_handle.clone();
@@ -431,20 +495,16 @@ pub(super) fn repository_action_submenus(
                 "Copy Branch Name",
                 Box::new(git::CopyBranchName),
             )
-        }
-    })
-    .submenu("Remote", {
-        let panel = panel.clone();
-        let repository = repository.clone();
-        move |menu, _, _| {
-            repository_menu_entry(
-                menu,
-                "Add Remote…",
-                panel.clone(),
-                repository.clone(),
-                RepositoryMenuAction::AddRemote,
-                !remote_enabled,
-            )
+            .map(|menu| {
+                repository_menu_entry(
+                    menu,
+                    "Add Remote…",
+                    panel.clone(),
+                    repository.clone(),
+                    RepositoryMenuAction::AddRemote,
+                    !remote_enabled,
+                )
+            })
             .map(|menu| {
                 repository_menu_entry(
                     menu,
@@ -459,9 +519,9 @@ pub(super) fn repository_action_submenus(
     })
     .submenu("Stash", move |menu, _, _| {
         menu.context(focus_handle.clone())
-            .action_disabled_when(!writable, "Stash All…", Box::new(StashAll))
-            .action_disabled_when(!writable, "Stash Tracked…", Box::new(StashTracked))
-            .action_disabled_when(!writable, "Stash Staged…", Box::new(StashStaged))
+            .action_disabled_when(!writable, "Stash All", Box::new(StashAll))
+            .action_disabled_when(!writable, "Stash Tracked", Box::new(StashTracked))
+            .action_disabled_when(!writable, "Stash Staged", Box::new(StashStaged))
             .separator()
             .action_disabled_when(
                 !writable || !has_stash,

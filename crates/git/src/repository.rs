@@ -480,6 +480,15 @@ impl UpstreamTracking {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PullStrategy {
+    #[default]
+    Unspecified,
+    Merge,
+    Rebase,
+    FastForwardOnly,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteCommandOutput {
     pub stdout: String,
@@ -1066,6 +1075,12 @@ pub trait GitRepository: Send + Sync {
     fn get_push_remote(&self, branch: String) -> BoxFuture<'_, Result<Option<Remote>>>;
 
     fn get_branch_remote(&self, branch: String) -> BoxFuture<'_, Result<Option<Remote>>>;
+
+    fn pull_strategy(
+        &self,
+        branch: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<PullStrategy>>;
 
     fn get_all_remotes(&self) -> BoxFuture<'_, Result<Vec<Remote>>>;
 
@@ -3150,6 +3165,30 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn pull_strategy(
+        &self,
+        branch: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<PullStrategy>> {
+        let git_binary_path = self.system_git_binary_path.clone();
+        let working_directory = self.command_directory();
+        let git_directory = self.path();
+        let executor = self.executor.clone();
+        let is_trusted = self.is_trusted();
+        self.executor
+            .spawn(async move {
+                let git = GitBinary::new(
+                    git_binary_path.context("git not found on $PATH, can't read pull settings")?,
+                    working_directory,
+                    git_directory,
+                    executor,
+                    is_trusted,
+                );
+                git.pull_strategy(&branch, &env).await
+            })
+            .boxed()
+    }
+
     fn get_all_remotes(&self) -> BoxFuture<'_, Result<Vec<Remote>>> {
         let git = self.git_binary();
         self.executor
@@ -3935,6 +3974,91 @@ impl GitBinary {
             }
         );
         Ok(output.stdout)
+    }
+
+    async fn pull_strategy(
+        &self,
+        branch: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<PullStrategy> {
+        let output = self
+            .build_command(&[
+                "config",
+                "--includes",
+                "--null",
+                "--get-regexp",
+                r"^(branch\..*\.rebase|pull\.(rebase|ff)|merge\.ff)$",
+            ])
+            .envs(env.iter())
+            .output()
+            .await?;
+        if output.status.code() == Some(1) {
+            return Ok(PullStrategy::Unspecified);
+        }
+        let output = remote_command_output(output)?;
+        let mut settings = HashMap::<&str, Option<&str>>::default();
+        for entry in output.stdout.split_terminator('\0') {
+            let (key, value) = match entry.split_once('\n') {
+                Some((key, value)) => (key, Some(value)),
+                None => (entry, None),
+            };
+            settings.insert(key, value);
+        }
+
+        let pull_fast_forward = settings.get("pull.ff").copied();
+        if pull_fast_forward == Some(Some("only")) {
+            return Ok(PullStrategy::FastForwardOnly);
+        }
+        if let Some(Some(value)) = pull_fast_forward
+            && !matches!(value, "true" | "false" | "")
+            && self.boolean_config("pull.ff", env).await?.is_none()
+        {
+            return Ok(PullStrategy::Unspecified);
+        }
+
+        let branch_key = format!("branch.{branch}.rebase");
+        let rebase_key = if settings.contains_key(branch_key.as_str()) {
+            branch_key.as_str()
+        } else {
+            "pull.rebase"
+        };
+        let should_rebase = match settings.get(rebase_key).copied() {
+            Some(None | Some("true" | "merges" | "m" | "interactive" | "i")) => Some(true),
+            Some(Some("false" | "")) => Some(false),
+            Some(Some(_)) => self.boolean_config(rebase_key, env).await?,
+            None if pull_fast_forward.is_some() => Some(false),
+            None => None,
+        };
+        Ok(match should_rebase {
+            Some(true) => PullStrategy::Rebase,
+            Some(false)
+                if pull_fast_forward.is_none()
+                    && settings.get("merge.ff") == Some(&Some("only")) =>
+            {
+                PullStrategy::FastForwardOnly
+            }
+            Some(false) => PullStrategy::Merge,
+            None => PullStrategy::Unspecified,
+        })
+    }
+
+    async fn boolean_config(
+        &self,
+        key: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<Option<bool>> {
+        let output = self
+            .build_command(&["config", "--includes", "--type=bool", "--get", key])
+            .envs(env.iter())
+            .output()
+            .await?;
+        Ok(
+            match (output.status.success(), output.stdout.trim_ascii()) {
+                (true, b"true") => Some(true),
+                (true, b"false") => Some(false),
+                _ => None,
+            },
+        )
     }
 
     pub(crate) fn build_command<S>(&self, args: &[S]) -> util::command::Command
@@ -7558,6 +7682,92 @@ mod tests {
         assert_eq!(
             remote_urls.get("archive").map(String::as_str),
             Some("/tmp/remote [archive].git")
+        );
+    }
+
+    #[gpui::test]
+    async fn test_pull_strategy_uses_effective_git_configuration(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let temp_directory = tempfile::tempdir().expect("create a Git fixture directory");
+        let repository_path = temp_directory.path().join("repo");
+        std::fs::create_dir(&repository_path).expect("create the fixture worktree");
+        git_init_repo(&repository_path);
+
+        let repository = RealGitRepository::new(
+            &repository_path.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .expect("open the Git fixture");
+        let system_config = temp_directory.path().join("system.config");
+        let user_config = temp_directory.path().join("user.config");
+        std::fs::write(&system_config, "").expect("create the system config");
+        std::fs::write(&user_config, "").expect("create the user config");
+        let environment = Arc::new(HashMap::from_iter([
+            (
+                "GIT_CONFIG_SYSTEM".into(),
+                system_config.to_string_lossy().into_owned(),
+            ),
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                user_config.to_string_lossy().into_owned(),
+            ),
+        ]));
+        let read_strategy =
+            |branch: &str| repository.pull_strategy(branch.to_owned(), environment.clone());
+        assert_eq!(
+            read_strategy("topic.release")
+                .await
+                .expect("read unset strategy"),
+            PullStrategy::Unspecified
+        );
+
+        std::fs::write(&system_config, "[pull]\n  rebase = false\n")
+            .expect("configure system merge");
+        assert_eq!(
+            read_strategy("topic.release")
+                .await
+                .expect("read system strategy"),
+            PullStrategy::Merge
+        );
+
+        std::fs::write(&user_config, "[pull]\n  rebase = on\n").expect("configure user rebase");
+        assert_eq!(
+            read_strategy("topic.release")
+                .await
+                .expect("read user strategy"),
+            PullStrategy::Rebase
+        );
+
+        let git = repository.git_binary();
+        git.run(&["config", "pull.rebase", "false"])
+            .await
+            .expect("configure repository merge");
+        git.run(&["config", "branch.topic.release.rebase", "merges"])
+            .await
+            .expect("configure branch rebase");
+        assert_eq!(
+            read_strategy("topic.release")
+                .await
+                .expect("read branch strategy"),
+            PullStrategy::Rebase
+        );
+        assert_eq!(
+            read_strategy("topicXrelease")
+                .await
+                .expect("read repository strategy"),
+            PullStrategy::Merge
+        );
+
+        git.run(&["config", "pull.ff", "only"])
+            .await
+            .expect("configure fast-forward only");
+        assert_eq!(
+            read_strategy("topic.release")
+                .await
+                .expect("read fast-forward strategy"),
+            PullStrategy::FastForwardOnly
         );
     }
 

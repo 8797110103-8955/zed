@@ -21,7 +21,7 @@ use notifications::status_toast::StatusToast;
 use project::git_store::Repository;
 use project_diff::ProjectDiff;
 use time::OffsetDateTime;
-use ui::{ButtonLike, ContextMenu, ElevationIndex, PopoverMenuHandle, TintColor, prelude::*};
+use ui::{ButtonLike, ElevationIndex, TintColor, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     ModalView, Workspace,
@@ -955,7 +955,7 @@ fn render_remote_button(
     branch: &Branch,
     keybinding_target: Option<FocusHandle>,
     in_progress_operation: Option<RemoteOperationKind>,
-    menu_handle: PopoverMenuHandle<ContextMenu>,
+    menu: AnyElement,
 ) -> Option<impl IntoElement> {
     let id = id.into();
     // Mirrors VS Code: a branch whose upstream exists on the remote is synced
@@ -970,7 +970,7 @@ fn render_remote_button(
             *ahead,
             *behind,
             in_progress_operation,
-            menu_handle,
+            menu,
         )),
         Some(Upstream {
             tracking: UpstreamTracking::Gone,
@@ -980,18 +980,15 @@ fn render_remote_button(
             keybinding_target,
             id,
             in_progress_operation,
-            menu_handle,
+            menu,
         )),
     }
 }
 
 mod remote_button {
     use crate::git_panel::RemoteOperationKind;
-    use gpui::{Action, Anchor, AnyView, ClickEvent, FocusHandle};
-    use ui::{
-        ButtonLike, CommonAnimationExt, ContextMenu, ElevationIndex, PopoverMenu,
-        PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
-    };
+    use gpui::{Action, AnyView, ClickEvent, FocusHandle};
+    use ui::{ButtonLike, CommonAnimationExt, ElevationIndex, SplitButton, Tooltip, prelude::*};
 
     pub fn render_sync_button(
         keybinding_target: Option<FocusHandle>,
@@ -999,7 +996,7 @@ mod remote_button {
         ahead: u32,
         behind: u32,
         in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
+        menu: AnyElement,
     ) -> SplitButton {
         split_button(
             id,
@@ -1007,9 +1004,8 @@ mod remote_button {
             ahead as usize,
             behind as usize,
             (ahead == 0 && behind == 0).then_some(IconName::ArrowCircle),
-            keybinding_target.clone(),
             in_progress_operation,
-            menu_handle,
+            menu,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Sync), cx);
             },
@@ -1029,7 +1025,7 @@ mod remote_button {
         keybinding_target: Option<FocusHandle>,
         id: SharedString,
         in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
+        menu: AnyElement,
     ) -> SplitButton {
         split_button(
             id,
@@ -1037,9 +1033,8 @@ mod remote_button {
             0,
             0,
             Some(IconName::CloudUpload),
-            keybinding_target.clone(),
             in_progress_operation,
-            menu_handle,
+            menu,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
@@ -1080,51 +1075,14 @@ mod remote_button {
         }
     }
 
-    fn render_git_action_menu(
-        id: impl Into<ElementId>,
-        keybinding_target: Option<FocusHandle>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
-    ) -> impl IntoElement {
-        let menu_open = menu_handle.is_deployed();
-
-        PopoverMenu::new(id.into())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "split-button-right",
-                menu_open,
-            ))
-            .with_handle(menu_handle)
-            .menu(move |window, cx| {
-                Some(ContextMenu::build(window, cx, |context_menu, _, _| {
-                    context_menu
-                        .when_some(keybinding_target.clone(), |el, keybinding_target| {
-                            el.context(keybinding_target)
-                        })
-                        .action("Fetch", git::Fetch.boxed_clone())
-                        .action("Fetch From", git::FetchFrom.boxed_clone())
-                        .action("Pull", git::Pull.boxed_clone())
-                        .action("Pull (Rebase)", git::PullRebase.boxed_clone())
-                        .action("Sync", git::Sync.boxed_clone())
-                        .separator()
-                        .action("Push", git::Push.boxed_clone())
-                        .action("Push To", git::PushTo.boxed_clone())
-                }))
-            })
-            .anchor(Anchor::TopRight)
-            .offset(gpui::Point {
-                x: px(0.),
-                y: px(2.),
-            })
-    }
-
     fn split_button(
         id: SharedString,
         left_label: impl Into<SharedString>,
         ahead_count: usize,
         behind_count: usize,
         left_icon: Option<IconName>,
-        keybinding_target: Option<FocusHandle>,
         in_progress_operation: Option<RemoteOperationKind>,
-        menu_handle: PopoverMenuHandle<ContextMenu>,
+        menu: AnyElement,
         left_on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     ) -> SplitButton {
@@ -1191,14 +1149,7 @@ mod remote_button {
                 }
             });
 
-        let right = render_git_action_menu(
-            format!("split-button-right-{}", id),
-            keybinding_target,
-            menu_handle,
-        )
-        .into_any_element();
-
-        SplitButton::new(left, right)
+        SplitButton::new(left, menu)
     }
 }
 

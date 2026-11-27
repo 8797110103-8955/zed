@@ -5,8 +5,8 @@ pub(crate) use self::repository_actions::{
     RemoteOperationKind, create_branch, prompt_create_branch,
 };
 use self::repository_actions::{
-    RepositoryMenuAction, fetch_menu_entries, repository_action_submenus, repository_branch_status,
-    repository_input, spawn_remote_operation,
+    RepositoryMenuAction, fetch_menu_entries, pull_push_menu_entries, repository_action_entries,
+    repository_branch_status, repository_input, spawn_remote_operation,
 };
 use git_ui_core::askpass_modal::AskPassModal;
 pub(crate) use git_ui_core::notifications::{open_output, show_error_toast};
@@ -7896,9 +7896,8 @@ impl GitPanel {
                         Some(ContextMenu::build(window, cx, |menu, _, cx| {
                             menu.context(focus_handle.clone())
                                 .map(|menu| fetch_menu_entries(menu, Some(&repository), cx))
-                                .separator()
                                 .map(|menu| {
-                                    repository_action_submenus(
+                                    repository_action_entries(
                                         menu,
                                         panel.clone(),
                                         repository.clone(),
@@ -8260,18 +8259,60 @@ impl GitPanel {
                 .gap_1()
                 .flex_shrink_0()
                 .when_some(branch, |this, branch| {
-                    let focus_handle = Some(self.focus_handle(cx));
+                    let id = "remote-button";
+                    let focus_handle = self.focus_handle(cx);
+                    let menu = self.render_remote_action_menu(
+                        format!("split-button-right-{id}"),
+                        focus_handle.clone(),
+                        cx,
+                    );
 
                     this.children(render_remote_button(
-                        "remote-button",
+                        id,
                         &branch,
-                        focus_handle,
+                        Some(focus_handle),
                         self.pending_remote_operation,
-                        self.remote_action_menu_handle.clone(),
+                        menu.into_any_element(),
                     ))
                 })
                 .into_any_element(),
         )
+    }
+
+    fn render_remote_action_menu(
+        &self,
+        id: impl Into<ElementId>,
+        focus_handle: FocusHandle,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let panel = cx.weak_entity();
+        let menu_open = self.remote_action_menu_handle.is_deployed();
+        PopoverMenu::new(id.into())
+            .trigger(crate::render_split_button_chevron_trigger(
+                "split-button-right",
+                menu_open,
+            ))
+            .with_handle(self.remote_action_menu_handle.clone())
+            .menu(move |window, cx| {
+                let panel_entity = panel.upgrade()?;
+                let git_panel = panel_entity.read(cx);
+                let repository = git_panel.active_repository.clone()?;
+                let disabled =
+                    !git_panel.remote_actions_enabled(cx) || repository.read(cx).branch.is_none();
+                Some(ContextMenu::build(window, cx, |menu, _, cx| {
+                    let menu = fetch_menu_entries(
+                        menu.context(focus_handle.clone()),
+                        Some(&repository),
+                        cx,
+                    );
+                    pull_push_menu_entries(menu, &panel, &repository, disabled, cx)
+                }))
+            })
+            .anchor(Anchor::TopRight)
+            .offset(gpui::Point {
+                x: px(0.),
+                y: px(2.),
+            })
     }
 
     pub fn render_footer(
@@ -8504,9 +8545,8 @@ impl GitPanel {
                             .separator()
                             .action("Switch Repository", Box::new(zed_actions::git::SelectRepo))
                             .map(|menu| fetch_menu_entries(menu, active_repository.as_ref(), cx))
-                            .separator()
                             .when_some(active_repository.clone(), |menu, repository| {
-                                repository_action_submenus(
+                                repository_action_entries(
                                     menu,
                                     panel.clone(),
                                     repository,

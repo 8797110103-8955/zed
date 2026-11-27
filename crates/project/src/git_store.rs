@@ -41,9 +41,9 @@ use git::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitFileStatus, CommitOptions,
         CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions, FetchResult,
         FileHistoryChangedFileSets, GitCommitTemplate, GitRepository, InitialGraphCommitData,
-        LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, ResetMode,
-        SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
-        is_binary_content,
+        LogOrder, LogSource, PullStrategy, PushOptions, Remote, RemoteCommandOutput, RepoPath,
+        ResetMode, SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree,
+        delete_branch_flag, is_binary_content,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -870,10 +870,17 @@ pub struct Repository {
     askpass_delegates: RemoteAskPassDelegates,
     latest_askpass_id: u64,
     repository_state: Shared<Task<Result<RepositoryState, String>>>,
+    pull_strategy_cache: Option<CachedPullStrategy>,
     initial_graph_data: HashMap<(LogSource, LogOrder), InitialGitGraphData>,
     commit_data_handler: CommitDataHandlerState,
     commit_data: HashMap<Oid, CommitDataState>,
     auto_fetch: AutoFetchState,
+}
+
+struct CachedPullStrategy {
+    branch: SharedString,
+    requested_at: Instant,
+    task: Shared<Task<PullStrategy>>,
 }
 
 struct AutoFetchState {
@@ -6661,6 +6668,7 @@ impl Repository {
     ) {
         let work_directory_abs_path = self.snapshot.work_directory_abs_path.clone();
         let dot_git_abs_path = self.snapshot.dot_git_abs_path.clone();
+        self.pull_strategy_cache = None;
 
         let state = cx
             .spawn(async move |_, cx| {
@@ -6757,6 +6765,7 @@ impl Repository {
             unshallow_state: UnshallowState::default(),
             pending_ops: Default::default(),
             repository_state: Task::ready(Err("not yet initialized".into())).shared(),
+            pull_strategy_cache: None,
             _worker_task: Task::ready(()),
             commit_message_buffer: None,
             askpass_delegates: Default::default(),
@@ -6815,6 +6824,7 @@ impl Repository {
             job_sender,
             _worker_task: worker_task,
             repository_state,
+            pull_strategy_cache: None,
             askpass_delegates: Default::default(),
             latest_askpass_id: 0,
             active_jobs: Default::default(),
@@ -9370,6 +9380,52 @@ impl Repository {
                 }
             },
         )
+    }
+
+    pub fn pull_strategy(&mut self, cx: &App) -> Option<Shared<Task<PullStrategy>>> {
+        if !self.git_store()?.read(cx).is_local() {
+            return None;
+        }
+        let branch = self.branch.as_ref()?;
+        let requested_at = cx.background_executor().now();
+        if let Some(cache) = &self.pull_strategy_cache
+            && cache.branch == branch.ref_name
+            && (cache.task.peek().is_none()
+                || requested_at.duration_since(cache.requested_at) < Duration::from_secs(1))
+        {
+            return Some(cache.task.clone());
+        }
+
+        let ref_name = branch.ref_name.clone();
+        let branch_name = branch.name().to_owned();
+        let repository_state = self.repository_state.clone();
+        // Configuration reads can run concurrently with Git jobs without delaying them.
+        let task = cx
+            .background_spawn(async move {
+                match repository_state.await {
+                    Ok(RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    })) => backend
+                        .pull_strategy(branch_name, environment)
+                        .await
+                        .log_err()
+                        .unwrap_or_default(),
+                    Ok(RepositoryState::Remote(_)) => PullStrategy::Unspecified,
+                    Err(error) => {
+                        log::debug!("Could not read pull strategy: {error}");
+                        PullStrategy::Unspecified
+                    }
+                }
+            })
+            .shared();
+        self.pull_strategy_cache = Some(CachedPullStrategy {
+            branch: ref_name,
+            requested_at,
+            task: task.clone(),
+        });
+        Some(task)
     }
 
     pub fn get_remotes(
@@ -11959,6 +12015,63 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
+    }
+
+    #[gpui::test]
+    async fn test_pull_strategy_cache_is_shared_and_refreshes(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project_path = Path::new(util::path!("/project"));
+        fs.insert_tree(project_path, json!({".git": {}, "README.md": "project"}))
+            .await;
+        let project = Project::test(fs, [project_path], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("find the fixture repository")
+        });
+        let (first, second) = repository.update(cx, |repository, cx| {
+            let snapshot = &mut repository.snapshot;
+            snapshot.branch = Some(Branch {
+                ref_name: "refs/heads/first".into(),
+                is_head: true,
+                upstream: None,
+                most_recent_commit: None,
+            });
+            let first = repository.pull_strategy(cx).expect("read local strategy");
+            let second = repository
+                .pull_strategy(cx)
+                .expect("share the in-flight read");
+            (first, second)
+        });
+        assert_eq!(first.await, PullStrategy::Unspecified);
+        assert_eq!(second.peek(), Some(&PullStrategy::Unspecified));
+
+        let branch_change = repository.update(cx, |repository, cx| {
+            repository
+                .snapshot
+                .branch
+                .as_mut()
+                .expect("set fixture branch")
+                .ref_name = "refs/heads/second".into();
+            repository
+                .pull_strategy(cx)
+                .expect("refresh for the new branch")
+        });
+        assert_eq!(branch_change.peek(), None);
+        assert_eq!(branch_change.await, PullStrategy::Unspecified);
+
+        cx.executor().advance_clock(Duration::from_secs(2));
+        let after_expiry = repository.update(cx, |repository, cx| {
+            repository
+                .pull_strategy(cx)
+                .expect("refresh expired strategy")
+        });
+        assert_eq!(after_expiry.peek(), None);
+        assert_eq!(after_expiry.await, PullStrategy::Unspecified);
     }
 
     #[gpui::test]

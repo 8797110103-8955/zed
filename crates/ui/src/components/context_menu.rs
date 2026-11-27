@@ -787,6 +787,29 @@ impl ContextMenu {
         self.action_checked(label, action, false)
     }
 
+    pub fn set_action_label(
+        &mut self,
+        action: &dyn Action,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        for item in &mut self.items {
+            if let ContextMenuItem::Entry(entry) = item
+                && entry
+                    .action
+                    .as_ref()
+                    .is_some_and(|current| current.partial_eq(action))
+            {
+                let label = label.into();
+                if entry.label != label {
+                    entry.label = label;
+                    cx.notify();
+                }
+                break;
+            }
+        }
+    }
+
     pub fn action_checked(
         self,
         label: impl Into<SharedString>,
