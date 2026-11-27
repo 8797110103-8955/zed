@@ -20,7 +20,7 @@ use project::{Fs, Project};
 
 use settings::{Settings, TerminalDockPosition};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
-use terminal::{Terminal, terminal_settings::TerminalSettings};
+use terminal::{TaskStatus, Terminal, terminal_settings::TerminalSettings};
 use ui::{
     ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, PopoverMenu,
     SplitButton, Toggleable, Tooltip, prelude::*,
@@ -135,14 +135,15 @@ impl TerminalPanel {
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
                     .is_some_and(|view| view.read(cx).rename_editor_is_focused(window, cx));
-                if !pane.has_focus(window, cx)
+                let show_buttons_on_hover = !pane.has_focus(window, cx)
                     && !pane.context_menu_focused(window, cx)
-                    && !has_focused_rename_editor
-                {
-                    return (None, None);
-                }
+                    && !has_focused_rename_editor;
                 let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
+                    .id("terminal-tab-bar-buttons")
+                    .when(show_buttons_on_hover, |buttons| {
+                        buttons.visible_on_hover("tab_bar")
+                    })
                     .gap(DynamicSpacing::Base02.rems(cx))
                     .child(
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
@@ -1809,6 +1810,31 @@ impl Panel for TerminalPanel {
             Some(IconName::TerminalAlt)
         } else {
             None
+        }
+    }
+
+    fn inactive_icon_color(&self, _window: &Window, cx: &App) -> Color {
+        let workspace = self.workspace.upgrade();
+        let center_panes = workspace
+            .iter()
+            .flat_map(|workspace| workspace.read(cx).panes());
+        let has_running_task = self
+            .center
+            .panes()
+            .into_iter()
+            .chain(center_panes)
+            .flat_map(|pane| pane.read(cx).items_of_type::<TerminalView>())
+            .any(|view| {
+                view.read(cx)
+                    .terminal()
+                    .read(cx)
+                    .task()
+                    .is_some_and(|task| task.status == TaskStatus::Running)
+            });
+        if has_running_task {
+            Color::Hint
+        } else {
+            Color::Default
         }
     }
 

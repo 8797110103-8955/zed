@@ -69,6 +69,9 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     ) {
     }
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
+    fn inactive_icon_color(&self, _window: &Window, _cx: &App) -> Color {
+        Color::Default
+    }
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
     fn toggle_action(&self) -> Box<dyn Action>;
     fn icon_label(&self, _window: &Window, _: &App) -> Option<String> {
@@ -120,6 +123,7 @@ pub trait PanelHandle: Send + Sync {
     fn has_flexible_size(&self, window: &Window, cx: &App) -> bool;
     fn set_flexible_size(&self, flexible: bool, window: &mut Window, cx: &mut App);
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
+    fn inactive_icon_color(&self, window: &Window, cx: &App) -> Color;
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
     fn toggle_action(&self, window: &Window, cx: &App) -> Box<dyn Action>;
     fn icon_label(&self, window: &Window, cx: &App) -> Option<String>;
@@ -225,6 +229,10 @@ where
 
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName> {
         self.read(cx).icon(window, cx)
+    }
+
+    fn inactive_icon_color(&self, window: &Window, cx: &App) -> Color {
+        self.read(cx).inactive_icon_color(window, cx)
     }
 
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str> {
@@ -1414,6 +1422,11 @@ impl Render for PanelButtons {
                 let workspace_for_menu = workspace.clone();
 
                 let is_active_button = Some(i) == active_index && is_open;
+                let icon_color = if is_active_button {
+                    Color::Default
+                } else {
+                    entry.panel.inactive_icon_color(window, cx)
+                };
                 let (action, tooltip) = if is_active_button {
                     let action = dock.toggle_action();
 
@@ -1527,6 +1540,7 @@ impl Render for PanelButtons {
                             // tooltip when panel state changes (e.g., via keyboard shortcut)
                             let button = IconButton::new((name, is_active_button as u64), icon)
                                 .icon_size(IconSize::Small)
+                                .icon_color(icon_color)
                                 .toggle_state(is_active_button)
                                 .tab_index(0isize)
                                 .aria_label(icon_tooltip)

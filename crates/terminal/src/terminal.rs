@@ -3285,6 +3285,7 @@ impl Terminal {
                 }
             }
         }
+        cx.notify();
     }
 
     pub fn vi_mode_enabled(&self) -> bool {
