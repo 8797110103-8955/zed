@@ -48,7 +48,7 @@ fn setup_multi_workspace<'a>(
 }
 
 #[gpui::test]
-async fn test_background_workspace_pauses_language_servers(cx: &mut TestAppContext) {
+async fn test_workspace_switch_preserves_running_language_server(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(path!("/rust"), json!({ "main.rs": "fn main() {}" }))
@@ -67,7 +67,7 @@ async fn test_background_workspace_pauses_language_servers(cx: &mut TestAppConte
         multi_workspace.add(workspace.clone(), window, cx);
         workspace
     });
-    let (buffer, _registration) = background_project
+    let (_buffer, _registration) = background_project
         .update(cx, |project, cx| {
             project.open_local_buffer_with_lsp(path!("/rust/main.rs"), cx)
         })
@@ -75,55 +75,30 @@ async fn test_background_workspace_pauses_language_servers(cx: &mut TestAppConte
         .expect("open the restored Rust buffer");
     cx.run_until_parked();
 
-    assert!(fake_servers.try_recv().is_err());
-    lsp_store.read_with(cx, |store, _| {
-        assert_eq!(store.language_server_statuses().count(), 0)
-    });
-
-    let foreground_workspace =
-        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
-    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
-        multi_workspace.activate(background_workspace.clone(), None, window, cx);
-    });
-    cx.run_until_parked();
-
     let server = fake_servers
         .try_recv()
-        .expect("start the Rust server on activation");
-    lsp_store.read_with(cx, |store, _| {
-        assert_eq!(store.language_server_statuses().count(), 1)
-    });
+        .expect("the background workspace starts its Rust server");
+    let server_id = server.server.server_id();
+    let foreground_workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
 
-    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
-        multi_workspace.activate(foreground_workspace, None, window, cx);
-        assert!(multi_workspace.is_workspace_retained(&background_workspace));
-    });
-    cx.run_until_parked();
+    for workspace in [
+        background_workspace.clone(),
+        foreground_workspace,
+        background_workspace,
+    ] {
+        multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            multi_workspace.activate(workspace, None, window, cx);
+        });
+        cx.run_until_parked();
 
-    lsp_store.read_with(cx, |store, _| {
-        assert_eq!(store.language_server_statuses().count(), 0)
-    });
-    assert!(fake_servers.try_recv().is_err());
-    assert_eq!(
-        buffer.read_with(cx, |buffer, _| buffer.text()),
-        "fn main() {}"
-    );
-
-    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
-        multi_workspace.activate(background_workspace, None, window, cx);
-    });
-    cx.run_until_parked();
-
-    let restarted_server = fake_servers
-        .try_recv()
-        .expect("restart the Rust server for the retained buffer");
-    assert_ne!(
-        server.server.server_id(),
-        restarted_server.server.server_id()
-    );
-    lsp_store.read_with(cx, |store, _| {
-        assert_eq!(store.language_server_statuses().count(), 1)
-    });
+        lsp_store.read_with(cx, |store, _| {
+            let mut servers = store.language_server_statuses();
+            assert_eq!(servers.next().map(|(id, _)| id), Some(server_id));
+            assert!(servers.next().is_none());
+        });
+        assert!(fake_servers.try_recv().is_err());
+    }
 }
 
 #[gpui::test]

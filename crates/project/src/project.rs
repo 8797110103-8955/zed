@@ -245,6 +245,7 @@ pub struct Project {
     snippets: Entity<SnippetProvider>,
     environment: Entity<ProjectEnvironment>,
     settings_observer: Entity<SettingsObserver>,
+    language_server_settings_write: Arc<futures::lock::Mutex<()>>,
     toolchain_store: Option<Entity<ToolchainStore>>,
     agent_location: Option<AgentLocation>,
     downloading_files: Arc<Mutex<HashMap<(WorktreeId, String), DownloadingFile>>>,
@@ -1447,6 +1448,7 @@ impl Project {
                 task_store,
                 user_store,
                 settings_observer,
+                language_server_settings_write: Default::default(),
                 fs,
                 remote_client: None,
                 bookmark_store,
@@ -1695,6 +1697,7 @@ impl Project {
                 task_store,
                 user_store,
                 settings_observer,
+                language_server_settings_write: Default::default(),
                 fs,
                 remote_client: Some(remote.clone()),
                 buffers_needing_diff: Default::default(),
@@ -1977,6 +1980,7 @@ impl Project {
                 fs,
                 remote_client: None,
                 settings_observer: settings_observer.clone(),
+                language_server_settings_write: Default::default(),
                 client_subscriptions: Default::default(),
                 _subscriptions: vec![cx.on_release(Self::release)],
                 collab_client: client.clone(),
@@ -4687,11 +4691,13 @@ impl Project {
             .filter(|worktree| !worktree.read(cx).is_single_file())
             .map(|worktree| worktree.read(cx).id())
             .collect::<Vec<_>>();
+        let language_server_settings_write = self.language_server_settings_write.clone();
         cx.spawn(async move |project, cx| {
             anyhow::ensure!(
                 !worktree_ids.is_empty(),
                 "Open a project folder to save language server settings"
             );
+            let _write_guard = language_server_settings_write.lock().await;
             for worktree_id in worktree_ids {
                 let path: Arc<RelPath> = paths::local_settings_file_relative_path().into();
                 let buffer = project

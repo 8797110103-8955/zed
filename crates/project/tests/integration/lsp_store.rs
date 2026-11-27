@@ -12,7 +12,7 @@ use gpui::{Entity, TestAppContext, UpdateGlobal as _};
 use language::{
     Buffer, CodeLabel, DiagnosticSourceKind, FakeLspAdapter, HighlightId, LocalFile, rust_lang,
 };
-use lsp::{LanguageServerId, LanguageServerName, Uri};
+use lsp::{LanguageServerId, LanguageServerName, LanguageServerSelector, Uri};
 use parking_lot::Mutex;
 use project::{
     DiagnosticSummary, Event, Project,
@@ -20,13 +20,285 @@ use project::{
         log_store::{TestRpcLogHeaderState, TestRpcRequestTracker},
         *,
     },
+    project_settings::ProjectSettings,
 };
 use serde_json::json;
-use settings::{ScanSymlinksSetting, SettingsStore};
+use settings::{ScanSymlinksSetting, Settings, SettingsLocation, SettingsStore};
 use unindent::Unindent;
-use util::{path, rel_path::rel_path};
+use util::{
+    path,
+    rel_path::{RelPath, rel_path},
+};
 
 use crate::init_test;
+
+#[gpui::test]
+async fn test_project_lsp_enabled_preserves_other_servers(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{"lsp":{"oxfmt":{"enabled":false,"initialization_options":{"format":true}}}}"#,
+                    cx,
+                )
+                .result()
+                .expect("set user-level LSP settings");
+        });
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({ "main.rs": "fn main() {}", ".zed": { "settings.json": "{}" } }),
+    )
+    .await;
+    fs.insert_tree(
+        path!("/dependency"),
+        json!({ "lib.rs": "pub fn helper() {}" }),
+    )
+    .await;
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    let registry = project.read_with(cx, |project, _| project.languages().clone());
+    registry.add(rust_lang());
+    let [mut formatters, mut linters, mut analyzers] =
+        ["oxfmt", "oxlint", "typescript-ls"].map(|name| {
+            registry.register_fake_lsp(
+                "Rust",
+                FakeLspAdapter {
+                    name,
+                    ..Default::default()
+                },
+            )
+        });
+    let (buffer, _registration) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/main.rs"), cx)
+        })
+        .await
+        .expect("register the project buffer");
+    cx.run_until_parked();
+    let linter = linters.try_recv().expect("start the linter");
+    let _analyzer = analyzers.try_recv().expect("start the analyzer");
+    assert!(formatters.try_recv().is_err());
+
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let running_servers = |cx: &TestAppContext| {
+        lsp_store.read_with(cx, |store, _| {
+            store
+                .language_server_statuses()
+                .map(|(id, status)| (status.name.clone(), id))
+                .collect::<HashMap<_, _>>()
+        })
+    };
+    let surviving_servers = running_servers(cx);
+    let formatter_name = LanguageServerName::new_static("oxfmt");
+    project.read_with(cx, |project, cx| {
+        assert!(
+            project
+                .disabled_language_servers(cx)
+                .contains(&formatter_name)
+        );
+    });
+
+    project
+        .update(cx, |project, cx| {
+            project.set_language_server_enabled(formatter_name.clone(), true, cx)
+        })
+        .await
+        .expect("enable the formatter in the project");
+    cx.run_until_parked();
+    let formatter = formatters.try_recv().expect("start the formatter");
+    let mut enabled_servers = surviving_servers.clone();
+    enabled_servers.insert(formatter_name.clone(), formatter.server.server_id());
+    assert_eq!(running_servers(cx), enabled_servers);
+    project.read_with(cx, |project, cx| {
+        let worktree = project.visible_worktrees(cx).next().expect("project root");
+        let settings = ProjectSettings::get(
+            Some(SettingsLocation {
+                worktree_id: worktree.read(cx).id(),
+                path: RelPath::empty(),
+            }),
+            cx,
+        );
+        let formatter = settings
+            .lsp
+            .get(&formatter_name)
+            .expect("formatter settings");
+        assert_eq!(formatter.enabled, Some(true));
+        assert_eq!(
+            formatter.initialization_options,
+            Some(json!({"format": true}))
+        );
+    });
+
+    project
+        .update(cx, |project, cx| {
+            project.set_language_server_enabled(formatter_name.clone(), false, cx)
+        })
+        .await
+        .expect("disable the formatter in the project");
+    cx.run_until_parked();
+    assert_eq!(running_servers(cx), surviving_servers);
+    let saved = fs
+        .load(Path::new(path!("/dir/.zed/settings.json")))
+        .await
+        .expect("read the saved project settings");
+    let saved: serde_json::Value = serde_json::from_str(&saved).expect("parse project settings");
+    assert_eq!(saved.pointer("/lsp/oxfmt/enabled"), Some(&json!(false)));
+    assert!(saved.pointer("/lsp/oxlint").is_none());
+    assert!(saved.pointer("/lsp/typescript-ls").is_none());
+
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings("{}", cx)
+                .result()
+                .expect("remove the user-level override");
+        });
+    });
+    cx.run_until_parked();
+
+    let external_uri = Uri::from_file_path(path!("/dependency/lib.rs")).expect("external file URI");
+    let external_buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_via_lsp(external_uri, linter.server.server_id(), cx)
+        })
+        .await
+        .expect("open the dependency through the linter");
+    let _external_registration = project.update(cx, |project, cx| {
+        project.register_buffer_with_language_servers(&external_buffer, cx)
+    });
+    lsp_store.update(cx, |store, cx| {
+        store.restart_language_servers_for_buffers(
+            vec![buffer, external_buffer],
+            HashSet::from_iter([LanguageServerSelector::Name(formatter_name)]),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(running_servers(cx), surviving_servers);
+    assert!(formatters.try_recv().is_err());
+
+    let (stop_linter, stop_analyzer) = project.update(cx, |project, cx| {
+        (
+            project.set_language_server_enabled(
+                LanguageServerName::new_static("oxlint"),
+                false,
+                cx,
+            ),
+            project.set_language_server_enabled(
+                LanguageServerName::new_static("typescript-ls"),
+                false,
+                cx,
+            ),
+        )
+    });
+    let (linter_result, analyzer_result) = futures::join!(stop_linter, stop_analyzer);
+    linter_result.expect("save the linter setting");
+    analyzer_result.expect("save the analyzer setting");
+    cx.run_until_parked();
+    assert!(running_servers(cx).is_empty());
+    assert!(formatters.try_recv().is_err());
+    assert!(linters.try_recv().is_err());
+    assert!(analyzers.try_recv().is_err());
+    let saved = fs
+        .load(Path::new(path!("/dir/.zed/settings.json")))
+        .await
+        .expect("read the settings after both saves");
+    let saved: serde_json::Value = serde_json::from_str(&saved).expect("parse project settings");
+    assert_eq!(saved.pointer("/lsp/oxlint/enabled"), Some(&json!(false)));
+    assert_eq!(
+        saved.pointer("/lsp/typescript-ls/enabled"),
+        Some(&json!(false))
+    );
+
+    fs.atomic_write(
+        PathBuf::from(path!("/dir/.zed/settings.json")),
+        json!({"lsp":{
+            "oxfmt":{"enabled":true},
+            "oxlint":{"enabled":false},
+            "typescript-ls":{"enabled":false}
+        }})
+        .to_string(),
+    )
+    .await
+    .expect("edit the project settings directly");
+    cx.run_until_parked();
+    let formatter = formatters.try_recv().expect("start only the formatter");
+    assert_eq!(
+        running_servers(cx),
+        HashMap::from_iter([(
+            LanguageServerName::new_static("oxfmt"),
+            formatter.server.server_id()
+        )])
+    );
+}
+
+#[gpui::test]
+async fn test_project_lsp_settings_failure_preserves_server_in_failed_worktree(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let roots = [path!("/first"), path!("/second")];
+    for (root, settings) in roots.into_iter().zip(["{}", "invalid settings"]) {
+        fs.insert_tree(
+            root,
+            json!({ "main.rs": "fn main() {}", ".zed": { "settings.json": settings } }),
+        )
+        .await;
+    }
+    let project = Project::test(fs.clone(), roots.map(Path::new), cx).await;
+    let registry = project.read_with(cx, |project, _| project.languages().clone());
+    registry.add(rust_lang());
+    let mut servers = registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+    let (first_buffer, _first_registration) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/first/main.rs"), cx)
+        })
+        .await
+        .expect("register the first project buffer");
+    let (_second_buffer, _second_registration) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/second/main.rs"), cx)
+        })
+        .await
+        .expect("register the second project buffer");
+    cx.run_until_parked();
+    let first_server = servers.try_recv().expect("start the first server");
+    let _second_server = servers.try_recv().expect("start the second server");
+    let first_worktree = first_buffer.read_with(cx, |buffer, cx| {
+        buffer.file().expect("first project file").worktree_id(cx)
+    });
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let preserved_server = lsp_store.read_with(cx, |store, _| {
+        store
+            .language_server_statuses()
+            .find(|(_, status)| status.worktree != Some(first_worktree))
+            .map(|(id, _)| id)
+            .expect("get the server in the second worktree")
+    });
+    let server_name = first_server.server.name();
+
+    let result = project
+        .update(cx, |project, cx| {
+            project.set_language_server_enabled(server_name, false, cx)
+        })
+        .await;
+    assert!(result.is_err());
+    cx.run_until_parked();
+    lsp_store.read_with(cx, |store, _| {
+        let mut servers = store.language_server_statuses();
+        assert_eq!(servers.next().map(|(id, _)| id), Some(preserved_server));
+        assert!(servers.next().is_none());
+    });
+    assert_eq!(
+        fs.load(Path::new(path!("/second/.zed/settings.json")))
+            .await
+            .expect("read the failed settings file"),
+        "invalid settings"
+    );
+}
 
 #[gpui::test]
 async fn test_diagnostic_batches_skip_paths_without_worktrees(cx: &mut TestAppContext) {

@@ -435,7 +435,9 @@ impl LanguageServerState {
             let server_message = message.clone();
 
             let submenu_server_name = server_info.name.clone();
-            let can_stop = !disabled_servers.contains(&server_info.name);
+            let can_stop = server_info.binary_status.as_ref().is_none_or(|status| {
+                matches!(status.status, BinaryStatus::None | BinaryStatus::Starting)
+            });
 
             menu = menu.submenu_with_colored_icon(
                 server_info.name.display_name(),
@@ -780,12 +782,6 @@ impl LanguageServers {
         name: LanguageServerName,
     ) {
         let binary_status_message = message.map(SharedString::new);
-        if matches!(
-            binary_status,
-            BinaryStatus::Stopped | BinaryStatus::Failed { .. }
-        ) {
-            self.health_statuses.retain(|_, server| server.name != name);
-        }
         self.binary_statuses.insert(
             name,
             LanguageServerBinaryStatus {
@@ -1005,9 +1001,6 @@ impl LspButton {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.lsp_menu.is_none() {
-            return;
-        };
         let mut updated = false;
 
         // TODO `LspStore` is global and reports status from all language servers, even from the other windows.
@@ -1110,8 +1103,8 @@ impl LspButton {
             _ => {}
         };
 
-        if updated {
-            self.refresh_lsp_menu(false, window, cx);
+        if updated && ProjectSettings::get_global(cx).global_lsp_settings.button {
+            self.refresh_lsp_menu(true, window, cx);
         }
     }
 
@@ -1164,10 +1157,12 @@ impl LspButton {
                     }
                 }
             }
+            let mut running_servers = HashMap::<LanguageServerId, LanguageServerName>::default();
             state
                 .lsp_store
-                .update(cx, |lsp_store, cx| {
+                .read_with(cx, |lsp_store, cx| {
                     for (server_id, status) in lsp_store.language_server_statuses() {
+                        running_servers.insert(server_id, status.name.clone());
                         if let Some(worktree) = status.worktree.and_then(|worktree_id| {
                             lsp_store
                                 .worktree_store()
@@ -1186,6 +1181,10 @@ impl LspButton {
 
             let mut servers_per_worktree = BTreeMap::<SharedString, Vec<ServerData>>::new();
             let mut servers_with_health_checks = HashSet::default();
+            let running_status = LanguageServerBinaryStatus {
+                status: BinaryStatus::None,
+                message: None,
+            };
 
             for (server_id, health) in &state.language_servers.health_statuses {
                 let worktree = server_ids_to_worktrees.get(server_id).or_else(|| {
@@ -1200,7 +1199,11 @@ impl LspButton {
                 let worktree_name =
                     worktree.map(|worktree| SharedString::new(worktree.read(cx).root_name_str()));
 
-                let binary_status = state.language_servers.binary_statuses.get(&health.name);
+                let binary_status = if running_servers.contains_key(server_id) {
+                    None
+                } else {
+                    state.language_servers.binary_statuses.get(&health.name)
+                };
                 let server_data = ServerData::WithHealthCheck {
                     server_id: *server_id,
                     health,
@@ -1214,13 +1217,40 @@ impl LspButton {
                 }
             }
 
-            let mut can_stop_all = !state.language_servers.health_statuses.is_empty();
-            let mut can_restart_all = state.language_servers.health_statuses.is_empty();
+            for (server_id, name) in &running_servers {
+                if state
+                    .language_servers
+                    .health_statuses
+                    .contains_key(server_id)
+                {
+                    continue;
+                }
+                if let Some(worktree) = server_ids_to_worktrees.get(server_id) {
+                    let worktree_name = SharedString::new(worktree.read(cx).root_name_str());
+                    servers_per_worktree.entry(worktree_name).or_default().push(
+                        ServerData::WithBinaryStatus {
+                            server_id: *server_id,
+                            server_name: name,
+                            binary_status: &running_status,
+                        },
+                    );
+                }
+            }
+
+            let running_names = running_servers.values().collect::<HashSet<_>>();
+            let has_running_servers =
+                !running_servers.is_empty() || !state.language_servers.health_statuses.is_empty();
+            let mut can_stop_all = has_running_servers;
+            let mut can_restart_all = !has_running_servers;
+            let disabled_servers = state.disabled_language_servers(cx);
+            let mut has_restartable_stopped_server = false;
             for (server_name, binary_status) in state
                 .language_servers
                 .binary_statuses
                 .iter()
-                .filter(|(name, _)| !servers_with_health_checks.contains(name))
+                .filter(|(name, _)| {
+                    !running_names.contains(name) && !servers_with_health_checks.contains(name)
+                })
             {
                 match binary_status.status {
                     BinaryStatus::None => {
@@ -1243,7 +1273,9 @@ impl LspButton {
                         can_restart_all = false;
                         can_stop_all = false;
                     }
-                    BinaryStatus::Stopped => {}
+                    BinaryStatus::Stopped => {
+                        has_restartable_stopped_server |= !disabled_servers.contains(server_name);
+                    }
                     BinaryStatus::Failed { .. } => {}
                 }
 
@@ -1275,13 +1307,13 @@ impl LspButton {
                 });
                 new_lsp_items.extend(worktree_servers.into_iter().map(ServerData::into_lsp_item));
             }
-            if !new_lsp_items.is_empty() {
-                if can_stop_all {
-                    new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: true });
-                    new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: false });
-                } else if can_restart_all {
-                    new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: true });
-                }
+            if can_stop_all && !new_lsp_items.is_empty() {
+                new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: true });
+                new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: false });
+            } else if can_restart_all
+                && (!new_lsp_items.is_empty() || has_restartable_stopped_server)
+            {
+                new_lsp_items.push(LspMenuItem::ToggleServersButton { restart: true });
             }
 
             state.items = new_lsp_items;
@@ -1630,6 +1662,24 @@ mod tests {
                 .contains_key(&server_name("rust-analyzer")),
             "binary_statuses is name-keyed and shared across restart cycles",
         );
+    }
+
+    #[test]
+    fn stopping_one_instance_keeps_health_for_other_instances_with_the_same_name() {
+        let name = server_name("oxfmt");
+        let mut state = LanguageServers::default();
+        state
+            .health_statuses
+            .insert(server_id(1), health_status("oxfmt"));
+        state
+            .health_statuses
+            .insert(server_id(2), health_status("oxfmt"));
+
+        state.update_binary_status(BinaryStatus::Stopped, None, name);
+        state.remove_server(server_id(1));
+
+        assert!(!state.health_statuses.contains_key(&server_id(1)));
+        assert!(state.health_statuses.contains_key(&server_id(2)));
     }
 
     /// Simulates the full restart event sequence: remove old id, register

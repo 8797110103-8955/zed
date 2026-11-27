@@ -23,8 +23,8 @@ use std::sync::OnceLock;
 use util::rel_path::RelPath;
 
 use crate::{
-    LanguageServerId, ProjectPath, project_settings::LspSettings,
-    toolchain_store::LocalToolchainStore,
+    LanguageServerId, ProjectPath, lsp_store::language_server_settings_for,
+    project_settings::LspSettings, toolchain_store::LocalToolchainStore,
 };
 
 use super::ManifestTree;
@@ -242,6 +242,41 @@ impl LanguageServerTree {
         })
     }
 
+    pub(crate) fn is_server_disabled(
+        &self,
+        location: SettingsLocation,
+        name: &LanguageServerName,
+        cx: &App,
+    ) -> bool {
+        if language_server_settings_for(location, name, cx)
+            .is_some_and(|settings| settings.enabled == Some(false))
+        {
+            return true;
+        }
+        let worktree_store = self.manifest_tree.read(cx).worktree_store.read(cx);
+        if worktree_store
+            .worktree_for_id(location.worktree_id, cx)
+            .is_none_or(|worktree| worktree.read(cx).is_visible())
+        {
+            return false;
+        }
+
+        // A dependency worktree should not launch a server disabled in every project root.
+        let mut visible_worktrees = worktree_store.visible_worktrees(cx).peekable();
+        visible_worktrees.peek().is_some()
+            && visible_worktrees.all(|worktree| {
+                language_server_settings_for(
+                    SettingsLocation {
+                        worktree_id: worktree.read(cx).id(),
+                        path: RelPath::empty(),
+                    },
+                    name,
+                    cx,
+                )
+                .is_some_and(|settings| settings.enabled == Some(false))
+            })
+    }
+
     fn adapters_for_language(
         &self,
         manifest_location: &ProjectPath,
@@ -271,6 +306,7 @@ impl LanguageServerTree {
             settings.customized_language_servers(&available_language_servers);
         let adapters_with_settings = desired_language_servers
             .into_iter()
+            .filter(|name| !self.is_server_disabled(settings_location, name, cx))
             .filter_map(|desired_adapter| {
                 let adapter = if let Some(adapter) = available_lsp_adapters
                     .iter()
@@ -286,16 +322,10 @@ impl LanguageServerTree {
                 } else {
                     None
                 }?;
-                let adapter_settings = crate::lsp_store::language_server_settings_for(
-                    settings_location,
-                    &adapter.name,
-                    cx,
-                )
-                .cloned()
-                .unwrap_or_default();
-                if adapter_settings.enabled == Some(false) {
-                    return None;
-                }
+                let adapter_settings =
+                    language_server_settings_for(settings_location, &adapter.name, cx)
+                        .cloned()
+                        .unwrap_or_default();
                 Some((adapter.name(), (adapter_settings, adapter)))
             })
             .collect::<IndexMap<_, _>>();
